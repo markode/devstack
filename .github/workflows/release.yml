@@ -22,12 +22,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # One macOS job → universal .dmg (arm64+x64). Avoids competing for two
+          # macos runners (aarch64 jobs were getting capacity-cancelled at ~15m).
           - platform: macos-latest
-            args: --target aarch64-apple-darwin
-            rust_target: aarch64-apple-darwin
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-            rust_target: x86_64-apple-darwin
+            args: --target universal-apple-darwin
+            rust_target: aarch64-apple-darwin,x86_64-apple-darwin
           - platform: windows-latest
             args: ""
             rust_target: ""
@@ -107,7 +106,7 @@ jobs:
           releaseBody: |
             DevStack desktop installers.
 
-            - macOS: `.dmg` (arm64 / x64)
+            - macOS: universal `.dmg` (arm64 + x64)
             - Windows: NSIS `.exe` / `.msi`
 
             Unsigned CI builds are expected when signing secrets are unset.
