@@ -1,9 +1,10 @@
 [package]
 name = "devstack"
-version = "0.1.0"
+version = "0.1.1"
 description = "DevStack — local PHP/Node development environment"
 authors = ["DevStack"]
 edition = "2021"
+default-run = "devstack"
 
 [lib]
 name = "devstack_lib"
