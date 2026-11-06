@@ -94,10 +94,36 @@ fn server_bin(root: &Path) -> Result<PathBuf> {
     })
 }
 
-fn client_bin(root: &Path) -> Result<PathBuf> {
+pub fn client_bin_for(root: &Path) -> Result<PathBuf> {
     find_bin(root, &["mariadb", "mysql", "mysql.exe", "mariadb.exe"]).ok_or_else(|| {
         DevStackError::Message(format!("mysql client not found under {}", root.display()))
     })
+}
+
+pub fn dump_bin_for(root: &Path) -> Result<PathBuf> {
+    find_bin(
+        root,
+        &[
+            "mariadb-dump",
+            "mysqldump",
+            "mysqldump.exe",
+            "mariadb-dump.exe",
+        ],
+    )
+    .ok_or_else(|| {
+        DevStackError::Message(format!(
+            "mysqldump not found under {}",
+            root.display()
+        ))
+    })
+}
+
+pub fn socket_path(paths: &Paths, engine: &str) -> PathBuf {
+    paths.databases.join(format!("{engine}.sock"))
+}
+
+fn client_bin(root: &Path) -> Result<PathBuf> {
+    client_bin_for(root)
 }
 
 fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> {
@@ -178,14 +204,35 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
     state.runtime.database_engine = Some(engine.into());
     state.active_database = Some(engine.into());
 
-    // Wait for socket/port
-    for _ in 0..50 {
-        if paths.databases.join(format!("{engine}.sock")).exists() {
-            break;
+    // Wait for socket + accept connections (InnoDB init can take >10s on cold start)
+    let sock = paths.databases.join(format!("{engine}.sock"));
+    let client = client_bin(&root).ok();
+    for _ in 0..150 {
+        if sock.exists() {
+            if let Some(cli) = &client {
+                let ok = Command::new(cli)
+                    .args([
+                        format!("--socket={}", sock.display()),
+                        "-uroot".into(),
+                        "-e".into(),
+                        "SELECT 1".into(),
+                    ])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if ok {
+                    return Ok(());
+                }
+            } else {
+                thread::sleep(Duration::from_millis(300));
+                return Ok(());
+            }
         }
         thread::sleep(Duration::from_millis(200));
     }
-    Ok(())
+    Err(DevStackError::Message(format!(
+        "{engine} started but never became ready (no socket/accept)"
+    )))
 }
 
 pub fn stop_database(paths: &Paths, state: &mut AppState) -> Result<()> {
@@ -212,10 +259,15 @@ pub fn ensure_database(
     let root = engine_install_dir(state, engine)?;
     let client = client_bin(&root)?;
     let sock = paths.databases.join(format!("{engine}.sock"));
+    // Always (re)set password — CREATE USER IF NOT EXISTS leaves stale passwords around.
     let sql = format!(
         "CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n\
          CREATE USER IF NOT EXISTS '{user}'@'localhost' IDENTIFIED BY '{pass}';\n\
+         CREATE USER IF NOT EXISTS '{user}'@'127.0.0.1' IDENTIFIED BY '{pass}';\n\
+         ALTER USER '{user}'@'localhost' IDENTIFIED BY '{pass}';\n\
+         ALTER USER '{user}'@'127.0.0.1' IDENTIFIED BY '{pass}';\n\
          GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{user}'@'localhost';\n\
+         GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{user}'@'127.0.0.1';\n\
          FLUSH PRIVILEGES;"
     );
     let status = Command::new(&client)
@@ -232,16 +284,23 @@ pub fn ensure_database(
         let sql2 = format!(
             "CREATE DATABASE IF NOT EXISTS `{db_name}`;\n\
              GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{user}'@'localhost' IDENTIFIED BY '{pass}';\n\
+             GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{user}'@'127.0.0.1' IDENTIFIED BY '{pass}';\n\
              FLUSH PRIVILEGES;"
         );
-        let _ = Command::new(&client)
+        let status2 = Command::new(&client)
             .args([
                 format!("--socket={}", sock.display()),
                 "-uroot".into(),
                 "-e".into(),
                 sql2,
             ])
-            .status();
+            .status()
+            .map_err(|e| DevStackError::Message(e.to_string()))?;
+        if !status2.success() {
+            return Err(DevStackError::Message(format!(
+                "failed to create database `{db_name}`"
+            )));
+        }
     }
     Ok(())
 }

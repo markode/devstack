@@ -76,7 +76,9 @@ export interface SiteRecord {
   databaseEngine?: string | null;
   databaseName?: string | null;
   databaseUser?: string | null;
+  databasePassword?: string | null;
   status?: string;
+  isTemplate?: boolean;
 }
 
 export interface SiteDetails {
@@ -90,6 +92,68 @@ export interface SiteDetails {
   databaseUser?: string | null;
   phpmyadminUrl?: string | null;
   hasWpConfig: boolean;
+}
+
+export interface JobProgress {
+  jobId: string;
+  phase: string;
+  message: string;
+  bytes: number;
+  total?: number | null;
+  percent?: number | null;
+}
+
+export interface TemplateRecord {
+  id: string;
+  name: string;
+  sourceSiteId: string;
+  sourceDomain: string;
+  sourceUrl: string;
+  framework: string;
+  createdAt: string;
+  filesArchive: string;
+  dbArchive?: string | null;
+  sizeBytes: number;
+  databaseEngine?: string | null;
+}
+
+export interface CreateWordPressRequest {
+  name: string;
+  domain?: string | null;
+  path?: string | null;
+  phpVersion?: string | null;
+  databaseEngine?: string | null;
+  locale?: string | null;
+  adminUser?: string | null;
+  siteTitle?: string | null;
+}
+
+export interface CreateWordPressResult {
+  site: SiteRecord;
+  adminUser: string;
+  adminPassword: string;
+  adminEmail: string;
+  url: string;
+  wordpressVersion: string;
+}
+
+export interface DuplicateRequest {
+  sourceId: string;
+  name: string;
+  domain?: string | null;
+  path: string;
+  phpVersion?: string | null;
+  databaseEngine?: string | null;
+}
+
+export interface DuplicateResult {
+  site: SiteRecord;
+  url: string;
+}
+
+export interface BackupResult {
+  path: string;
+  bytes: number;
 }
 
 export interface PhpExtensionView {

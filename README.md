@@ -38,8 +38,9 @@ cd src-tauri && cargo check
 cd src-tauri && cargo run --bin devstack_smoke -- --install-node --node-channel 22
 # Milestone 2 stack: Nginx + PHP-FPM + https://smoke.test (+ MariaDB)
 cd src-tauri && DEVSTACK_DATA_DIR=/tmp/devstack-smoke cargo run --bin devstack_smoke -- --stack
-# Faster web-only smoke:
-cd src-tauri && DEVSTACK_DATA_DIR=/tmp/devstack-smoke cargo run --bin devstack_smoke -- --stack --skip-mariadb
+# Milestone 3: one-click WP → template → duplicate over HTTPS
+cd src-tauri && DEVSTACK_RESET_SITES=1 DEVSTACK_DATA_DIR=/tmp/devstack-smoke \
+  cargo run --bin devstack_smoke -- --wordpress
 ```
 
 ## Package architecture
@@ -65,6 +66,13 @@ Every runtime/service implements `PackageProvider` (list → download → SHA256
 - **MySQL / MariaDB** start/stop with huge-DB tuning (`max_allowed_packet=1G`, larger InnoDB, long timeouts)
 - **phpMyAdmin** on `phpmyadmin.test` with no import limits + WordPress sign-on deep-link
 
+### WordPress & templates (milestone 3)
+
+- **New WordPress** — downloads latest core (SHA1-verified) + official WP-CLI phar (SHA512), creates DB/user, `wp core install`, optional `pl_PL`, shows admin password once
+- **Templates** — mark any site: streaming file archive + DB dump (gzip/zstd, no size limits)
+- **Duplicate** — copy files, stream import, `wp search-replace` (serialized-safe, all tables), refresh credentials
+- **Backup / restore** from site detail via mysqldump/mysql pipes
+
 Privileged operations are isolated in `helper/devstack-helper.sh` (sudo/pkexec only for hosts/resolver/CA trust).
 
 ### PHP / Nginx manifests (macOS)
@@ -83,18 +91,17 @@ Unlimited upload/memory/time limits + OPcache; per-version Xdebug toggle on the 
 ## UI
 
 - **General / PHP / JavaScript / Services** — package tables
-- **Sites** — 3-column tile grid (name, domain, framework icon, PHP, status); click opens full-window detail (environment, paths, Open database for WordPress)
+- **Sites** — 3-column tile grid; **New WordPress** / **Duplicate**; detail view with template mark, streaming DB backup/restore, Open database for WordPress
 - Placeholders: AI, Pro, Sharing, Shortcuts, About
 
 ## Roadmap
 
 1. ~~M1 package core + PHP/Node UI~~
 2. ~~M2 Nginx, `.test` HTTPS, MySQL/MariaDB, Sites grid~~
-3. MongoDB / PostgreSQL full install path
-4. Streaming DB backup/import (no size limits)
-5. One-click WordPress via WP-CLI + starter-template duplication (`wp search-replace`)
-6. Site PATH shims / CLI isolation
-7. Sharing / Pro / AI surfaces
+3. ~~M3 One-click WordPress, templates/duplicate, streaming DB backup~~
+4. MongoDB / PostgreSQL full install path
+5. Site PATH shims / CLI isolation
+6. Sharing / Pro / AI surfaces
 
 ## License
 
