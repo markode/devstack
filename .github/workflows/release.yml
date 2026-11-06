@@ -60,7 +60,9 @@ jobs:
       # Empty APPLE_* / TAURI_* secrets expand to "" in Actions; Tauri still sees the
       # env var as set and tries PKCS#12 import → codesign failure. Only forward
       # non-empty values so unsigned CI builds succeed.
+      # Force bash so this works on windows-latest (default shell is pwsh).
       - name: Export optional signing env
+        shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
