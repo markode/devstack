@@ -6,8 +6,7 @@ DevStack ships macOS and Windows installers via GitHub Actions (`/.github/workfl
 
 | Runner | Artifact |
 | --- | --- |
-| `macos-latest` + `aarch64-apple-darwin` | `.dmg` / `.app` (Apple Silicon) |
-| `macos-latest` + `x86_64-apple-darwin` | `.dmg` / `.app` (Intel) |
+| `macos-latest` + `universal-apple-darwin` | Universal `.dmg` / `.app` (arm64 + x64) |
 | `windows-latest` | NSIS `.exe` and/or `.msi` |
 
 Triggers: push of a `v*` tag (or manual `workflow_dispatch`). Artifacts upload to a **draft** GitHub Release.
