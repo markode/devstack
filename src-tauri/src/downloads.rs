@@ -1,7 +1,7 @@
 //! Shared download, checksum verification, and archive extraction.
 
 use futures_util::StreamExt;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -84,6 +84,53 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     let actual = sha256_file(path)?;
     let expected = expected.trim().to_lowercase();
+    if actual != expected {
+        return Err(DevStackError::ChecksumMismatch { expected, actual });
+    }
+    Ok(())
+}
+
+pub fn sha1_file(path: &Path) -> Result<String> {
+    use sha1::{Digest as _, Sha1};
+    let mut file = File::open(path)?;
+    let mut hasher = Sha1::new();
+    let mut buf = [0u8; 1024 * 64];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+pub fn verify_sha1(path: &Path, expected: &str) -> Result<()> {
+    let actual = sha1_file(path)?;
+    let expected = expected.trim().split_whitespace().next().unwrap_or("").to_lowercase();
+    if actual != expected {
+        return Err(DevStackError::ChecksumMismatch { expected, actual });
+    }
+    Ok(())
+}
+
+pub fn sha512_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha512::new();
+    let mut buf = [0u8; 1024 * 64];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+pub fn verify_sha512(path: &Path, expected: &str) -> Result<()> {
+    let actual = sha512_file(path)?;
+    let expected = expected.trim().split_whitespace().next().unwrap_or("").to_lowercase();
     if actual != expected {
         return Err(DevStackError::ChecksumMismatch { expected, actual });
     }

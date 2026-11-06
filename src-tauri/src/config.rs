@@ -19,6 +19,8 @@ pub struct AppState {
     pub php_extensions: HashMap<String, PhpExtensionSettings>,
     /// Sites
     pub sites: Vec<SiteRecord>,
+    /// Saved starter templates (file + DB snapshots)
+    pub templates: Vec<TemplateRecord>,
     /// Active database engine for stack services: "mariadb" | "mysql"
     pub active_database: Option<String>,
     /// Preferred versions for stack services
@@ -101,7 +103,12 @@ pub struct SiteRecord {
     #[serde(default)]
     pub database_user: Option<String>,
     #[serde(default)]
+    pub database_password: Option<String>,
+    #[serde(default)]
     pub status: String,
+    /// True when this site is also exposed as a reusable starter template.
+    #[serde(default)]
+    pub is_template: bool,
 }
 
 impl SiteRecord {
@@ -114,6 +121,23 @@ impl SiteRecord {
             self.status = "stopped".into();
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateRecord {
+    pub id: String,
+    pub name: String,
+    pub source_site_id: String,
+    pub source_domain: String,
+    pub source_url: String,
+    pub framework: String,
+    pub created_at: String,
+    pub files_archive: PathBuf,
+    pub db_archive: Option<PathBuf>,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub database_engine: Option<String>,
 }
 
 #[derive(Clone)]
@@ -130,6 +154,9 @@ pub struct Paths {
     pub databases: PathBuf,
     pub sites_meta: PathBuf,
     pub helper: PathBuf,
+    pub templates: PathBuf,
+    pub backups: PathBuf,
+    pub tools: PathBuf,
 }
 
 impl Paths {
@@ -145,6 +172,9 @@ impl Paths {
         let databases = root.join("databases");
         let sites_meta = root.join("sites");
         let helper = root.join("helper");
+        let templates = root.join("templates");
+        let backups = root.join("backups");
+        let tools = root.join("tools");
         for p in [
             &packages,
             &downloads,
@@ -156,6 +186,9 @@ impl Paths {
             &databases,
             &sites_meta,
             &helper,
+            &templates,
+            &backups,
+            &tools,
         ] {
             fs::create_dir_all(p)?;
         }
@@ -172,6 +205,9 @@ impl Paths {
             databases,
             sites_meta,
             helper,
+            templates,
+            backups,
+            tools,
         })
     }
 
@@ -255,7 +291,9 @@ pub fn ensure_demo_site(state: &mut AppState) {
             database_engine: None,
             database_name: None,
             database_user: None,
+            database_password: None,
             status: "stopped".into(),
+            is_template: false,
         };
         site.ensure_domain();
         state.sites.push(site);

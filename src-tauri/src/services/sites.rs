@@ -154,7 +154,9 @@ pub fn create_site(
         database_engine: state.active_database.clone(),
         database_name: None,
         database_user: None,
+        database_password: None,
         status: "stopped".into(),
+        is_template: false,
     };
     let details = detect_site(&site);
     site.framework = Some(details.framework);

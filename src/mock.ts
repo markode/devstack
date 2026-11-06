@@ -1,5 +1,10 @@
 import type {
   AppInfo,
+  BackupResult,
+  CreateWordPressRequest,
+  CreateWordPressResult,
+  DuplicateRequest,
+  DuplicateResult,
   InstalledPackage,
   PackageInfo,
   PackageVersion,
@@ -7,6 +12,7 @@ import type {
   SiteDetails,
   SiteRecord,
   StackStatus,
+  TemplateRecord,
 } from "./types";
 
 const installed = new Map<string, InstalledPackage[]>();
@@ -188,6 +194,7 @@ let sites: SiteRecord[] = [
     databaseName: "blog",
     databaseUser: "wp",
     status: "running",
+    isTemplate: true,
   },
   {
     id: "api-kit",
@@ -198,8 +205,11 @@ let sites: SiteRecord[] = [
     https: false,
     framework: "other",
     status: "stopped",
+    isTemplate: false,
   },
 ];
+
+let templates: TemplateRecord[] = [];
 
 const phpExt = new Map<string, boolean>();
 
@@ -328,3 +338,101 @@ seedInstalled("node", "22.23.2", "22");
 seedInstalled("nginx", "1.28.3", "1.28");
 seedInstalled("mariadb", "11.4.5", "11.4");
 seedInstalled("phpmyadmin", "5.2.3", "5.2");
+
+export async function mockCreateWordpress(
+  request: CreateWordPressRequest,
+): Promise<CreateWordPressResult> {
+  await delay(600);
+  const id = request.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const site: SiteRecord = {
+    id,
+    name: request.name,
+    path: request.path || `~/Sites/${id}`,
+    domain: request.domain || `${id}.test`,
+    phpVersion: request.phpVersion || "8.4",
+    https: true,
+    framework: "wordpress",
+    databaseEngine: request.databaseEngine || "mariadb",
+    databaseName: `wp_${id.replace(/-/g, "_")}`,
+    databaseUser: `u_${id.replace(/-/g, "_")}`,
+    status: "running",
+    isTemplate: false,
+  };
+  sites = [...sites.filter((s) => s.id !== id), site];
+  return {
+    site,
+    adminUser: request.adminUser || "admin",
+    adminPassword: "OnceOnly-Passw0rd!",
+    adminEmail: `admin@${site.domain}`,
+    url: `https://${site.domain}`,
+    wordpressVersion: "6.8.1",
+  };
+}
+
+export async function mockMarkTemplate(
+  siteId: string,
+): Promise<TemplateRecord> {
+  await delay(400);
+  const site = sites.find((s) => s.id === siteId);
+  if (!site) throw new Error("site not found");
+  sites = sites.map((s) =>
+    s.id === siteId ? { ...s, isTemplate: true } : s,
+  );
+  const tpl: TemplateRecord = {
+    id: `${siteId}-tpl`,
+    name: site.name,
+    sourceSiteId: site.id,
+    sourceDomain: site.domain,
+    sourceUrl: `https://${site.domain}`,
+    framework: site.framework || "wordpress",
+    createdAt: new Date().toISOString(),
+    filesArchive: `/tmp/templates/${siteId}/files.tar.gz`,
+    dbArchive: `/tmp/templates/${siteId}/database.sql.gz`,
+    sizeBytes: 12_000_000,
+    databaseEngine: site.databaseEngine,
+  };
+  templates = [...templates.filter((t) => t.id !== tpl.id), tpl];
+  return tpl;
+}
+
+export async function mockGetTemplates(): Promise<TemplateRecord[]> {
+  return templates;
+}
+
+export async function mockDuplicateSite(
+  request: DuplicateRequest,
+): Promise<DuplicateResult> {
+  await delay(700);
+  const id = request.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const site: SiteRecord = {
+    id,
+    name: request.name,
+    path: request.path,
+    domain: request.domain || `${id}.test`,
+    phpVersion: request.phpVersion || "8.4",
+    https: true,
+    framework: "wordpress",
+    databaseEngine: request.databaseEngine || "mariadb",
+    databaseName: `wp_${id.replace(/-/g, "_")}`,
+    databaseUser: `u_${id.replace(/-/g, "_")}`,
+    status: "running",
+    isTemplate: false,
+  };
+  sites = [...sites, site];
+  return { site, url: `https://${site.domain}` };
+}
+
+export async function mockBackupSite(siteId: string): Promise<BackupResult> {
+  await delay(300);
+  return {
+    path: `/tmp/backups/${siteId}/db.sql.gz`,
+    bytes: 4_200_000,
+  };
+}
+
+export async function mockRestoreSite(
+  _siteId: string,
+  _archivePath: string,
+): Promise<void> {
+  await delay(300);
+}

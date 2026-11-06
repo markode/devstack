@@ -2,7 +2,13 @@ import * as api from "./api";
 import * as mock from "./mock";
 import type {
   AppInfo,
+  BackupResult,
+  CreateWordPressRequest,
+  CreateWordPressResult,
+  DuplicateRequest,
+  DuplicateResult,
   InstalledPackage,
+  JobProgress,
   PackageInfo,
   PackageVersion,
   PhpExtensionView,
@@ -10,6 +16,7 @@ import type {
   SiteDetails,
   SiteRecord,
   StackStatus,
+  TemplateRecord,
 } from "./types";
 
 const useMock = () => !api.isTauri();
@@ -120,6 +127,52 @@ export async function onInstallProgress(
 ): Promise<() => void> {
   if (useMock()) return () => undefined;
   return api.onInstallProgress(handler);
+}
+
+export async function onJobProgress(
+  handler: (ev: JobProgress) => void,
+): Promise<() => void> {
+  if (useMock()) return () => undefined;
+  return api.onJobProgress(handler);
+}
+
+export async function createWordpress(
+  request: CreateWordPressRequest,
+): Promise<CreateWordPressResult> {
+  if (useMock()) return mock.mockCreateWordpress(request);
+  return api.createWordpress(request);
+}
+
+export async function markTemplate(siteId: string): Promise<TemplateRecord> {
+  if (useMock()) return mock.mockMarkTemplate(siteId);
+  return api.markTemplate(siteId);
+}
+
+export async function getTemplates(): Promise<TemplateRecord[]> {
+  if (useMock()) return mock.mockGetTemplates();
+  return api.getTemplates();
+}
+
+export async function duplicateSite(
+  request: DuplicateRequest,
+): Promise<DuplicateResult> {
+  if (useMock()) return mock.mockDuplicateSite(request);
+  return api.duplicateSite(request);
+}
+
+export async function backupSiteDatabase(
+  siteId: string,
+): Promise<BackupResult> {
+  if (useMock()) return mock.mockBackupSite(siteId);
+  return api.backupSiteDatabase(siteId);
+}
+
+export async function restoreSiteDatabase(
+  siteId: string,
+  archivePath: string,
+): Promise<void> {
+  if (useMock()) return mock.mockRestoreSite(siteId, archivePath);
+  return api.restoreSiteDatabase(siteId, archivePath);
 }
 
 export { useMock };

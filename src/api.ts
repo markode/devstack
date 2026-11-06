@@ -2,7 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
+  BackupResult,
+  CreateWordPressRequest,
+  CreateWordPressResult,
+  DuplicateRequest,
+  DuplicateResult,
   InstalledPackage,
+  JobProgress,
   PackageInfo,
   PackageVersion,
   PhpExtensionView,
@@ -10,6 +16,7 @@ import type {
   SiteDetails,
   SiteRecord,
   StackStatus,
+  TemplateRecord,
 } from "./types";
 
 export const isTauri = (): boolean =>
@@ -128,4 +135,43 @@ export async function onInstallProgress(
   handler: (ev: ProgressEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<ProgressEvent>("install-progress", (e) => handler(e.payload));
+}
+
+export async function onJobProgress(
+  handler: (ev: JobProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<JobProgress>("job-progress", (e) => handler(e.payload));
+}
+
+export async function createWordpress(
+  request: CreateWordPressRequest,
+): Promise<CreateWordPressResult> {
+  return invoke<CreateWordPressResult>("create_wordpress", { request });
+}
+
+export async function markTemplate(siteId: string): Promise<TemplateRecord> {
+  return invoke<TemplateRecord>("mark_template", { siteId });
+}
+
+export async function getTemplates(): Promise<TemplateRecord[]> {
+  return invoke<TemplateRecord[]>("get_templates");
+}
+
+export async function duplicateSite(
+  request: DuplicateRequest,
+): Promise<DuplicateResult> {
+  return invoke<DuplicateResult>("duplicate_site", { request });
+}
+
+export async function backupSiteDatabase(
+  siteId: string,
+): Promise<BackupResult> {
+  return invoke<BackupResult>("backup_site_database", { siteId });
+}
+
+export async function restoreSiteDatabase(
+  siteId: string,
+  archivePath: string,
+): Promise<void> {
+  return invoke("restore_site_database", { siteId, archivePath });
 }
