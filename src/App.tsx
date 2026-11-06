@@ -24,15 +24,28 @@ const SECTIONS = Object.keys(TITLES) as SectionId[];
 
 function sectionFromHash(): SectionId {
   const raw = window.location.hash.replace(/^#\/?/, "").toLowerCase();
-  if (SECTIONS.includes(raw as SectionId)) return raw as SectionId;
+  const top = raw.split("/")[0] || "";
+  if (SECTIONS.includes(top as SectionId)) return top as SectionId;
   return "php";
+}
+
+/** Optional deep-link: #/sites/<siteId> */
+export function siteIdFromHash(): string | null {
+  const raw = window.location.hash.replace(/^#\/?/, "");
+  const parts = raw.split("/");
+  if (parts[0]?.toLowerCase() === "sites" && parts[1]) return parts[1];
+  return null;
 }
 
 export default function App() {
   const [section, setSection] = useState<SectionId>(sectionFromHash);
+  const [siteDeepLink, setSiteDeepLink] = useState<string | null>(siteIdFromHash);
 
   useEffect(() => {
-    const onHash = () => setSection(sectionFromHash());
+    const onHash = () => {
+      setSection(sectionFromHash());
+      setSiteDeepLink(siteIdFromHash());
+    };
     window.addEventListener("hashchange", onHash);
     if (!window.location.hash) {
       window.location.hash = `#/${section}`;
@@ -60,7 +73,7 @@ export default function App() {
           {section === "php" && <PhpPage />}
           {section === "javascript" && <JavaScriptPage />}
           {section === "services" && <ServicesPage />}
-          {section === "sites" && <SitesPage />}
+          {section === "sites" && <SitesPage initialSiteId={siteDeepLink} />}
           {section === "ai" && (
             <PlaceholderPage
               title="AI"

@@ -3,6 +3,7 @@
 mod mariadb;
 mod mongodb;
 mod mysql;
+mod nginx;
 mod node;
 pub mod php;
 mod phpmyadmin;
@@ -21,6 +22,7 @@ use crate::error::{DevStackError, Result};
 pub use mariadb::MariaDbProvider;
 pub use mongodb::MongoDbProvider;
 pub use mysql::MySqlProvider;
+pub use nginx::NginxProvider;
 pub use node::NodeProvider;
 pub use php::PhpProvider;
 pub use phpmyadmin::PhpMyAdminProvider;
@@ -97,6 +99,7 @@ impl PackageRegistry {
         let list: Vec<Arc<dyn PackageProvider>> = vec![
             Arc::new(PhpProvider::new(client.clone())),
             Arc::new(NodeProvider::new(client.clone())),
+            Arc::new(NginxProvider::new(client.clone())),
             Arc::new(PhpMyAdminProvider::new(client.clone())),
             Arc::new(MySqlProvider::new(client.clone())),
             Arc::new(MariaDbProvider::new(client.clone())),

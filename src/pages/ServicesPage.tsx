@@ -5,6 +5,7 @@ import * as client from "../client";
 import type { PackageInfo } from "../types";
 
 const SERVICE_IDS = [
+  "nginx",
   "phpmyadmin",
   "mysql",
   "mariadb",

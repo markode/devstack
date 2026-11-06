@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -9,8 +10,15 @@ use crate::config::{
 };
 use crate::downloads::{noop_progress, ProgressEvent, ProgressFn};
 use crate::error::Result;
-use crate::packages::{installed_from_state, InstalledPackage, PackageInfo, PackageRegistry, PackageVersion};
+use crate::packages::{
+    installed_from_state, InstalledPackage, PackageInfo, PackageRegistry, PackageVersion,
+};
 use crate::php::{list_php_extensions, set_xdebug, PhpExtensionView};
+use crate::services::sites::{create_site, detect_site, SiteDetails};
+use crate::services::stack::{
+    apply_stack, reload_sites, stack_status, start_stack, stop_stack, StackStatus,
+};
+use crate::services::sites::refresh_site_metadata;
 
 pub struct AppCtx {
     pub paths: Paths,
@@ -27,6 +35,7 @@ pub struct AppInfo {
     pub os: String,
     pub arch: String,
     pub php_manifest_url: Option<String>,
+    pub stack: StackStatus,
 }
 
 #[tauri::command]
@@ -38,9 +47,11 @@ pub async fn get_app_info(ctx: State<'_, Arc<AppCtx>>) -> Result<AppInfo> {
         data_dir: ctx.paths.root.display().to_string(),
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
-        php_manifest_url: state.php_manifest_url.clone().or_else(|| {
-            std::env::var("DEVSTACK_PHP_MANIFEST_URL").ok()
-        }),
+        php_manifest_url: state
+            .php_manifest_url
+            .clone()
+            .or_else(|| std::env::var("DEVSTACK_PHP_MANIFEST_URL").ok()),
+        stack: stack_status(&state),
     })
 }
 
@@ -114,8 +125,54 @@ pub async fn uninstall_package(
 pub async fn get_sites(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteRecord>> {
     let mut state = ctx.state.lock().await;
     ensure_demo_site(&mut state);
+    refresh_site_metadata(&mut state);
     save_state(&ctx.paths.state_file, &state)?;
     Ok(state.sites.clone())
+}
+
+#[tauri::command]
+pub async fn list_site_details(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDetails>> {
+    let mut state = ctx.state.lock().await;
+    ensure_demo_site(&mut state);
+    refresh_site_metadata(&mut state);
+    let details: Vec<_> = state.sites.iter().map(detect_site).collect();
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(details)
+}
+
+#[tauri::command]
+pub async fn get_site_details(
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+) -> Result<SiteDetails> {
+    let mut state = ctx.state.lock().await;
+    ensure_demo_site(&mut state);
+    let site = state
+        .sites
+        .iter()
+        .find(|s| s.id == site_id)
+        .ok_or_else(|| crate::error::DevStackError::Message(format!("site not found: {site_id}")))?
+        .clone();
+    Ok(detect_site(&site))
+}
+
+#[tauri::command]
+pub async fn create_site_cmd(
+    ctx: State<'_, Arc<AppCtx>>,
+    name: String,
+    path: String,
+    php_version: Option<String>,
+) -> Result<SiteRecord> {
+    let mut state = ctx.state.lock().await;
+    let site = create_site(
+        &mut state,
+        &ctx.paths,
+        &name,
+        PathBuf::from(path),
+        php_version,
+    )?;
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(site)
 }
 
 #[tauri::command]
@@ -144,6 +201,8 @@ pub async fn update_site_environment(
     }
     let out = site.clone();
     save_state(&ctx.paths.state_file, &state)?;
+    // Best-effort reload if stack is up
+    let _ = reload_sites(&ctx.paths, &mut state);
     Ok(out)
 }
 
@@ -174,6 +233,37 @@ pub async fn set_php_manifest_url(
     state.php_manifest_url = url.filter(|s| !s.trim().is_empty());
     save_state(&ctx.paths.state_file, &state)?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_stack_status(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    let state = ctx.state.lock().await;
+    Ok(stack_status(&state))
+}
+
+#[tauri::command]
+pub async fn start_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    let mut state = ctx.state.lock().await;
+    start_stack(&ctx.paths, &mut state)
+}
+
+#[tauri::command]
+pub async fn stop_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    let mut state = ctx.state.lock().await;
+    stop_stack(&ctx.paths, &mut state)
+}
+
+#[tauri::command]
+pub async fn apply_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    let mut state = ctx.state.lock().await;
+    apply_stack(&ctx.paths, &mut state)
+}
+
+#[tauri::command]
+pub async fn register_system_php_cmd(ctx: State<'_, Arc<AppCtx>>) -> Result<String> {
+    let mut state = ctx.state.lock().await;
+    let rt = crate::services::php_runtime::register_system_php(&mut state, &ctx.paths)?;
+    Ok(rt.version)
 }
 
 /// Headless helper used by CI / smoke tests without a UI.

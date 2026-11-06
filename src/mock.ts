@@ -4,10 +4,22 @@ import type {
   PackageInfo,
   PackageVersion,
   PhpExtensionView,
+  SiteDetails,
   SiteRecord,
+  StackStatus,
 } from "./types";
 
 const installed = new Map<string, InstalledPackage[]>();
+
+export const mockStackStatus: StackStatus = {
+  nginx: true,
+  dns: true,
+  database: true,
+  databaseEngine: "mariadb",
+  httpPort: 80,
+  httpsPort: 443,
+  phpVersions: ["8.5.1"],
+};
 
 export const mockAppInfo: AppInfo = {
   name: "DevStack",
@@ -16,6 +28,7 @@ export const mockAppInfo: AppInfo = {
   os: "macos",
   arch: "aarch64",
   phpManifestUrl: null,
+  stack: mockStackStatus,
 };
 
 export const mockPackages: PackageInfo[] = [
@@ -34,6 +47,13 @@ export const mockPackages: PackageInfo[] = [
     installReady: true,
   },
   {
+    id: "nginx",
+    name: "Nginx",
+    description: "One Nginx for all sites.",
+    category: "service",
+    installReady: true,
+  },
+  {
     id: "phpmyadmin",
     name: "phpMyAdmin",
     description: "Web UI for MySQL/MariaDB.",
@@ -45,14 +65,14 @@ export const mockPackages: PackageInfo[] = [
     name: "MySQL",
     description: "MySQL Community Server.",
     category: "service",
-    installReady: false,
+    installReady: true,
   },
   {
     id: "mariadb",
     name: "MariaDB",
     description: "MariaDB Server.",
     category: "service",
-    installReady: false,
+    installReady: true,
   },
   {
     id: "mongodb",
@@ -87,6 +107,22 @@ const versionTables: Record<string, PackageVersion[]> = {
     { version: "18.20.0", channel: "18", label: "18", lts: false },
     { version: "16.20.0", channel: "16", label: "16", lts: false },
   ],
+  nginx: [
+    {
+      version: "1.28.3",
+      channel: "1.28",
+      label: "1.28.3",
+      lts: true,
+      downloadUrl: "https://nginx.org/download/nginx-1.28.3.zip",
+    },
+    {
+      version: "1.27.5",
+      channel: "1.27",
+      label: "1.27.5",
+      lts: false,
+      downloadUrl: "https://nginx.org/download/nginx-1.27.5.zip",
+    },
+  ],
   phpmyadmin: [
     {
       version: "5.2.3",
@@ -94,26 +130,22 @@ const versionTables: Record<string, PackageVersion[]> = {
       label: "5.2.3",
       lts: false,
       notes: "PHP >=7.2,<8.4",
-    },
-    {
-      version: "4.9.11",
-      channel: "4.9",
-      label: "4.9.11",
-      lts: false,
-      notes: "Legacy",
+      downloadUrl: "https://files.phpmyadmin.net/phpMyAdmin/5.2.3/phpMyAdmin-5.2.3-all-languages.zip",
     },
   ],
-  mysql: ["9.3.0", "8.4.5", "8.0.40"].map((v) => ({
-    version: v,
-    channel: v.split(".").slice(0, 2).join("."),
-    label: v,
-    lts: v.startsWith("8."),
-  })),
-  mariadb: ["11.8.9", "11.4.5", "10.11.10"].map((v) => ({
+  mysql: ["8.4.5", "8.0.40"].map((v) => ({
     version: v,
     channel: v.split(".").slice(0, 2).join("."),
     label: v,
     lts: true,
+    downloadUrl: "https://cdn.mysql.com/example.zip",
+  })),
+  mariadb: ["11.8.9", "11.4.5"].map((v) => ({
+    version: v,
+    channel: v.split(".").slice(0, 2).join("."),
+    label: v,
+    lts: true,
+    downloadUrl: "https://downloads.mariadb.org/example.tar.gz",
   })),
   mongodb: ["8.0.4", "7.0.14"].map((v) => ({
     version: v,
@@ -121,7 +153,7 @@ const versionTables: Record<string, PackageVersion[]> = {
     label: v,
     lts: true,
   })),
-  postgresql: ["17.4", "16.8", "15.12"].map((v) => ({
+  postgresql: ["17.4", "16.8"].map((v) => ({
     version: v,
     channel: v.split(".")[0],
     label: v,
@@ -134,16 +166,45 @@ let sites: SiteRecord[] = [
     id: "acme-dashboard",
     name: "acme-dashboard",
     path: "~/Sites/acme-dashboard",
+    domain: "acme-dashboard.test",
     phpVersion: "8.5",
     nodeVersion: "24",
     https: true,
+    framework: "laravel",
+    databaseEngine: "mariadb",
+    databaseName: "acme",
+    status: "running",
+  },
+  {
+    id: "blog",
+    name: "blog",
+    path: "~/Sites/blog",
+    domain: "blog.test",
+    phpVersion: "8.4",
+    nodeVersion: null,
+    https: true,
+    framework: "wordpress",
+    databaseEngine: "mariadb",
+    databaseName: "blog",
+    databaseUser: "wp",
+    status: "running",
+  },
+  {
+    id: "api-kit",
+    name: "api-kit",
+    path: "~/Sites/api-kit",
+    domain: "api-kit.test",
+    phpVersion: "8.3",
+    https: false,
+    framework: "other",
+    status: "stopped",
   },
 ];
 
 const phpExt = new Map<string, boolean>();
 
 export async function mockListVersions(id: string): Promise<PackageVersion[]> {
-  await delay(180);
+  await delay(120);
   return versionTables[id] ?? [];
 }
 
@@ -156,7 +217,7 @@ export async function mockInstall(
   packageId: string,
   version: string,
 ): Promise<InstalledPackage> {
-  await delay(500);
+  await delay(400);
   const versions = versionTables[packageId] ?? [];
   const meta =
     versions.find((v) => v.version === version || v.channel === version) ??
@@ -180,7 +241,7 @@ export async function mockUninstall(
   packageId: string,
   version: string,
 ): Promise<void> {
-  await delay(200);
+  await delay(150);
   installed.set(
     packageId,
     (installed.get(packageId) ?? []).filter((x) => x.version !== version),
@@ -189,6 +250,36 @@ export async function mockUninstall(
 
 export async function mockGetSites(): Promise<SiteRecord[]> {
   return sites;
+}
+
+function toDetails(s: SiteRecord): SiteDetails {
+  const framework = s.framework ?? "other";
+  const icon =
+    framework === "wordpress" ? "WP" : framework === "laravel" ? "LV" : "?";
+  return {
+    site: s,
+    framework,
+    frameworkIcon: icon,
+    absolutePath: s.path.replace("~", "/Users/dev"),
+    url: `http://${s.domain}`,
+    httpsUrl: `https://${s.domain}`,
+    databaseName: s.databaseName,
+    databaseUser: s.databaseUser,
+    phpmyadminUrl:
+      framework === "wordpress" && s.databaseName
+        ? `https://phpmyadmin.test/devstack-signon.php?db=${s.databaseName}&user=${s.databaseUser ?? "root"}&pass=`
+        : null,
+    hasWpConfig: framework === "wordpress",
+  };
+}
+
+export async function mockListSiteDetails(): Promise<SiteDetails[]> {
+  return sites.map(toDetails);
+}
+
+export async function mockGetSiteDetails(siteId: string): Promise<SiteDetails> {
+  const s = sites.find((x) => x.id === siteId) ?? sites[0];
+  return toDetails(s);
 }
 
 export async function mockUpdateSite(
@@ -231,7 +322,9 @@ function seedInstalled(packageId: string, version: string, channel: string) {
   installed.set(packageId, [...list.filter((x) => x.version !== version), rec]);
 }
 
-// Seed installs so the UI shows Installed states like the Herd screenshots.
 seedInstalled("php", "8.5.1", "8.5");
 seedInstalled("node", "24.18.0", "24");
 seedInstalled("node", "22.23.2", "22");
+seedInstalled("nginx", "1.28.3", "1.28");
+seedInstalled("mariadb", "11.4.5", "11.4");
+seedInstalled("phpmyadmin", "5.2.3", "5.2");
