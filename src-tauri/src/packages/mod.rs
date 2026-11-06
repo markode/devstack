@@ -1,5 +1,6 @@
 //! Generic package providers (PHP, Node, databases, phpMyAdmin, …).
 
+mod mailpit;
 mod mariadb;
 mod mongodb;
 mod mysql;
@@ -8,6 +9,7 @@ mod node;
 pub mod php;
 mod phpmyadmin;
 mod postgresql;
+mod redis;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,7 @@ use crate::config::{AppState, InstalledRecord, Paths};
 use crate::downloads::{http_client, ProgressFn};
 use crate::error::{DevStackError, Result};
 
+pub use mailpit::MailpitProvider;
 pub use mariadb::MariaDbProvider;
 pub use mongodb::MongoDbProvider;
 pub use mysql::MySqlProvider;
@@ -27,6 +30,7 @@ pub use node::NodeProvider;
 pub use php::PhpProvider;
 pub use phpmyadmin::PhpMyAdminProvider;
 pub use postgresql::PostgreSqlProvider;
+pub use redis::RedisProvider;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +109,8 @@ impl PackageRegistry {
             Arc::new(MariaDbProvider::new(client.clone())),
             Arc::new(MongoDbProvider::new(client.clone())),
             Arc::new(PostgreSqlProvider::new(client.clone())),
+            Arc::new(RedisProvider::new(client.clone())),
+            Arc::new(MailpitProvider::new(client.clone())),
         ];
 
         for p in list {

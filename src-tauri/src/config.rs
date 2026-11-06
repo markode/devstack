@@ -65,6 +65,10 @@ pub struct RuntimeState {
     pub php_pids: HashMap<String, u32>,
     pub database_pid: Option<u32>,
     pub database_engine: Option<String>,
+    pub mongodb_pid: Option<u32>,
+    pub postgresql_pid: Option<u32>,
+    pub redis_pid: Option<u32>,
+    pub mailpit_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

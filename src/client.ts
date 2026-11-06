@@ -16,6 +16,7 @@ import type {
   SiteDetails,
   SiteRecord,
   StackStatus,
+  ManagedServiceStatus,
   TemplateRecord,
 } from "./types";
 
@@ -173,6 +174,40 @@ export async function restoreSiteDatabase(
 ): Promise<void> {
   if (useMock()) return mock.mockRestoreSite(siteId, archivePath);
   return api.restoreSiteDatabase(siteId, archivePath);
+}
+
+export async function listManagedServices(): Promise<ManagedServiceStatus[]> {
+  if (useMock()) return mock.mockManagedServices();
+  return api.listManagedServices();
+}
+
+export async function startManagedService(
+  serviceId: string,
+): Promise<ManagedServiceStatus> {
+  if (useMock()) return mock.mockStartService(serviceId);
+  return api.startManagedService(serviceId);
+}
+
+export async function stopManagedService(
+  serviceId: string,
+): Promise<ManagedServiceStatus> {
+  if (useMock()) return mock.mockStopService(serviceId);
+  return api.stopManagedService(serviceId);
+}
+
+export async function getServiceLog(
+  serviceId: string,
+  lines?: number,
+): Promise<string> {
+  if (useMock()) return mock.mockServiceLog(serviceId);
+  return api.getServiceLog(serviceId, lines);
+}
+
+export async function updatePackage(
+  packageId: string,
+): Promise<InstalledPackage> {
+  if (useMock()) return mock.mockInstall(packageId, "latest");
+  return api.updatePackage(packageId);
 }
 
 export { useMock };

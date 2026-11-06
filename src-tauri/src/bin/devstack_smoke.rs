@@ -15,6 +15,7 @@ use devstack_lib::services::stack::{apply_stack, stop_stack};
 use devstack_lib::services::templates::{
     duplicate_from_source, mark_site_as_template, DuplicateRequest,
 };
+use devstack_lib::services::extras::{start_service, stop_service};
 use devstack_lib::services::wordpress::{create_wordpress_site, CreateWordPressRequest};
 use devstack_lib::{data_root, DevStackCtx};
 
@@ -32,13 +33,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let install_node = args.iter().any(|a| a == "--install-node");
     let stack = args.iter().any(|a| a == "--stack");
-    let wordpress = args.iter().any(|a| a == "--wordpress")
-        || (!install_node && !stack && !args.iter().any(|a| a == "--help"));
+    let services = args.iter().any(|a| a == "--services");
+    let wordpress = args.iter().any(|a| a == "--wordpress");
     let skip_mariadb = args.iter().any(|a| a == "--skip-mariadb");
+    // Default: services smoke when no mode flag given
+    let services = services
+        || (!install_node && !stack && !wordpress && !args.iter().any(|a| a == "--help"));
 
     if args.iter().any(|a| a == "--help") {
         eprintln!(
-            "devstack_smoke [--stack] [--wordpress] [--skip-mariadb] [--install-node]"
+            "devstack_smoke [--stack] [--wordpress] [--services] [--skip-mariadb] [--install-node]"
         );
         return Ok(());
     }
@@ -79,12 +83,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         install_pkg(&ctx, "node", "22").await?;
     }
 
-    if stack && !wordpress {
+    if stack {
         run_stack_smoke(&ctx, skip_mariadb).await?;
     }
 
     if wordpress {
         run_wordpress_smoke(&ctx, skip_mariadb).await?;
+    }
+
+    if services {
+        run_services_smoke(&ctx).await?;
     }
 
     Ok(())
@@ -329,6 +337,154 @@ async fn run_wordpress_smoke(
     // homeurl option check via wp-cli if possible
     println!("SMOKE PASS: WordPress demo.test + clone.test over HTTPS");
     Ok(())
+}
+
+async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Milestone 4 services smoke (Postgres / Mongo / Redis / Mailpit) ===");
+
+    // Prefer smaller/recent installable versions
+    // Prefer Redis 7.4.x — builds cleanly with MALLOC=libc on CI Linux.
+    let redis_ver = pick_version(ctx, "redis", |v| v.starts_with("7.4.") || v.starts_with("7.")).await?;
+    println!("Installing Redis {redis_ver}…");
+    install_pkg(ctx, "redis", &redis_ver).await?;
+
+    let mailpit_ver = pick_version(ctx, "mailpit", |_| true).await?;
+    println!("Installing Mailpit {mailpit_ver}…");
+    install_pkg(ctx, "mailpit", &mailpit_ver).await?;
+
+    let pg_ver = pick_version(ctx, "postgresql", |v| v.starts_with("16.")).await?;
+    println!("Installing PostgreSQL {pg_ver}…");
+    install_pkg(ctx, "postgresql", &pg_ver).await?;
+
+    // Mongo is large (~100MB); still required for smoke
+    let mongo_ver = pick_version(ctx, "mongodb", |v| {
+        v.starts_with("8.0.") || v.starts_with("7.0.")
+    })
+    .await?;
+    println!("Installing MongoDB {mongo_ver}…");
+    install_pkg(ctx, "mongodb", &mongo_ver).await?;
+
+    {
+        let mut state = ctx.state.lock().await;
+        for id in ["redis", "postgresql", "mongodb", "mailpit"] {
+            println!("Starting {id}…");
+            start_service(&ctx.paths, &mut state, id)?;
+        }
+    }
+
+    // Probe ports
+    for (name, port) in [("redis", 6379u16), ("postgresql", 5432), ("mongodb", 27017), ("mailpit-ui", 8025), ("mailpit-smtp", 1025)] {
+        let ok = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
+        println!("port {port} ({name}): {}", if ok { "open" } else { "CLOSED" });
+        if !ok {
+            return Err(format!("{name} port {port} not open").into());
+        }
+    }
+
+    // Redis PING
+    {
+        let state = ctx.state.lock().await;
+        let root = state
+            .installed
+            .get("redis")
+            .and_then(|v| v.first())
+            .map(|r| r.path.clone())
+            .ok_or("redis missing")?;
+        let cli = root.join("bin/redis-cli");
+        let out = Command::new(&cli).args(["-p", "6379", "PING"]).output()?;
+        let body = String::from_utf8_lossy(&out.stdout);
+        println!("redis-cli PING → {}", body.trim());
+        if !body.contains("PONG") {
+            return Err("redis PING failed".into());
+        }
+    }
+
+    // Postgres SELECT 1
+    {
+        let state = ctx.state.lock().await;
+        let root = state
+            .installed
+            .get("postgresql")
+            .and_then(|v| v.first())
+            .map(|r| r.path.clone())
+            .ok_or("postgresql missing")?;
+        let psql = root.join("bin/psql");
+        let out = Command::new(&psql)
+            .args(["-h", "127.0.0.1", "-U", "postgres", "-c", "SELECT 1 AS ok;"])
+            .output()?;
+        let body = String::from_utf8_lossy(&out.stdout);
+        println!("psql → {}", body.trim());
+        if !out.status.success() {
+            return Err(format!("psql failed: {body}").into());
+        }
+    }
+
+    // Mongo ping
+    {
+        let state = ctx.state.lock().await;
+        let root = state
+            .installed
+            .get("mongodb")
+            .and_then(|v| v.first())
+            .map(|r| r.path.clone())
+            .ok_or("mongodb missing")?;
+        let mongosh = [
+            root.join("bin/mongosh"),
+            root.join("bin/mongo"),
+        ];
+        let bin = mongosh.into_iter().find(|p| p.exists());
+        if let Some(bin) = bin {
+            let out = Command::new(&bin)
+                .args(["--eval", "db.runCommand({ ping: 1 })"])
+                .output()?;
+            println!("mongo ping status={}", out.status);
+        } else {
+            // Fall back to TCP-only if shell not bundled
+            println!("mongo shell not bundled — TCP 27017 already verified");
+        }
+    }
+
+    // Mailpit HTTP UI
+    let status = Command::new("curl")
+        .args(["-sS", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:8025/"])
+        .output()?;
+    let code = String::from_utf8_lossy(&status.stdout).trim().to_string();
+    println!("Mailpit UI HTTP {code}");
+    if code != "200" {
+        return Err(format!("mailpit UI HTTP {code}").into());
+    }
+
+    {
+        let mut state = ctx.state.lock().await;
+        for id in ["mailpit", "mongodb", "postgresql", "redis"] {
+            let _ = stop_service(&ctx.paths, &mut state, id);
+        }
+    }
+
+    println!("SMOKE PASS: Postgres + MongoDB + Redis + Mailpit");
+    Ok(())
+}
+
+async fn pick_version(
+    ctx: &DevStackCtx,
+    id: &str,
+    prefer: impl Fn(&str) -> bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let state = ctx.state.lock().await;
+    // Already installed?
+    if let Some(list) = state.installed.get(id) {
+        if let Some(r) = list.first() {
+            return Ok(r.version.clone());
+        }
+    }
+    let provider = ctx.registry.get(id)?;
+    let versions = provider.list_versions(&state).await?;
+    let chosen = versions
+        .iter()
+        .find(|v| v.download_url.is_some() && prefer(&v.version))
+        .or_else(|| versions.iter().find(|v| v.download_url.is_some()))
+        .ok_or_else(|| format!("no installable versions for {id}"))?;
+    Ok(chosen.version.clone())
 }
 
 fn http_expect(host: &str, port: u16, needle: &str) -> Result<(), Box<dyn std::error::Error>> {

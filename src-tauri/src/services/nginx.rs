@@ -77,6 +77,9 @@ pub fn render_stack(
         http_port,
         https_port,
     )?;
+    if latest_installed(state, "mailpit").is_some() {
+        let _ = crate::services::extras::write_mailpit_nginx(paths, state);
+    }
 
     let temp = paths.nginx.join("temp");
     for sub in ["client_body", "proxy", "fastcgi", "uwsgi", "scgi"] {

@@ -33,6 +33,7 @@ case "$cmd" in
     {
       echo "$marker_begin"
       echo "127.0.0.1 phpmyadmin.test"
+      echo "127.0.0.1 mailpit.test"
       for d in "$@"; do
         echo "127.0.0.1 $d"
       done
@@ -99,6 +100,7 @@ pub fn helper_run(paths: &Paths, args: &[&str]) -> Result<()> {
 pub fn sync_hosts(paths: &Paths, state: &AppState) -> Result<()> {
     let mut domains: Vec<String> = state.sites.iter().map(|s| s.domain.clone()).collect();
     domains.push("phpmyadmin.test".into());
+    domains.push("mailpit.test".into());
     domains.sort();
     domains.dedup();
     let args: Vec<&str> = std::iter::once("hosts-sync")
@@ -242,6 +244,7 @@ fn build_a_response(req: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
 pub fn site_domains(sites: &[SiteRecord]) -> Vec<String> {
     let mut d: Vec<_> = sites.iter().map(|s| s.domain.clone()).collect();
     d.push("phpmyadmin.test".into());
+    d.push("mailpit.test".into());
     d.sort();
     d.dedup();
     d

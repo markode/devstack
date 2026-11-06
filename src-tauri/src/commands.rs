@@ -26,6 +26,9 @@ use crate::services::templates::{
     duplicate_from_source, list_templates, mark_site_as_template, DuplicateRequest,
     DuplicateResult,
 };
+use crate::services::extras::{
+    list_managed_services, read_service_log, start_service, stop_service, ManagedServiceStatus,
+};
 use crate::services::wordpress::{
     create_wordpress_site, CreateWordPressRequest, CreateWordPressResult,
 };
@@ -438,6 +441,65 @@ pub async fn seed_site_large_table(
         .ok_or_else(|| crate::error::DevStackError::Message("no database on site".into()))?;
     seed_large_demo_table(&ctx.paths, &state, &engine, &db, rows.unwrap_or(2000))?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_managed_services_cmd(
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<Vec<ManagedServiceStatus>> {
+    let state = ctx.state.lock().await;
+    Ok(list_managed_services(&ctx.paths, &state))
+}
+
+#[tauri::command]
+pub async fn start_managed_service(
+    ctx: State<'_, Arc<AppCtx>>,
+    service_id: String,
+) -> Result<ManagedServiceStatus> {
+    let mut state = ctx.state.lock().await;
+    start_service(&ctx.paths, &mut state, &service_id)
+}
+
+#[tauri::command]
+pub async fn stop_managed_service(
+    ctx: State<'_, Arc<AppCtx>>,
+    service_id: String,
+) -> Result<ManagedServiceStatus> {
+    let mut state = ctx.state.lock().await;
+    stop_service(&ctx.paths, &mut state, &service_id)
+}
+
+#[tauri::command]
+pub async fn get_service_log(
+    ctx: State<'_, Arc<AppCtx>>,
+    service_id: String,
+    lines: Option<u32>,
+) -> Result<String> {
+    read_service_log(&ctx.paths, &service_id, lines.unwrap_or(80) as usize)
+}
+
+#[tauri::command]
+pub async fn update_package(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+    package_id: String,
+) -> Result<InstalledPackage> {
+    // Reinstall latest listed version (update stub for Services)
+    let provider = ctx.registry.get(&package_id)?;
+    let progress: ProgressFn = {
+        let app = app.clone();
+        Arc::new(move |ev: ProgressEvent| {
+            let _ = app.emit("install-progress", ev);
+        })
+    };
+    let mut state = ctx.state.lock().await;
+    let versions = provider.list_versions(&state).await?;
+    let latest = versions
+        .first()
+        .ok_or_else(|| crate::error::DevStackError::Message("no versions available".into()))?;
+    provider
+        .install(&latest.version, &ctx.paths, &mut state, progress)
+        .await
 }
 
 /// Headless helper used by CI / smoke tests without a UI.
