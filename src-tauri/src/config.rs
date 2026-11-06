@@ -11,12 +11,58 @@ use crate::error::{DevStackError, Result};
 pub struct AppState {
     /// Optional URL for the macOS/Linux PHP static-binary manifest.
     pub php_manifest_url: Option<String>,
+    /// Optional URL for macOS/Linux Nginx static-binary manifest.
+    pub nginx_manifest_url: Option<String>,
     /// package_id -> list of installed versions
     pub installed: HashMap<String, Vec<InstalledRecord>>,
     /// PHP version -> enabled extensions (e.g. xdebug)
     pub php_extensions: HashMap<String, PhpExtensionSettings>,
-    /// Sites (milestone stub for Environment dropdowns)
+    /// Sites
     pub sites: Vec<SiteRecord>,
+    /// Active database engine for stack services: "mariadb" | "mysql"
+    pub active_database: Option<String>,
+    /// Preferred versions for stack services
+    pub stack: StackPreferences,
+    /// Runtime process bookkeeping (pids)
+    pub runtime: RuntimeState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StackPreferences {
+    pub nginx_version: Option<String>,
+    pub php_version: Option<String>,
+    pub mariadb_version: Option<String>,
+    pub mysql_version: Option<String>,
+    pub phpmyadmin_version: Option<String>,
+    /// HTTP listen port (80 preferred; falls back when unprivileged)
+    pub http_port: u16,
+    pub https_port: u16,
+}
+
+impl Default for StackPreferences {
+    fn default() -> Self {
+        Self {
+            nginx_version: None,
+            php_version: None,
+            mariadb_version: None,
+            mysql_version: None,
+            phpmyadmin_version: None,
+            http_port: 80,
+            https_port: 443,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RuntimeState {
+    pub nginx_pid: Option<u32>,
+    pub dns_pid: Option<u32>,
+    /// php version -> fpm/cgi master pid
+    pub php_pids: HashMap<String, u32>,
+    pub database_pid: Option<u32>,
+    pub database_engine: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,9 +86,34 @@ pub struct SiteRecord {
     pub id: String,
     pub name: String,
     pub path: PathBuf,
+    /// FQDN under .test, e.g. acme-dashboard.test
+    #[serde(default)]
+    pub domain: String,
     pub php_version: Option<String>,
     pub node_version: Option<String>,
     pub https: bool,
+    #[serde(default)]
+    pub framework: Option<String>,
+    #[serde(default)]
+    pub database_engine: Option<String>,
+    #[serde(default)]
+    pub database_name: Option<String>,
+    #[serde(default)]
+    pub database_user: Option<String>,
+    #[serde(default)]
+    pub status: String,
+}
+
+impl SiteRecord {
+    pub fn ensure_domain(&mut self) {
+        if self.domain.is_empty() {
+            let slug = slugify(&self.name);
+            self.domain = format!("{slug}.test");
+        }
+        if self.status.is_empty() {
+            self.status = "stopped".into();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -51,6 +122,14 @@ pub struct Paths {
     pub packages: PathBuf,
     pub downloads: PathBuf,
     pub state_file: PathBuf,
+    pub run: PathBuf,
+    pub logs: PathBuf,
+    pub nginx: PathBuf,
+    pub php: PathBuf,
+    pub certs: PathBuf,
+    pub databases: PathBuf,
+    pub sites_meta: PathBuf,
+    pub helper: PathBuf,
 }
 
 impl Paths {
@@ -58,18 +137,58 @@ impl Paths {
         let packages = root.join("packages");
         let downloads = root.join("downloads");
         let state_file = root.join("state.json");
-        fs::create_dir_all(&packages)?;
-        fs::create_dir_all(&downloads)?;
+        let run = root.join("run");
+        let logs = root.join("logs");
+        let nginx = root.join("nginx");
+        let php = root.join("php");
+        let certs = root.join("certs");
+        let databases = root.join("databases");
+        let sites_meta = root.join("sites");
+        let helper = root.join("helper");
+        for p in [
+            &packages,
+            &downloads,
+            &run,
+            &logs,
+            &nginx,
+            &php,
+            &certs,
+            &databases,
+            &sites_meta,
+            &helper,
+        ] {
+            fs::create_dir_all(p)?;
+        }
         Ok(Self {
             root,
             packages,
             downloads,
             state_file,
+            run,
+            logs,
+            nginx,
+            php,
+            certs,
+            databases,
+            sites_meta,
+            helper,
         })
     }
 
     pub fn package_dir(&self, package_id: &str, version: &str) -> PathBuf {
         self.packages.join(package_id).join(version)
+    }
+
+    pub fn nginx_conf_dir(&self) -> PathBuf {
+        self.nginx.join("conf")
+    }
+
+    pub fn nginx_sites_dir(&self) -> PathBuf {
+        self.nginx.join("sites")
+    }
+
+    pub fn pid_file(&self, name: &str) -> PathBuf {
+        self.run.join(format!("{name}.pid"))
     }
 }
 
@@ -84,7 +203,11 @@ pub fn load_state(path: &Path) -> Result<AppState> {
         return Ok(AppState::default());
     }
     let raw = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&raw)?)
+    let mut state: AppState = serde_json::from_str(&raw)?;
+    for site in &mut state.sites {
+        site.ensure_domain();
+    }
+    Ok(state)
 }
 
 pub fn save_state(path: &Path, state: &AppState) -> Result<()> {
@@ -120,14 +243,26 @@ pub fn mark_uninstalled(state: &mut AppState, package_id: &str, version: &str) -
 
 pub fn ensure_demo_site(state: &mut AppState) {
     if state.sites.is_empty() {
-        state.sites.push(SiteRecord {
+        let mut site = SiteRecord {
             id: "acme-dashboard".into(),
             name: "acme-dashboard".into(),
             path: PathBuf::from("~/Sites/acme-dashboard"),
+            domain: "acme-dashboard.test".into(),
             php_version: None,
             node_version: None,
             https: true,
-        });
+            framework: Some("other".into()),
+            database_engine: None,
+            database_name: None,
+            database_user: None,
+            status: "stopped".into(),
+        };
+        site.ensure_domain();
+        state.sites.push(site);
+    } else {
+        for site in &mut state.sites {
+            site.ensure_domain();
+        }
     }
 }
 
@@ -136,4 +271,41 @@ pub fn remove_dir_if_exists(path: &Path) -> Result<()> {
         fs::remove_dir_all(path).map_err(DevStackError::Io)?;
     }
     Ok(())
+}
+
+pub fn slugify(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' || ch.is_whitespace() {
+            if !out.ends_with('-') {
+                out.push('-');
+            }
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "site".into()
+    } else {
+        trimmed
+    }
+}
+
+pub fn latest_installed<'a>(
+    state: &'a AppState,
+    package_id: &str,
+) -> Option<&'a InstalledRecord> {
+    state.installed.get(package_id).and_then(|v| v.first())
+}
+
+pub fn find_installed<'a>(
+    state: &'a AppState,
+    package_id: &str,
+    version: &str,
+) -> Option<&'a InstalledRecord> {
+    state.installed.get(package_id).and_then(|list| {
+        list.iter()
+            .find(|r| r.version == version || r.channel.as_deref() == Some(version))
+    })
 }

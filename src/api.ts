@@ -7,7 +7,9 @@ import type {
   PackageVersion,
   PhpExtensionView,
   ProgressEvent,
+  SiteDetails,
   SiteRecord,
+  StackStatus,
 } from "./types";
 
 export const isTauri = (): boolean =>
@@ -55,6 +57,26 @@ export async function getSites(): Promise<SiteRecord[]> {
   return invoke<SiteRecord[]>("get_sites");
 }
 
+export async function listSiteDetails(): Promise<SiteDetails[]> {
+  return invoke<SiteDetails[]>("list_site_details");
+}
+
+export async function getSiteDetails(siteId: string): Promise<SiteDetails> {
+  return invoke<SiteDetails>("get_site_details", { siteId });
+}
+
+export async function createSite(
+  name: string,
+  path: string,
+  phpVersion?: string | null,
+): Promise<SiteRecord> {
+  return invoke<SiteRecord>("create_site_cmd", {
+    name,
+    path,
+    phpVersion: phpVersion ?? null,
+  });
+}
+
 export async function updateSiteEnvironment(
   siteId: string,
   patch: {
@@ -84,6 +106,22 @@ export async function setPhpXdebug(
 
 export async function setPhpManifestUrl(url: string | null): Promise<void> {
   return invoke("set_php_manifest_url", { url });
+}
+
+export async function getStackStatus(): Promise<StackStatus> {
+  return invoke<StackStatus>("get_stack_status");
+}
+
+export async function startDevStack(): Promise<StackStatus> {
+  return invoke<StackStatus>("start_dev_stack");
+}
+
+export async function stopDevStack(): Promise<StackStatus> {
+  return invoke<StackStatus>("stop_dev_stack");
+}
+
+export async function applyDevStack(): Promise<StackStatus> {
+  return invoke<StackStatus>("apply_dev_stack");
 }
 
 export async function onInstallProgress(

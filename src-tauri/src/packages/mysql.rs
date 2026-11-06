@@ -1,15 +1,17 @@
-//! MySQL Community Server — version list from GitHub tags + CDN notes.
-//!
-//! Install of platform archives lands in a later milestone; listing is live.
+//! MySQL Community Server — version list + binary install (Windows/Linux).
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::fs;
 
 use super::{
-    default_uninstall, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
+    default_uninstall, now_iso, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
 };
-use crate::config::{AppState, Paths};
-use crate::downloads::ProgressFn;
+use crate::config::{mark_installed, save_state, AppState, InstalledRecord, Paths};
+use crate::downloads::{
+    current_arch, current_os, download_and_verify, extract_archive, ArchiveKind, ProgressEvent,
+    ProgressFn,
+};
 use crate::error::{DevStackError, Result};
 
 #[derive(Clone)]
@@ -26,6 +28,47 @@ impl MySqlProvider {
     pub fn new(client: reqwest::Client) -> Self {
         Self { client }
     }
+
+    fn artifact_for(version: &str) -> Result<(String, String, ArchiveKind)> {
+        let os = current_os();
+        let arch = current_arch();
+        let major_minor = version
+            .split('.')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(".");
+        match (os, arch) {
+            ("windows", "x64") | ("windows", _) => Ok((
+                format!("mysql-{version}-winx64.zip"),
+                format!(
+                    "https://cdn.mysql.com/Downloads/MySQL-{major_minor}/mysql-{version}-winx64.zip"
+                ),
+                ArchiveKind::Zip,
+            )),
+            ("linux", "x64") => Ok((
+                format!("mysql-{version}-linux-glibc2.28-x86_64.tar.xz"),
+                format!(
+                    "https://cdn.mysql.com/Downloads/MySQL-{major_minor}/mysql-{version}-linux-glibc2.28-x86_64.tar.xz"
+                ),
+                ArchiveKind::TarXz,
+            )),
+            ("macos", "arm64") => Ok((
+                format!("mysql-{version}-macos14-arm64.tar.gz"),
+                format!(
+                    "https://cdn.mysql.com/Downloads/MySQL-{major_minor}/mysql-{version}-macos14-arm64.tar.gz"
+                ),
+                ArchiveKind::TarGz,
+            )),
+            ("macos", "x64") => Ok((
+                format!("mysql-{version}-macos14-x86_64.tar.gz"),
+                format!(
+                    "https://cdn.mysql.com/Downloads/MySQL-{major_minor}/mysql-{version}-macos14-x86_64.tar.gz"
+                ),
+                ArchiveKind::TarGz,
+            )),
+            _ => Err(DevStackError::UnsupportedPlatform(format!("{os}/{arch}"))),
+        }
+    }
 }
 
 #[async_trait]
@@ -34,16 +77,13 @@ impl PackageProvider for MySqlProvider {
         PackageInfo {
             id: "mysql".into(),
             name: "MySQL".into(),
-            description: "MySQL Community Server (official archives).".into(),
+            description: "MySQL Community Server — install, start, stop via DevStack.".into(),
             category: "service".into(),
-            // Binary install wiring follows the same download+SHA path as Node;
-            // deferred to keep this milestone focused on the provider surface.
-            install_ready: false,
+            install_ready: true,
         }
     }
 
     async fn list_versions(&self, _state: &AppState) -> Result<Vec<PackageVersion>> {
-        // Official mysql/mysql-server tags: mysql-8.4.5, mysql-8.0.40, mysql-9.x, …
         let tags: Vec<GhTag> = self
             .client
             .get("https://api.github.com/repos/mysql/mysql-server/tags?per_page=100")
@@ -59,7 +99,6 @@ impl PackageProvider for MySqlProvider {
             let Some(version) = tag.name.strip_prefix("mysql-") else {
                 continue;
             };
-            // Skip cluster / innovation noise prefixes already stripped; keep semver-ish.
             if !version
                 .chars()
                 .next()
@@ -74,10 +113,10 @@ impl PackageProvider for MySqlProvider {
                 .collect::<Vec<_>>()
                 .join(".");
             let major = channel.split('.').next().unwrap_or("0");
-            // CDN layout uses MySQL-<major.minor>/ for classic lines; Innovation uses Downloads/MySQL-<major>/
-            let url = format!(
-                "https://cdn.mysql.com/Downloads/MySQL-{channel}/mysql-{version}-INFO.txt"
-            );
+            let (name, url, _) = match Self::artifact_for(version) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
             out.push(PackageVersion {
                 label: version.to_string(),
                 version: version.to_string(),
@@ -85,12 +124,9 @@ impl PackageProvider for MySqlProvider {
                 lts: (major == "8" && channel.ends_with(".4")) || channel == "8.0",
                 download_url: Some(url),
                 sha256: None,
-                notes: Some(
-                    "Version listing from mysql/mysql-server tags. Full archive install in a later milestone."
-                        .into(),
-                ),
+                notes: Some(format!("Artifact {name}")),
             });
-            if out.len() >= 40 {
+            if out.len() >= 30 {
                 break;
             }
         }
@@ -99,15 +135,69 @@ impl PackageProvider for MySqlProvider {
 
     async fn install(
         &self,
-        _version: &str,
-        _paths: &Paths,
-        _state: &mut AppState,
-        _progress: ProgressFn,
+        version: &str,
+        paths: &Paths,
+        state: &mut AppState,
+        progress: ProgressFn,
     ) -> Result<InstalledPackage> {
-        Err(DevStackError::Message(
-            "MySQL archive install lands in the next milestone (provider + checksum path already shared)."
-                .into(),
-        ))
+        let versions = self.list_versions(state).await?;
+        let meta = versions
+            .into_iter()
+            .find(|v| v.version == version || v.channel == version)
+            .ok_or_else(|| DevStackError::VersionNotFound(version.into()))?;
+        let (file_name, url, kind) = Self::artifact_for(&meta.version)?;
+        let archive = paths.downloads.join(&file_name);
+        download_and_verify(
+            &self.client,
+            &url,
+            &archive,
+            None,
+            "mysql",
+            &meta.version,
+            &progress,
+        )
+        .await?;
+
+        progress(ProgressEvent {
+            package_id: "mysql".into(),
+            version: meta.version.clone(),
+            phase: "extracting".into(),
+            downloaded: 0,
+            total: None,
+        });
+
+        let dest = paths.package_dir("mysql", &meta.version);
+        crate::config::remove_dir_if_exists(&dest)?;
+        fs::create_dir_all(&dest)?;
+        extract_archive(&archive, &dest, kind, 1)?;
+        let _ = fs::remove_file(&archive);
+
+        let record = InstalledRecord {
+            version: meta.version.clone(),
+            channel: Some(meta.channel.clone()),
+            path: dest,
+            installed_at: now_iso(),
+        };
+        mark_installed(state, "mysql", record.clone())?;
+        state.stack.mysql_version = Some(meta.version.clone());
+        state.active_database = Some("mysql".into());
+        save_state(&paths.state_file, state)?;
+
+        progress(ProgressEvent {
+            package_id: "mysql".into(),
+            version: meta.version.clone(),
+            phase: "done".into(),
+            downloaded: 0,
+            total: None,
+        });
+
+        Ok(InstalledPackage {
+            package_id: "mysql".into(),
+            version: record.version,
+            channel: record.channel,
+            path: record.path,
+            installed_at: record.installed_at,
+        })
     }
 
     async fn uninstall(

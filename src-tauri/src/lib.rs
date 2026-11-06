@@ -4,18 +4,31 @@ pub mod downloads;
 pub mod error;
 pub mod packages;
 pub mod php;
+pub mod services;
 
 use std::sync::Arc;
 
 use commands::{
-    bootstrap_ctx, get_app_info, get_sites, install_package, list_installed,
-    list_package_versions, list_packages, list_php_extension_settings, set_php_manifest_url,
-    set_php_xdebug, uninstall_package, update_site_environment,
+    apply_dev_stack, bootstrap_ctx, create_site_cmd, get_app_info, get_site_details, get_sites,
+    get_stack_status, install_package, list_installed, list_package_versions, list_packages,
+    list_php_extension_settings, list_site_details, register_system_php_cmd, set_php_manifest_url,
+    set_php_xdebug, start_dev_stack, stop_dev_stack, uninstall_package, update_site_environment,
 };
 use config::default_data_root;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Tiny DNS daemon mode for detached helper process.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--devstack-dns") {
+        let port = args
+            .get(i + 1)
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(5353u16);
+        services::dns::run_dns_daemon(port).expect("dns daemon failed");
+        return;
+    }
+
     let ctx = bootstrap_ctx(default_data_root()).expect("failed to init DevStack data dir");
     let ctx = Arc::new(ctx);
 
@@ -30,15 +43,22 @@ pub fn run() {
             install_package,
             uninstall_package,
             get_sites,
+            list_site_details,
+            get_site_details,
+            create_site_cmd,
             update_site_environment,
             list_php_extension_settings,
             set_php_xdebug,
             set_php_manifest_url,
+            get_stack_status,
+            start_dev_stack,
+            stop_dev_stack,
+            apply_dev_stack,
+            register_system_php_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");
 }
 
-/// Expose context construction for integration tests / CLI smoke helpers.
 pub use commands::AppCtx as DevStackCtx;
 pub use config::default_data_root as data_root;

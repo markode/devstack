@@ -7,7 +7,9 @@ import type {
   PackageVersion,
   PhpExtensionView,
   ProgressEvent,
+  SiteDetails,
   SiteRecord,
+  StackStatus,
 } from "./types";
 
 const useMock = () => !api.isTauri();
@@ -57,6 +59,16 @@ export async function getSites(): Promise<SiteRecord[]> {
   return api.getSites();
 }
 
+export async function listSiteDetails(): Promise<SiteDetails[]> {
+  if (useMock()) return mock.mockListSiteDetails();
+  return api.listSiteDetails();
+}
+
+export async function getSiteDetails(siteId: string): Promise<SiteDetails> {
+  if (useMock()) return mock.mockGetSiteDetails(siteId);
+  return api.getSiteDetails(siteId);
+}
+
 export async function updateSiteEnvironment(
   siteId: string,
   patch: {
@@ -86,6 +98,21 @@ export async function setPhpXdebug(
 ): Promise<PhpExtensionView> {
   if (useMock()) return mock.mockSetXdebug(version, enabled);
   return api.setPhpXdebug(version, enabled);
+}
+
+export async function getStackStatus(): Promise<StackStatus> {
+  if (useMock()) return mock.mockStackStatus;
+  return api.getStackStatus();
+}
+
+export async function startDevStack(): Promise<StackStatus> {
+  if (useMock()) return { ...mock.mockStackStatus, nginx: true, database: true };
+  return api.startDevStack();
+}
+
+export async function stopDevStack(): Promise<StackStatus> {
+  if (useMock()) return { ...mock.mockStackStatus, nginx: false, database: false };
+  return api.stopDevStack();
 }
 
 export async function onInstallProgress(
