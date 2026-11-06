@@ -57,20 +57,48 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      - name: Build Tauri installers
-        uses: tauri-apps/tauri-action@v0
+      # Empty APPLE_* / TAURI_* secrets expand to "" in Actions; Tauri still sees the
+      # env var as set and tries PKCS#12 import → codesign failure. Only forward
+      # non-empty values so unsigned CI builds succeed.
+      - name: Export optional signing env
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Optional Apple signing / notarization (builds succeed without these):
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Optional Windows Authenticode:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export_if_set() {
+            local name="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              {
+                echo "${name}<<EOF"
+                printf '%s\n' "$value"
+                echo "EOF"
+              } >> "$GITHUB_ENV"
+              echo "Forwarding ${name}"
+            else
+              echo "Skipping empty ${name} (unsigned build)"
+            fi
+          }
+          export_if_set APPLE_CERTIFICATE "${APPLE_CERTIFICATE:-}"
+          export_if_set APPLE_CERTIFICATE_PASSWORD "${APPLE_CERTIFICATE_PASSWORD:-}"
+          export_if_set APPLE_SIGNING_IDENTITY "${APPLE_SIGNING_IDENTITY:-}"
+          export_if_set APPLE_ID "${APPLE_ID:-}"
+          export_if_set APPLE_PASSWORD "${APPLE_PASSWORD:-}"
+          export_if_set APPLE_TEAM_ID "${APPLE_TEAM_ID:-}"
+          export_if_set TAURI_SIGNING_PRIVATE_KEY "${TAURI_SIGNING_PRIVATE_KEY:-}"
+          export_if_set TAURI_SIGNING_PRIVATE_KEY_PASSWORD "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+
+      - name: Build Tauri installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "DevStack ${{ github.ref_name }}"

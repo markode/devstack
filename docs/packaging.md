@@ -29,6 +29,8 @@ Triggers: push of a `v*` tag (or manual `workflow_dispatch`). Artifacts upload t
 
 Without these, `tauri build` still produces a usable (Gatekeeper-unnotarized) `.dmg`.
 
+**Important:** do not create empty placeholder secrets. An empty `APPLE_CERTIFICATE` is still injected as an env var and makes the bundler attempt PKCS#12 import (and fail). The release workflow only forwards non-empty signing secrets; `tauri.conf.json` uses macOS `signingIdentity: "-"` (ad-hoc) for unsigned CI.
+
 ### Windows
 
 | Secret | Purpose |
