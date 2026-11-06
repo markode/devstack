@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "version": "8.4.5",
+      "channel": "8.4",
+      "os": "macos",
+      "arch": "aarch64",
+      "url": "https://example.invalid/php-8.4.5-macos-aarch64.tar.gz",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "format": "tar.gz",
+      "notes": "Example static-php-cli style build — replace with a real artifact URL"
+    },
+    {
+      "version": "8.4.5",
+      "channel": "8.4",
+      "os": "linux",
+      "arch": "x86_64",
+      "url": "https://example.invalid/php-8.4.5-linux-x86_64.tar.gz",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "format": "tar.gz",
+      "notes": "Example entry for Linux CI / local testing"
+    }
+  ]
+}
