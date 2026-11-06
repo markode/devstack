@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 use commands::{
     apply_dev_stack, backup_site_database, bootstrap_ctx, create_site_cmd, create_wordpress,
-    duplicate_site, get_app_info, get_site_details, get_sites, get_stack_status, get_templates,
-    install_package, list_installed, list_package_versions, list_packages,
-    list_php_extension_settings, list_site_details, mark_template, register_system_php_cmd,
-    restore_site_database, seed_site_large_table, set_php_manifest_url, set_php_xdebug,
-    start_dev_stack, stop_dev_stack, uninstall_package, update_site_environment,
+    duplicate_site, get_app_info, get_service_log, get_site_details, get_sites, get_stack_status,
+    get_templates, install_package, list_installed, list_managed_services_cmd,
+    list_package_versions, list_packages, list_php_extension_settings, list_site_details,
+    mark_template, register_system_php_cmd, restore_site_database, seed_site_large_table,
+    set_php_manifest_url, set_php_xdebug, start_dev_stack, start_managed_service, stop_dev_stack,
+    stop_managed_service, uninstall_package, update_package, update_site_environment,
 };
 use config::default_data_root;
 
@@ -64,6 +65,11 @@ pub fn run() {
             backup_site_database,
             restore_site_database,
             seed_site_large_table,
+            list_managed_services_cmd,
+            start_managed_service,
+            stop_managed_service,
+            get_service_log,
+            update_package,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");

@@ -30,7 +30,7 @@ const ITEMS: NavItem[] = [
     glyph: "⌘",
     placeholder: true,
   },
-  { id: "about", label: "About", color: "#64d2ff", glyph: "i", placeholder: true },
+  { id: "about", label: "About", color: "#64d2ff", glyph: "i" },
 ];
 
 export function Sidebar({

@@ -41,6 +41,9 @@ cd src-tauri && DEVSTACK_DATA_DIR=/tmp/devstack-smoke cargo run --bin devstack_s
 # Milestone 3: one-click WP → template → duplicate over HTTPS
 cd src-tauri && DEVSTACK_RESET_SITES=1 DEVSTACK_DATA_DIR=/tmp/devstack-smoke \
   cargo run --bin devstack_smoke -- --wordpress
+# Milestone 4: Postgres + MongoDB + Redis + Mailpit
+cd src-tauri && DEVSTACK_DATA_DIR=/tmp/devstack-smoke \
+  cargo run --bin devstack_smoke -- --services
 ```
 
 ## Package architecture
@@ -55,7 +58,10 @@ Every runtime/service implements `PackageProvider` (list → download → SHA256
 | `phpmyadmin` | phpmyadmin.net + `.sha256` | Yes |
 | `mysql` | Community archives (CDN) | Yes |
 | `mariadb` | downloads.mariadb.org REST + binary tarball/zip | Yes |
-| `mongodb` / `postgresql` | Official catalogs | List (install later) |
+| `mongodb` | downloads.mongodb.org `current.json` + SHA256 | Yes |
+| `postgresql` | theseus-rs binaries + `.sha256` | Yes |
+| `redis` | redis.io tarballs (redis-hashes SHA256); Windows zip builds | Yes |
+| `mailpit` | GitHub releases + asset digest | Yes |
 
 ### Stack runtime (milestone 2)
 
@@ -72,6 +78,15 @@ Every runtime/service implements `PackageProvider` (list → download → SHA256
 - **Templates** — mark any site: streaming file archive + DB dump (gzip/zstd, no size limits)
 - **Duplicate** — copy files, stream import, `wp search-replace` (serialized-safe, all tables), refresh credentials
 - **Backup / restore** from site detail via mysqldump/mysql pipes
+
+### Extra services & packaging (milestone 4)
+
+- **MongoDB / PostgreSQL / Redis / Mailpit** — full install + start/stop; Services page shows status, ports, logs
+- **Mailpit** — SMTP `:1025`, UI on `mailpit.test` (Nginx proxy) + PHP SMTP hint ini
+- **GitHub Actions** release workflow (`tauri-action`) → draft Release with macOS `.dmg` and Windows NSIS/MSI
+- **Signing docs** in `docs/packaging.md` (optional; unsigned CI builds work)
+- **Auto-updater stub** in `tauri.conf.json`
+- App icon + polished **About** page
 
 Privileged operations are isolated in `helper/devstack-helper.sh` (sudo/pkexec only for hosts/resolver/CA trust).
 
@@ -90,16 +105,17 @@ Unlimited upload/memory/time limits + OPcache; per-version Xdebug toggle on the 
 
 ## UI
 
-- **General / PHP / JavaScript / Services** — package tables
+- **General / PHP / JavaScript / Services** — package tables + runtime status/start/stop/logs
 - **Sites** — 3-column tile grid; **New WordPress** / **Duplicate**; detail view with template mark, streaming DB backup/restore, Open database for WordPress
-- Placeholders: AI, Pro, Sharing, Shortcuts, About
+- **About** — brand, version, stack summary, updater note
+- Placeholders: AI, Pro, Sharing, Shortcuts
 
 ## Roadmap
 
 1. ~~M1 package core + PHP/Node UI~~
 2. ~~M2 Nginx, `.test` HTTPS, MySQL/MariaDB, Sites grid~~
 3. ~~M3 One-click WordPress, templates/duplicate, streaming DB backup~~
-4. MongoDB / PostgreSQL full install path
+4. ~~M4 Mongo/Postgres/Redis/Mailpit + packaging + About~~
 5. Site PATH shims / CLI isolation
 6. Sharing / Pro / AI surfaces
 

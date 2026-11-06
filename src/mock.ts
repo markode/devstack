@@ -12,6 +12,7 @@ import type {
   SiteDetails,
   SiteRecord,
   StackStatus,
+  ManagedServiceStatus,
   TemplateRecord,
 } from "./types";
 
@@ -85,14 +86,82 @@ export const mockPackages: PackageInfo[] = [
     name: "MongoDB",
     description: "MongoDB Community Server.",
     category: "service",
-    installReady: false,
+    installReady: true,
   },
   {
     id: "postgresql",
     name: "PostgreSQL",
     description: "PostgreSQL.",
     category: "service",
-    installReady: false,
+    installReady: true,
+  },
+  {
+    id: "redis",
+    name: "Redis",
+    description: "Redis in-memory store.",
+    category: "service",
+    installReady: true,
+  },
+  {
+    id: "mailpit",
+    name: "Mailpit",
+    description: "Catch-all SMTP + web UI.",
+    category: "service",
+    installReady: true,
+  },
+];
+
+let managed: ManagedServiceStatus[] = [
+  {
+    id: "nginx",
+    name: "Nginx",
+    running: true,
+    installed: true,
+    version: "1.28.3",
+    ports: [80, 443],
+    logPath: "/tmp/nginx.err",
+  },
+  {
+    id: "mariadb",
+    name: "MariaDB",
+    running: true,
+    installed: true,
+    version: "11.4.5",
+    ports: [3306],
+  },
+  {
+    id: "mongodb",
+    name: "MongoDB",
+    running: false,
+    installed: true,
+    version: "8.0.4",
+    ports: [27017],
+  },
+  {
+    id: "postgresql",
+    name: "PostgreSQL",
+    running: true,
+    installed: true,
+    version: "16.10.0",
+    ports: [5432],
+  },
+  {
+    id: "redis",
+    name: "Redis",
+    running: true,
+    installed: true,
+    version: "8.0.4",
+    ports: [6379],
+  },
+  {
+    id: "mailpit",
+    name: "Mailpit",
+    running: true,
+    installed: true,
+    version: "1.22.3",
+    ports: [1025, 8025],
+    uiUrl: "https://mailpit.test",
+    notes: "SMTP :1025 · UI :8025 / mailpit.test",
   },
 ];
 
@@ -153,17 +222,33 @@ const versionTables: Record<string, PackageVersion[]> = {
     lts: true,
     downloadUrl: "https://downloads.mariadb.org/example.tar.gz",
   })),
+  postgresql: ["16.10.0", "15.5.4"].map((v) => ({
+    version: v,
+    channel: v.split(".")[0],
+    label: v,
+    lts: true,
+    downloadUrl: "https://example.invalid/pg.tar.gz",
+  })),
   mongodb: ["8.0.4", "7.0.14"].map((v) => ({
     version: v,
     channel: v.split(".").slice(0, 2).join("."),
     label: v,
     lts: true,
+    downloadUrl: "https://example.invalid/mongo.tgz",
   })),
-  postgresql: ["17.4", "16.8"].map((v) => ({
+  redis: ["8.0.4", "7.4.2"].map((v) => ({
     version: v,
-    channel: v.split(".")[0],
+    channel: v.split(".").slice(0, 2).join("."),
     label: v,
     lts: true,
+    downloadUrl: "https://example.invalid/redis.tgz",
+  })),
+  mailpit: ["1.22.3", "1.21.0"].map((v) => ({
+    version: v,
+    channel: v,
+    label: v,
+    lts: true,
+    downloadUrl: "https://example.invalid/mailpit.tgz",
   })),
 };
 
@@ -435,4 +520,32 @@ export async function mockRestoreSite(
   _archivePath: string,
 ): Promise<void> {
   await delay(300);
+}
+
+export async function mockManagedServices(): Promise<ManagedServiceStatus[]> {
+  return managed;
+}
+
+export async function mockStartService(
+  serviceId: string,
+): Promise<ManagedServiceStatus> {
+  await delay(200);
+  managed = managed.map((s) =>
+    s.id === serviceId ? { ...s, running: true } : s,
+  );
+  return managed.find((s) => s.id === serviceId)!;
+}
+
+export async function mockStopService(
+  serviceId: string,
+): Promise<ManagedServiceStatus> {
+  await delay(200);
+  managed = managed.map((s) =>
+    s.id === serviceId ? { ...s, running: false } : s,
+  );
+  return managed.find((s) => s.id === serviceId)!;
+}
+
+export async function mockServiceLog(serviceId: string): Promise<string> {
+  return `[devstack] mock log for ${serviceId}\nready for connections`;
 }

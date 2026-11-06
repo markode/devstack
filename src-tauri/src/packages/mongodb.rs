@@ -1,14 +1,18 @@
-//! MongoDB Community — versions from downloads.mongodb.org/current.json.
+//! MongoDB Community — versions + install from downloads.mongodb.org/current.json.
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
+use std::fs;
 
 use super::{
-    default_uninstall, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
+    default_uninstall, now_iso, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
 };
-use crate::config::{AppState, Paths};
-use crate::downloads::{current_arch, current_os, ProgressFn};
+use crate::config::{mark_installed, save_state, AppState, InstalledRecord, Paths};
+use crate::downloads::{
+    current_arch, current_os, download_and_verify, extract_archive, ArchiveKind, ProgressEvent,
+    ProgressFn,
+};
 use crate::error::{DevStackError, Result};
 
 const CURRENT_JSON: &str = "https://downloads.mongodb.org/current.json";
@@ -50,7 +54,6 @@ impl MongoDbProvider {
         let mut scored: Vec<(i32, String, Option<String>, String)> = Vec::new();
         for d in downloads {
             let edition = d.get("edition").and_then(|v| v.as_str()).unwrap_or("");
-            // Prefer community / targeted over enterprise
             let edition_score = match edition {
                 "targeted" | "base" | "" => 10,
                 "enterprise" => 0,
@@ -70,13 +73,19 @@ impl MongoDbProvider {
                 "macos" if target.contains("macos") || target.contains("osx") => 20,
                 "windows" if target.contains("windows") || target == "windows" => 20,
                 "linux"
-                    if target.contains("ubuntu")
+                    if target.contains("ubuntu2404")
+                        || target.contains("ubuntu2204")
+                        || target.contains("ubuntu")
                         || target.contains("debian")
                         || target.contains("amazon")
                         || target.contains("rhel")
                         || target == "linux" =>
                 {
-                    15
+                    let mut s = 15;
+                    if target.contains("ubuntu2404") {
+                        s += 5;
+                    }
+                    s
                 }
                 _ => 0,
             };
@@ -106,9 +115,9 @@ impl PackageProvider for MongoDbProvider {
         PackageInfo {
             id: "mongodb".into(),
             name: "MongoDB".into(),
-            description: "MongoDB Community Server.".into(),
+            description: "MongoDB Community Server — install, start, stop.".into(),
             category: "service".into(),
-            install_ready: false,
+            install_ready: true,
         }
     }
 
@@ -144,9 +153,7 @@ impl PackageProvider for MongoDbProvider {
                 lts: v.production_release,
                 download_url,
                 sha256,
-                notes: note.or_else(|| {
-                    Some("Checksums from downloads.mongodb.org; install in next milestone.".into())
-                }),
+                notes: note,
             });
         }
         Ok(out)
@@ -154,15 +161,72 @@ impl PackageProvider for MongoDbProvider {
 
     async fn install(
         &self,
-        _version: &str,
-        _paths: &Paths,
-        _state: &mut AppState,
-        _progress: ProgressFn,
+        version: &str,
+        paths: &Paths,
+        state: &mut AppState,
+        progress: ProgressFn,
     ) -> Result<InstalledPackage> {
-        Err(DevStackError::Message(
-            "MongoDB archive install lands in the next milestone (listing + SHA256 already available)."
-                .into(),
-        ))
+        let versions = self.list_versions(state).await?;
+        let meta = versions
+            .into_iter()
+            .find(|v| v.version == version || v.channel == version)
+            .ok_or_else(|| DevStackError::VersionNotFound(version.into()))?;
+        let url = meta
+            .download_url
+            .clone()
+            .ok_or_else(|| DevStackError::Message("No MongoDB binary for this OS/arch".into()))?;
+        let file_name = url.rsplit('/').next().unwrap_or("mongodb.tgz").to_string();
+        let archive = paths.downloads.join(&file_name);
+        download_and_verify(
+            &self.client,
+            &url,
+            &archive,
+            meta.sha256.as_deref(),
+            "mongodb",
+            &meta.version,
+            &progress,
+        )
+        .await?;
+
+        progress(ProgressEvent {
+            package_id: "mongodb".into(),
+            version: meta.version.clone(),
+            phase: "extracting".into(),
+            downloaded: 0,
+            total: None,
+        });
+
+        let dest = paths.package_dir("mongodb", &meta.version);
+        crate::config::remove_dir_if_exists(&dest)?;
+        fs::create_dir_all(&dest)?;
+        let kind = ArchiveKind::from_name(&file_name)?;
+        extract_archive(&archive, &dest, kind, 1)?;
+        let _ = fs::remove_file(&archive);
+
+        let record = InstalledRecord {
+            version: meta.version.clone(),
+            channel: Some(meta.channel.clone()),
+            path: dest,
+            installed_at: now_iso(),
+        };
+        mark_installed(state, "mongodb", record.clone())?;
+        save_state(&paths.state_file, state)?;
+
+        progress(ProgressEvent {
+            package_id: "mongodb".into(),
+            version: meta.version.clone(),
+            phase: "done".into(),
+            downloaded: 0,
+            total: None,
+        });
+
+        Ok(InstalledPackage {
+            package_id: "mongodb".into(),
+            version: record.version,
+            channel: record.channel,
+            path: record.path,
+            installed_at: record.installed_at,
+        })
     }
 
     async fn uninstall(

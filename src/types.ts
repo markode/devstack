@@ -156,6 +156,18 @@ export interface BackupResult {
   bytes: number;
 }
 
+export interface ManagedServiceStatus {
+  id: string;
+  name: string;
+  running: boolean;
+  installed: boolean;
+  version?: string | null;
+  ports: number[];
+  logPath?: string | null;
+  uiUrl?: string | null;
+  notes?: string | null;
+}
+
 export interface PhpExtensionView {
   version: string;
   xdebug: boolean;

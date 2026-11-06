@@ -16,6 +16,7 @@ import type {
   SiteDetails,
   SiteRecord,
   StackStatus,
+  ManagedServiceStatus,
   TemplateRecord,
 } from "./types";
 
@@ -174,4 +175,36 @@ export async function restoreSiteDatabase(
   archivePath: string,
 ): Promise<void> {
   return invoke("restore_site_database", { siteId, archivePath });
+}
+
+export async function listManagedServices(): Promise<ManagedServiceStatus[]> {
+  return invoke<ManagedServiceStatus[]>("list_managed_services_cmd");
+}
+
+export async function startManagedService(
+  serviceId: string,
+): Promise<ManagedServiceStatus> {
+  return invoke<ManagedServiceStatus>("start_managed_service", { serviceId });
+}
+
+export async function stopManagedService(
+  serviceId: string,
+): Promise<ManagedServiceStatus> {
+  return invoke<ManagedServiceStatus>("stop_managed_service", { serviceId });
+}
+
+export async function getServiceLog(
+  serviceId: string,
+  lines?: number,
+): Promise<string> {
+  return invoke<string>("get_service_log", {
+    serviceId,
+    lines: lines ?? 80,
+  });
+}
+
+export async function updatePackage(
+  packageId: string,
+): Promise<InstalledPackage> {
+  return invoke<InstalledPackage>("update_package", { packageId });
 }

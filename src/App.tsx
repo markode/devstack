@@ -5,6 +5,7 @@ import { PhpPage } from "./pages/PhpPage";
 import { JavaScriptPage } from "./pages/JavaScriptPage";
 import { ServicesPage } from "./pages/ServicesPage";
 import { SitesPage } from "./pages/SitesPage";
+import { AboutPage } from "./pages/AboutPage";
 import type { SectionId } from "./types";
 
 const TITLES: Record<SectionId, string> = {
@@ -98,12 +99,7 @@ export default function App() {
               blurb="Placeholder — keyboard shortcuts and CLI helpers."
             />
           )}
-          {section === "about" && (
-            <PlaceholderPage
-              title="About"
-              blurb="DevStack milestone 1 — Tauri 2 + Rust package core + React UI."
-            />
-          )}
+          {section === "about" && <AboutPage />}
         </div>
       </main>
     </div>

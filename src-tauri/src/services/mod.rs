@@ -3,6 +3,7 @@
 pub mod backup;
 pub mod database;
 pub mod dns;
+pub mod extras;
 pub mod nginx;
 pub mod php_runtime;
 pub mod process;
