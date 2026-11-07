@@ -229,4 +229,63 @@ export async function updatePackage(
   return api.updatePackage(packageId);
 }
 
+export async function getDbFilesSettings() {
+  if (useMock()) {
+    return {
+      folder: null,
+      autoExportIntervalSecs: 300,
+      autoExportOnStop: true,
+      importMode: "ask",
+    };
+  }
+  return api.getDbFilesSettings();
+}
+
+export async function getDatabasesFolder() {
+  if (useMock()) return "/Users/dev/Library/Application Support/DevStack/Databases";
+  return api.getDatabasesFolder();
+}
+
+export async function updateDbFilesSettings(patch: {
+  folder?: string | null;
+  autoExportIntervalSecs?: number;
+  autoExportOnStop?: boolean;
+  importMode?: string;
+}) {
+  if (useMock()) {
+    return {
+      folder: patch.folder ?? null,
+      autoExportIntervalSecs: patch.autoExportIntervalSecs ?? 300,
+      autoExportOnStop: patch.autoExportOnStop ?? true,
+      importMode: patch.importMode ?? "ask",
+    };
+  }
+  return api.updateDbFilesSettings(patch);
+}
+
+export async function listDatabaseFiles() {
+  if (useMock()) return [];
+  return api.listDatabaseFiles();
+}
+
+export async function exportAllDatabasesToFolder() {
+  if (useMock()) return [];
+  return api.exportAllDatabasesToFolder();
+}
+
+export async function downloadSiteDatabase(siteId: string, destPath: string) {
+  if (useMock()) return { path: destPath, bytes: 1_200_000 };
+  return api.downloadSiteDatabase(siteId, destPath);
+}
+
+export async function importSiteDatabaseFile(
+  siteId: string,
+  archivePath: string,
+  search?: string | null,
+  replace?: string | null,
+) {
+  if (useMock()) return;
+  return api.importSiteDatabaseFile(siteId, archivePath, search, replace);
+}
+
 export { useMock };

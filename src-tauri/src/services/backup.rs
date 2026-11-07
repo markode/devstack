@@ -235,6 +235,17 @@ fn compress_stream<R: Read + Send + 'static, W: Write + Send + 'static>(
     }
 }
 
+pub fn decompress_import<R: Read + Send + 'static, W: Write + Send + 'static>(
+    reader: R,
+    writer: W,
+    kind: CompressKind,
+    progress: &JobProgressFn,
+    job_id: &str,
+    total: u64,
+) -> Result<u64> {
+    decompress_to_writer(reader, writer, kind, progress, job_id, total)
+}
+
 fn decompress_to_writer<R: Read + Send + 'static, W: Write + Send + 'static>(
     reader: R,
     writer: W,

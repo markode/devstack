@@ -196,6 +196,21 @@ pub fn start_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Ma
 }
 
 pub fn stop_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<ManagedServiceStatus> {
+    // Portable dump before stopping DB engines (Databases folder).
+    if state.db_files.auto_export_on_stop {
+        let progress = crate::services::progress::noop_job_progress();
+        match id {
+            "mariadb" | "mysql" | "mongodb" | "postgresql" => {
+                let _ = crate::services::db_files::export_all_running(
+                    paths,
+                    state,
+                    &progress,
+                    "export-on-stop",
+                );
+            }
+            _ => {}
+        }
+    }
     match id {
         "mongodb" => {
             if let Some(pid) = state.runtime.mongodb_pid.take() {

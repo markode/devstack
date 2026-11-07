@@ -84,6 +84,7 @@ Every runtime/service implements `PackageProvider` (list → download → SHA256
 - **Templates** — mark any site: streaming file archive + DB dump (gzip/zstd, no size limits)
 - **Duplicate** — copy files, stream import, `wp search-replace` (serialized-safe, all tables), refresh credentials
 - **Backup / restore** from site detail via mysqldump/mysql pipes
+- **Databases folder** — portable dumps under `Databases/` (auto-export, folder watcher, site Download/Import with WP URL rewrite); see `docs/databases-folder.md`
 
 ### Extra services & packaging (milestone 4)
 

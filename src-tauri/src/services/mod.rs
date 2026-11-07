@@ -2,6 +2,7 @@
 
 pub mod backup;
 pub mod database;
+pub mod db_files;
 pub mod dns;
 pub mod extras;
 pub mod httpd;

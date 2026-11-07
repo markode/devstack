@@ -29,6 +29,33 @@ pub struct AppState {
     pub stack: StackPreferences,
     /// Runtime process bookkeeping (pids)
     pub runtime: RuntimeState,
+    /// Plain-file database exports (Databases folder)
+    pub db_files: DatabaseFilesSettings,
+}
+
+/// Settings for the user-facing Databases folder (portable dumps, not raw datadirs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DatabaseFilesSettings {
+    /// Override root for Databases folder; default `{data}/Databases`.
+    pub folder: Option<PathBuf>,
+    /// Auto-export every N seconds while engines are running (0 = disabled).
+    pub auto_export_interval_secs: u64,
+    /// Export dumps when a database service is stopped.
+    pub auto_export_on_stop: bool,
+    /// `ask` = confirm in UI before import; `auto` = import on drop/replace.
+    pub import_mode: String,
+}
+
+impl Default for DatabaseFilesSettings {
+    fn default() -> Self {
+        Self {
+            folder: None,
+            auto_export_interval_secs: 300,
+            auto_export_on_stop: true,
+            import_mode: "ask".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

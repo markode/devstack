@@ -538,10 +538,226 @@ pub async fn smoke_list_node(ctx: &AppCtx) -> Result<Vec<PackageVersion>> {
     provider.list_versions(&state).await
 }
 
+// —— Databases folder (plain-file dumps) ————————————————————————————————
+
+#[tauri::command]
+pub async fn get_db_files_settings(
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<crate::config::DatabaseFilesSettings> {
+    let state = ctx.state.lock().await;
+    Ok(state.db_files.clone())
+}
+
+#[tauri::command]
+pub async fn get_databases_folder(ctx: State<'_, Arc<AppCtx>>) -> Result<String> {
+    let state = ctx.state.lock().await;
+    let root = crate::services::db_files::databases_folder(&ctx.paths, &state.db_files)?;
+    Ok(root.display().to_string())
+}
+
+#[tauri::command]
+pub async fn update_db_files_settings(
+    ctx: State<'_, Arc<AppCtx>>,
+    folder: Option<String>,
+    auto_export_interval_secs: Option<u64>,
+    auto_export_on_stop: Option<bool>,
+    import_mode: Option<String>,
+) -> Result<crate::config::DatabaseFilesSettings> {
+    let mut state = ctx.state.lock().await;
+    if let Some(f) = folder {
+        state.db_files.folder = if f.trim().is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(f))
+        };
+    }
+    if let Some(secs) = auto_export_interval_secs {
+        state.db_files.auto_export_interval_secs = secs;
+    }
+    if let Some(on_stop) = auto_export_on_stop {
+        state.db_files.auto_export_on_stop = on_stop;
+    }
+    if let Some(mode) = import_mode {
+        let normalized = match mode.to_ascii_lowercase().as_str() {
+            "auto" => "auto".to_string(),
+            _ => "ask".to_string(),
+        };
+        state.db_files.import_mode = normalized;
+    }
+    let _ = crate::services::db_files::databases_folder(&ctx.paths, &state.db_files)?;
+    let out = state.db_files.clone();
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn list_database_files(
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<Vec<crate::services::db_files::DbFileEntry>> {
+    let state = ctx.state.lock().await;
+    crate::services::db_files::list_db_files(&ctx.paths, &state)
+}
+
+#[tauri::command]
+pub async fn export_database_to_folder(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+    engine: String,
+    database: String,
+) -> Result<crate::services::db_files::DbFileEntry> {
+    let progress = job_progress_emitter(app);
+    let state = ctx.state.lock().await;
+    crate::services::db_files::export_database_file(
+        &ctx.paths,
+        &state,
+        &engine,
+        &database,
+        &progress,
+        "db-export",
+    )
+}
+
+#[tauri::command]
+pub async fn export_all_databases_to_folder(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<Vec<crate::services::db_files::DbFileEntry>> {
+    let progress = job_progress_emitter(app);
+    let state = ctx.state.lock().await;
+    crate::services::db_files::export_all_running(&ctx.paths, &state, &progress, "db-export-all")
+}
+
+#[tauri::command]
+pub async fn import_database_from_folder(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+    engine: String,
+    database: String,
+    archive_path: String,
+) -> Result<()> {
+    let progress = job_progress_emitter(app);
+    let state = ctx.state.lock().await;
+    crate::services::db_files::import_database_file(
+        &ctx.paths,
+        &state,
+        &engine,
+        &database,
+        PathBuf::from(archive_path).as_path(),
+        &progress,
+        "db-import",
+    )
+}
+
+#[tauri::command]
+pub async fn download_site_database(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+    dest_path: String,
+) -> Result<BackupResult> {
+    let progress = job_progress_emitter(app);
+    let state = ctx.state.lock().await;
+    let site = state
+        .sites
+        .iter()
+        .find(|s| s.id == site_id)
+        .cloned()
+        .ok_or_else(|| crate::error::DevStackError::Message(format!("site not found: {site_id}")))?;
+    let engine = site
+        .database_engine
+        .clone()
+        .or_else(|| state.active_database.clone())
+        .unwrap_or_else(|| "mariadb".into());
+    let db = site
+        .database_name
+        .clone()
+        .or_else(|| detect_site(&site).database_name)
+        .ok_or_else(|| crate::error::DevStackError::Message("no database on site".into()))?;
+    let dest = PathBuf::from(dest_path);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let bytes = backup_database(
+        &ctx.paths,
+        &state,
+        &engine,
+        &db,
+        &dest,
+        &progress,
+        "download-db",
+    )?;
+    Ok(BackupResult {
+        path: dest.display().to_string(),
+        bytes,
+    })
+}
+
+#[tauri::command]
+pub async fn import_site_database_file(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+    archive_path: String,
+    search: Option<String>,
+    replace: Option<String>,
+) -> Result<()> {
+    let progress = job_progress_emitter(app);
+    let (site, engine, db) = {
+        let state = ctx.state.lock().await;
+        let site = state
+            .sites
+            .iter()
+            .find(|s| s.id == site_id)
+            .cloned()
+            .ok_or_else(|| {
+                crate::error::DevStackError::Message(format!("site not found: {site_id}"))
+            })?;
+        let engine = site
+            .database_engine
+            .clone()
+            .or_else(|| state.active_database.clone())
+            .unwrap_or_else(|| "mariadb".into());
+        let db = site
+            .database_name
+            .clone()
+            .or_else(|| detect_site(&site).database_name)
+            .ok_or_else(|| crate::error::DevStackError::Message("no database on site".into()))?;
+        (site, engine, db)
+    };
+    {
+        let state = ctx.state.lock().await;
+        crate::services::db_files::import_database_file(
+            &ctx.paths,
+            &state,
+            &engine,
+            &db,
+            PathBuf::from(&archive_path).as_path(),
+            &progress,
+            "site-import",
+        )?;
+    }
+    let search_replace = match (search, replace) {
+        (Some(s), Some(r)) if !s.is_empty() => Some((s, r)),
+        _ => None,
+    };
+    let state = ctx.state.lock().await;
+    crate::services::db_files::post_import_url_rewrite(
+        &ctx.paths,
+        &state,
+        &site,
+        search_replace,
+        &progress,
+        "site-import-sr",
+    )
+    .await?;
+    Ok(())
+}
+
 pub fn bootstrap_ctx(data_root: std::path::PathBuf) -> Result<AppCtx> {
     let paths = Paths::from_root(data_root)?;
     let mut state = load_state(&paths.state_file)?;
     ensure_demo_site(&mut state);
+    let _ = crate::services::db_files::databases_folder(&paths, &state.db_files);
     save_state(&paths.state_file, &state)?;
     Ok(AppCtx {
         paths,
