@@ -204,7 +204,7 @@ function ServiceBlock({
       ) : null}
       {pkg.loading ? (
         <div className="loading">Loading versions…</div>
-      ) : (
+      ) : pkg.error && pkg.versions.length === 0 ? null : (
         <VersionTable
           versions={pkg.versions}
           installed={pkg.installed}

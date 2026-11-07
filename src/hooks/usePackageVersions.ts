@@ -20,7 +20,18 @@ export function usePackageVersions(packageId: string) {
       ]);
       setVersions(v);
       setInstalled(i);
+      // Database providers must never succeed with an empty list — treat that
+      // as a fetch failure so the UI shows an error instead of a blank table.
+      if (
+        v.length === 0 &&
+        ["mysql", "mariadb", "postgresql", "mongodb"].includes(packageId)
+      ) {
+        setError(
+          `No ${packageId} versions were returned. The version catalog may be unreachable.`,
+        );
+      }
     } catch (e) {
+      setVersions([]);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);

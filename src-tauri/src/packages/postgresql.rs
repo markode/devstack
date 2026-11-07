@@ -65,7 +65,36 @@ impl PostgreSqlProvider {
             .clone();
         Some((archive_name, url))
     }
+
+    fn fallback_download_url(version: &str, triple: &str) -> String {
+        format!(
+            "https://github.com/theseus-rs/postgresql-binaries/releases/download/{version}/postgresql-{version}-{triple}.tar.gz"
+        )
+    }
+
+    fn fallback_versions(triple: &str) -> Vec<PackageVersion> {
+        FALLBACK_VERSIONS
+            .iter()
+            .map(|version| {
+                let major = version.split('.').next().unwrap_or(version).to_string();
+                PackageVersion {
+                    label: format!("PostgreSQL {version}"),
+                    version: (*version).to_string(),
+                    channel: major,
+                    lts: true,
+                    download_url: Some(Self::fallback_download_url(version, triple)),
+                    sha256: None,
+                    notes: Some(format!("theseus-rs binary ({triple}, fallback)")),
+                }
+            })
+            .collect()
+    }
 }
+
+/// Recent theseus-rs builds used when the GitHub API is unavailable.
+const FALLBACK_VERSIONS: &[&str] = &[
+    "17.4.0", "17.2.0", "16.8.0", "16.6.0", "15.12.0", "14.17.0",
+];
 
 #[async_trait]
 impl PackageProvider for PostgreSqlProvider {
@@ -81,47 +110,64 @@ impl PackageProvider for PostgreSqlProvider {
 
     async fn list_versions(&self, _state: &AppState) -> Result<Vec<PackageVersion>> {
         let triple = Self::target_triple()?;
-        let releases: Vec<GhRelease> = self
+        let releases: Vec<GhRelease> = match self
             .client
             .get(RELEASES_API)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "DevStack")
             .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            .await
+        {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(ok) => ok.json().await.map_err(|e| {
+                    DevStackError::Message(format!("Failed to parse PostgreSQL releases: {e}"))
+                })?,
+                Err(e) => {
+                    // GitHub rate limit / outage — curated fallback with known URL pattern.
+                    let fb = Self::fallback_versions(triple);
+                    if fb.is_empty() {
+                        return Err(DevStackError::Message(format!(
+                            "Failed to fetch PostgreSQL versions: {e}"
+                        )));
+                    }
+                    return Ok(fb);
+                }
+            },
+            Err(e) => {
+                let fb = Self::fallback_versions(triple);
+                if fb.is_empty() {
+                    return Err(DevStackError::Message(format!(
+                        "Failed to fetch PostgreSQL versions: {e}"
+                    )));
+                }
+                return Ok(fb);
+            }
+        };
 
-        let mut out = Vec::new();
-        for r in releases {
-            if r.draft || r.prerelease {
-                continue;
+        let mut out = versions_from_releases(&releases, triple, true);
+        // Attach sha256 when reachable (best-effort).
+        for pkg in out.iter_mut() {
+            if let Some(url) = pkg.download_url.clone() {
+                let sha_url = format!("{url}.sha256");
+                pkg.sha256 = fetch_text(&self.client, &sha_url)
+                    .await
+                    .ok()
+                    .and_then(|s| {
+                        s.split_whitespace()
+                            .next()
+                            .map(|h| h.trim().to_lowercase())
+                    });
             }
-            let Some((_name, url)) = Self::asset_for(&r, triple) else {
-                continue;
-            };
-            let major = r.tag_name.split('.').next().unwrap_or(&r.tag_name).to_string();
-            let sha_url = format!("{url}.sha256");
-            let sha256 = fetch_text(&self.client, &sha_url)
-                .await
-                .ok()
-                .and_then(|s| {
-                    s.split_whitespace()
-                        .next()
-                        .map(|h| h.trim().to_lowercase())
-                });
-            out.push(PackageVersion {
-                label: format!("PostgreSQL {}", r.tag_name),
-                version: r.tag_name.clone(),
-                channel: major,
-                lts: true,
-                download_url: Some(url),
-                sha256,
-                notes: Some(format!("theseus-rs binary ({triple})")),
-            });
-            if out.len() >= 12 {
-                break;
+        }
+
+        if out.is_empty() {
+            let fb = Self::fallback_versions(triple);
+            if fb.is_empty() {
+                return Err(DevStackError::Message(format!(
+                    "No PostgreSQL binaries found for target {triple}"
+                )));
             }
+            return Ok(fb);
         }
         Ok(out)
     }
@@ -242,5 +288,100 @@ impl PackageProvider for PostgreSqlProvider {
         state: &mut AppState,
     ) -> Result<()> {
         default_uninstall("postgresql", version, paths, state).await
+    }
+}
+
+/// Filter GitHub releases down to installable PostgreSQL package rows.
+fn versions_from_releases(
+    releases: &[GhRelease],
+    triple: &str,
+    limit: bool,
+) -> Vec<PackageVersion> {
+    let mut out = Vec::new();
+    for r in releases {
+        if r.draft || r.prerelease {
+            continue;
+        }
+        let Some((_name, url)) = PostgreSqlProvider::asset_for(r, triple) else {
+            continue;
+        };
+        let major = r
+            .tag_name
+            .split('.')
+            .next()
+            .unwrap_or(&r.tag_name)
+            .to_string();
+        out.push(PackageVersion {
+            label: format!("PostgreSQL {}", r.tag_name),
+            version: r.tag_name.clone(),
+            channel: major,
+            lts: true,
+            download_url: Some(url),
+            sha256: None,
+            notes: Some(format!("theseus-rs binary ({triple})")),
+        });
+        if limit && out.len() >= 12 {
+            break;
+        }
+    }
+    out
+}
+
+/// Parse a release tag into a channel (major version).
+fn channel_from_tag(tag: &str) -> String {
+    tag.split('.').next().unwrap_or(tag).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(tag: &str, triple: &str, draft: bool, prerelease: bool) -> GhRelease {
+        let name = format!("postgresql-{tag}-{triple}.tar.gz");
+        GhRelease {
+            tag_name: tag.into(),
+            draft,
+            prerelease,
+            assets: vec![GhAsset {
+                name: name.clone(),
+                browser_download_url: format!("https://example.invalid/{name}"),
+            }],
+        }
+    }
+
+    #[test]
+    fn skips_draft_and_prerelease() {
+        let triple = "aarch64-apple-darwin";
+        let releases = vec![
+            release("17.4.0", triple, true, false),
+            release("17.3.0", triple, false, true),
+            release("17.2.0", triple, false, false),
+            release("16.8.0", triple, false, false),
+        ];
+        let out = versions_from_releases(&releases, triple, true);
+        assert_eq!(
+            out.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(),
+            vec!["17.2.0", "16.8.0"]
+        );
+    }
+
+    #[test]
+    fn skips_missing_target_asset() {
+        let releases = vec![release("17.4.0", "x86_64-pc-windows-msvc", false, false)];
+        let out = versions_from_releases(&releases, "aarch64-apple-darwin", true);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn channel_from_tag_uses_major() {
+        assert_eq!(channel_from_tag("17.4.0"), "17");
+        assert_eq!(channel_from_tag("16.8.0"), "16");
+    }
+
+    #[test]
+    fn fallback_list_not_empty() {
+        let fb = PostgreSqlProvider::fallback_versions("x86_64-unknown-linux-gnu");
+        assert!(!fb.is_empty());
+        assert!(fb[0].download_url.as_ref().unwrap().contains("postgresql-binaries"));
     }
 }
