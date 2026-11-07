@@ -310,6 +310,7 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
         &log_out,
         &log_err,
         &envs,
+        true,
     )?;
     let pid = child.id();
     std::mem::forget(child);

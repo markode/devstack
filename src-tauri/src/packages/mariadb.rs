@@ -77,10 +77,27 @@ impl MariaDbProvider {
                     }
                 }
                 "macos"
-                    if (fos.eq_ignore_ascii_case("MacOS") || fos.eq_ignore_ascii_case("Darwin"))
-                        && !name.contains("debug") =>
+                    if (fos.eq_ignore_ascii_case("MacOS")
+                        || fos.eq_ignore_ascii_case("Darwin")
+                        || fos.eq_ignore_ascii_case("OSX")
+                        || name.contains("macos")
+                        || name.contains("osx")
+                        || name.contains("darwin"))
+                        && !name.contains("debug")
+                        && (name.ends_with(".tar.gz")
+                            || name.ends_with(".tgz")
+                            || name.ends_with(".pkg")) =>
                 {
                     score += 40;
+                    if fcpu.contains(arch)
+                        || name.contains(arch)
+                        || (arch == "aarch64"
+                            && (name.contains("arm64") || fcpu.contains("arm64")))
+                        || (arch == "x86_64"
+                            && (name.contains("x86_64") || name.contains("amd64")))
+                    {
+                        score += 20;
+                    }
                 }
                 _ => {}
             }

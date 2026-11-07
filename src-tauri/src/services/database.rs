@@ -9,7 +9,7 @@ use crate::config::{find_installed, latest_installed, AppState, Paths};
 use crate::error::{DevStackError, Result};
 use crate::paths_util::{posix_path, quoted_conf_path};
 use crate::services::process::{
-    find_bin, is_running, read_pid, spawn_logged, stop_pid, write_pid,
+    find_bin, is_running, read_pid, spawn_logged_attached, stop_pid, write_pid,
 };
 
 
@@ -86,21 +86,28 @@ host=127.0.0.1
 /// Root client connect args — TCP on Windows (no Unix sockets), socket elsewhere.
 pub fn mysql_root_args(paths: &Paths, state: &AppState, engine: &str) -> Vec<String> {
     let port = crate::services::ports::engine_db_port(&state.stack, engine);
+    // Short connect timeout so readiness polls don't hang for minutes.
     if cfg!(windows) {
         vec![
             "--protocol=TCP".into(),
             "--host=127.0.0.1".into(),
             format!("--port={port}"),
+            "--connect-timeout=2".into(),
             "-uroot".into(),
         ]
     } else {
         let sock = socket_path(paths, engine);
         if sock.exists() {
-            vec![format!("--socket={}", sock.display()), "-uroot".into()]
+            vec![
+                format!("--socket={}", sock.display()),
+                "--connect-timeout=2".into(),
+                "-uroot".into(),
+            ]
         } else {
             vec![
                 "--host=127.0.0.1".into(),
                 format!("--port={port}"),
+                "--connect-timeout=2".into(),
                 "-uroot".into(),
             ]
         }
@@ -168,6 +175,12 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
         if !cfg!(windows) {
             args.push("--auth-root-authentication-method=normal".into());
         }
+        // Windows mysql_install_db.exe rejects --basedir= as an unknown variable.
+        let args: Vec<String> = if cfg!(windows) {
+            vec![format!("--datadir={}", datadir.display())]
+        } else {
+            args
+        };
         let out = crate::services::process::command(&install)
             .args(&args)
             .current_dir(root)
@@ -182,16 +195,6 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
         }
         if datadir.join("mysql").exists() {
             return Ok(());
-        }
-        // Retry without basedir if first attempt failed (some Windows zips).
-        if cfg!(windows) && !datadir.join("mysql").exists() {
-            let _ = crate::services::process::command(&install)
-                .args([format!("--datadir={}", datadir.display())])
-                .current_dir(root)
-                .status();
-            if datadir.join("mysql").exists() {
-                return Ok(());
-            }
         }
     }
     // MySQL-only: mysqld --initialize-insecure (MariaDB rejects this flag).
@@ -244,13 +247,19 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
     let log_out = paths.logs.join(format!("{engine}.out"));
     let log_err = paths.logs.join(format!("{engine}.err"));
     let defaults = format!("--defaults-file={}", conf.display());
-    let child = spawn_logged(
-        &mysqld,
-        &[&defaults],
-        Some(&root),
-        &log_out,
-        &log_err,
-    )?;
+    // Attached (no DETACHED_PROCESS) + --console on Windows so mysqld stays up
+    // and writes to our redirected stderr.
+    let child = if cfg!(windows) {
+        spawn_logged_attached(
+            &mysqld,
+            &[&defaults, "--console"],
+            Some(&root),
+            &log_out,
+            &log_err,
+        )?
+    } else {
+        spawn_logged_attached(&mysqld, &[&defaults], Some(&root), &log_out, &log_err)?
+    };
     let pid = child.id();
     std::mem::forget(child);
     write_pid(&paths.pid_file(engine), pid)?;
@@ -261,7 +270,14 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
     // Wait for accept (InnoDB init can take >10s). Windows uses TCP; Unix prefers socket.
     let client = client_bin(&root).ok();
     let connect = mysql_root_args(paths, state, engine);
-    for _ in 0..150 {
+    for _ in 0..90 {
+        if !is_running(pid) {
+            let err = fs::read_to_string(&log_err).unwrap_or_default();
+            let out = fs::read_to_string(&log_out).unwrap_or_default();
+            return Err(DevStackError::Message(format!(
+                "{engine} exited during startup.\nstderr:\n{err}\nstdout:\n{out}"
+            )));
+        }
         if let Some(cli) = &client {
             let mut args = connect.clone();
             args.push("-e".into());
@@ -281,14 +297,14 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
                 return Ok(());
             }
         } else if !crate::services::ports::port_is_free(port) {
-            // Port bound — give the server a moment then accept.
             thread::sleep(Duration::from_millis(500));
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(500));
     }
+    let err = fs::read_to_string(&log_err).unwrap_or_default();
     Err(DevStackError::Message(format!(
-        "{engine} started but never became ready (no accept on port {port})"
+        "{engine} started but never became ready (no accept on port {port}).\nstderr:\n{err}"
     )))
 }
 

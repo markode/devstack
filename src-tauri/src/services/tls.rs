@@ -22,13 +22,9 @@ pub fn ensure_root_ca(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
         return Ok((ca_cert, ca_key));
     }
 
-    if which::which("openssl").is_ok() {
-        // Windows OpenSSL treats a leading `/` in -subj as a path; use `//CN=…`.
-        let subj = if cfg!(windows) {
-            "//CN=DevStack Local CA\\O=DevStack"
-        } else {
-            "/CN=DevStack Local CA/O=DevStack"
-        };
+    // Windows LibreSSL/OpenSSL treats `/CN=…` as a filesystem path and mangles
+    // `//CN=` — use rcgen there. Unix keeps openssl when available.
+    if !cfg!(windows) && which::which("openssl").is_ok() {
         run_openssl(&[
             "req",
             "-x509",
@@ -43,12 +39,11 @@ pub fn ensure_root_ca(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
             "-out",
             &ca_cert.to_string_lossy(),
             "-subj",
-            subj,
+            "/CN=DevStack Local CA/O=DevStack",
         ])?;
         return Ok((ca_cert, ca_key));
     }
 
-    // Minimal self-signed via rcgen when openssl is missing.
     generate_ca_rcgen(&ca_cert, &ca_key)?;
     Ok((ca_cert, ca_key))
 }
@@ -68,7 +63,7 @@ pub fn ensure_site_cert(paths: &Paths, domain: &str) -> Result<CertPaths> {
         });
     }
 
-    if which::which("openssl").is_ok() {
+    if !cfg!(windows) && which::which("openssl").is_ok() {
         let csr = site_dir.join("request.csr");
         let ext = site_dir.join("ext.cnf");
         fs::write(
@@ -77,11 +72,7 @@ pub fn ensure_site_cert(paths: &Paths, domain: &str) -> Result<CertPaths> {
                 "basicConstraints=CA:FALSE\nsubjectAltName=DNS:{domain},DNS:localhost\n"
             ),
         )?;
-        let site_subj = if cfg!(windows) {
-            format!("//CN={domain}")
-        } else {
-            format!("/CN={domain}")
-        };
+        let site_subj = format!("/CN={domain}");
         run_openssl(&[
             "req",
             "-newkey",

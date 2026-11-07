@@ -152,9 +152,15 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
         match ver {
             Ok(v) => {
                 println!("Installing PHP {v}…");
-                install_pkg(ctx, "php", &v).await?;
+                if let Err(e) = install_pkg(ctx, "php", &v).await {
+                    println!("[php] managed install failed ({e}) — trying brew/system");
+                    ensure_system_php(ctx).await?;
+                }
             }
-            Err(e) => println!("[php] managed install skipped: {e}"),
+            Err(e) => {
+                println!("[php] managed install skipped: {e} — trying brew/system");
+                ensure_system_php(ctx).await?;
+            }
         }
     }
     assert_php_mysqli(ctx).await?;
@@ -174,21 +180,26 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
     }
 
     if !skip_mariadb {
-        let ver = {
-            let state = ctx.state.lock().await;
-            let provider = ctx.registry.get("mariadb")?;
-            let versions = provider.list_versions(&state).await?;
-            versions
-                .iter()
-                .find(|v| v.channel.starts_with("11.4") && v.download_url.is_some())
-                .or_else(|| versions.iter().find(|v| v.download_url.is_some()))
-                .map(|v| v.version.clone())
+        let ver = match pick_version(ctx, "mariadb", |v| {
+            v.starts_with("11.4") || v.starts_with("11.") || v.starts_with("10.11")
+        })
+        .await
+        {
+            Ok(v) => Ok(v),
+            Err(_) => pick_version(ctx, "mariadb", |_| true).await,
         };
-        if let Some(ver) = ver {
-            println!("Installing MariaDB {ver} (this can take a while)…");
-            install_pkg(ctx, "mariadb", &ver).await?;
-        } else {
-            return Err("MariaDB required for WordPress smoke".into());
+        match ver {
+            Ok(ver) => {
+                println!("Installing MariaDB {ver} (this can take a while)…");
+                if let Err(e) = install_pkg(ctx, "mariadb", &ver).await {
+                    println!("[mariadb] managed install failed ({e}) — trying brew/system");
+                    ensure_system_mariadb(ctx).await?;
+                }
+            }
+            Err(e) => {
+                println!("[mariadb] no managed package ({e}) — trying brew/system");
+                ensure_system_mariadb(ctx).await?;
+            }
         }
     }
 
@@ -513,6 +524,68 @@ async fn run_wordpress_smoke(
     }
     println!("SMOKE PASS: WordPress demo.test + clone.test over HTTPS (Apache :{https_port})");
     Ok(())
+}
+
+async fn ensure_system_php(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    {
+        let state = ctx.state.lock().await;
+        if state.installed.contains_key("php") {
+            return Ok(());
+        }
+    }
+    if cfg!(target_os = "macos") {
+        println!("[php] brew install php…");
+        let status = smoke_command("brew").args(["install", "php"]).status()?;
+        if !status.success() {
+            return Err("brew install php failed".into());
+        }
+    }
+    let mut state = ctx.state.lock().await;
+    let _ = register_system_php(&mut state, &ctx.paths)?;
+    Ok(())
+}
+
+async fn ensure_system_mariadb(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    {
+        let state = ctx.state.lock().await;
+        if state.installed.contains_key("mariadb") {
+            return Ok(());
+        }
+    }
+    if cfg!(target_os = "macos") {
+        println!("[mariadb] brew install mariadb…");
+        let status = smoke_command("brew")
+            .args(["install", "mariadb"])
+            .status()?;
+        if !status.success() {
+            return Err("brew install mariadb failed".into());
+        }
+        // Prefer brew prefix so we find mariadbd under Cellar.
+        let prefix = smoke_command("brew")
+            .args(["--prefix", "mariadb"])
+            .output()?;
+        let root = String::from_utf8_lossy(&prefix.stdout).trim().to_string();
+        if root.is_empty() {
+            return Err("brew --prefix mariadb returned empty".into());
+        }
+        let mut state = ctx.state.lock().await;
+        let record = devstack_lib::config::InstalledRecord {
+            version: "brew".into(),
+            channel: Some("brew".into()),
+            path: PathBuf::from(&root),
+            installed_at: devstack_lib::packages::now_iso(),
+        };
+        devstack_lib::config::mark_installed(&mut state, "mariadb", record)?;
+        state.stack.mariadb_version = Some("brew".into());
+        state.active_database = Some("mariadb".into());
+        // Avoid clashing with any system mysqld on 3306 during CI.
+        state.stack.mariadb_port = 3307;
+        state.stack.mysql_port = 3308;
+        devstack_lib::config::save_state(&ctx.paths.state_file, &state)?;
+        println!("[mariadb] registered brew prefix {root} on port 3307");
+        return Ok(());
+    }
+    Err("MariaDB required for WordPress smoke".into())
 }
 
 async fn assert_php_mysqli(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
