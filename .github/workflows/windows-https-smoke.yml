@@ -65,7 +65,7 @@ jobs:
 
           # openssl s_server is more reliable than the Windows Python stub on runners.
           $proc = Start-Process -FilePath $openssl.Source `
-            -ArgumentList @('s_server','-accept',"$port",'-cert',$cert,'-key',$key,'-www','-naccept','1') `
+            -ArgumentList @('s_server','-accept',"$port",'-cert',$cert,'-key',$key,'-www') `
             -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput $outLog -RedirectStandardError $outLog
           Start-Sleep -Seconds 2
