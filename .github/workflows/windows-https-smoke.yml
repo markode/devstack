@@ -40,6 +40,7 @@ jobs:
           $cert = Join-Path $tmp 'cert.pem'
           $key = Join-Path $tmp 'key.pem'
           $outLog = Join-Path $tmp 's_server.out'
+          $errLog = Join-Path $tmp 's_server.err'
 
           $openssl = Get-Command openssl -ErrorAction SilentlyContinue
           if (-not $openssl) {
@@ -67,23 +68,21 @@ jobs:
           $proc = Start-Process -FilePath $openssl.Source `
             -ArgumentList @('s_server','-accept',"$port",'-cert',$cert,'-key',$key,'-www') `
             -PassThru -WindowStyle Hidden `
-            -RedirectStandardOutput $outLog -RedirectStandardError $outLog
+            -RedirectStandardOutput $outLog -RedirectStandardError $errLog
           Start-Sleep -Seconds 2
           if ($proc.HasExited) {
-            Get-Content $outLog -ErrorAction SilentlyContinue | Write-Host
+            Get-Content $outLog,$errLog -ErrorAction SilentlyContinue | Write-Host
             throw "openssl s_server exited early (code $($proc.ExitCode))"
           }
           try {
             $url = "https://${site}:${port}/"
             $curl = Get-Command curl.exe -ErrorAction Stop
-            & $curl.Source -k -fsS --max-time 15 -o (Join-Path $tmp 'body.txt') -w '%{http_code}' $url |
-              Tee-Object -Variable code | Out-Null
-            if ($code -ne '200') {
-              Get-Content $outLog -ErrorAction SilentlyContinue | Write-Host
-              throw "Expected HTTP 200 from $url, got '$code'"
+            $code = & $curl.Source -k -sS --max-time 15 -o (Join-Path $tmp 'body.txt') -w '%{http_code}' $url
+            if ($LASTEXITCODE -ne 0 -or $code -ne '200') {
+              Get-Content $outLog,$errLog -ErrorAction SilentlyContinue | Write-Host
+              throw "Expected HTTP 200 from $url, got '$code' (curl exit $LASTEXITCODE)"
             }
             Write-Host "HTTPS probe OK: $url -> $code"
-            # Also exercise Resolve-DnsName + Invoke-WebRequest path used in the product docs.
             if ($site -ne '127.0.0.1') {
               Resolve-DnsName $site | Out-Null
             }
