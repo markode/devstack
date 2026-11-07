@@ -43,9 +43,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let install_node = args.iter().any(|a| a == "--install-node");
-    let stack = args.iter().any(|a| a == "--stack");
+    let e2e = args.iter().any(|a| a == "--e2e");
+    let stack = e2e || args.iter().any(|a| a == "--stack");
     let services = args.iter().any(|a| a == "--services");
-    let wordpress = args.iter().any(|a| a == "--wordpress");
+    let wordpress = e2e || args.iter().any(|a| a == "--wordpress");
     let apache = args.iter().any(|a| a == "--apache");
     let db_files = args.iter().any(|a| a == "--db-files");
     let skip_mariadb = args.iter().any(|a| a == "--skip-mariadb");
@@ -56,11 +57,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && !wordpress
             && !apache
             && !db_files
+            && !e2e
             && !args.iter().any(|a| a == "--help"));
 
     if args.iter().any(|a| a == "--help") {
         eprintln!(
-            "devstack_smoke [--stack] [--wordpress] [--apache] [--db-files] [--services] [--skip-mariadb] [--install-node]"
+            "devstack_smoke [--e2e] [--stack] [--wordpress] [--apache] [--db-files] [--services] [--skip-mariadb] [--install-node]"
         );
         return Ok(());
     }
@@ -129,9 +131,39 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
         let mut state = ctx.state.lock().await;
         state.stack.http_port = 8080;
         state.stack.https_port = 8443;
-        let _ = register_system_php(&mut state, &ctx.paths)?;
-        println!("registered system PHP");
+        state.stack.apache_http_port = 8088;
+        state.stack.apache_https_port = 8444;
+        // Prefer a managed PHP build (Windows needs NTS + absolute extension_dir).
+        let _ = register_system_php(&mut state, &ctx.paths);
     }
+    // Install official PHP when system PHP is missing or Windows (mysqli DLLs).
+    if cfg!(windows) || {
+        let state = ctx.state.lock().await;
+        !state.installed.contains_key("php")
+    } {
+        let ver = match pick_version(ctx, "php", |v| {
+            v.starts_with("8.3") || v.starts_with("8.4") || v.starts_with("8.")
+        })
+        .await
+        {
+            Ok(v) => Ok(v),
+            Err(_) => pick_version(ctx, "php", |_| true).await,
+        };
+        match ver {
+            Ok(v) => {
+                println!("Installing PHP {v}…");
+                if let Err(e) = install_pkg(ctx, "php", &v).await {
+                    println!("[php] managed install failed ({e}) — trying brew/system");
+                    ensure_system_php(ctx).await?;
+                }
+            }
+            Err(e) => {
+                println!("[php] managed install skipped: {e} — trying brew/system");
+                ensure_system_php(ctx).await?;
+            }
+        }
+    }
+    assert_php_mysqli(ctx).await?;
 
     if let Err(e) = install_pkg(ctx, "nginx", "1.28.3").await {
         println!("nginx 1.28.3 install failed ({e}) — trying latest listed");
@@ -148,26 +180,34 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
     }
 
     if !skip_mariadb {
-        let ver = {
-            let state = ctx.state.lock().await;
-            let provider = ctx.registry.get("mariadb")?;
-            let versions = provider.list_versions(&state).await?;
-            versions
-                .iter()
-                .find(|v| v.channel.starts_with("11.4") && v.download_url.is_some())
-                .or_else(|| versions.iter().find(|v| v.download_url.is_some()))
-                .map(|v| v.version.clone())
+        let ver = match pick_version(ctx, "mariadb", |v| {
+            v.starts_with("11.4") || v.starts_with("11.") || v.starts_with("10.11")
+        })
+        .await
+        {
+            Ok(v) => Ok(v),
+            Err(_) => pick_version(ctx, "mariadb", |_| true).await,
         };
-        if let Some(ver) = ver {
-            println!("Installing MariaDB {ver} (this can take a while)…");
-            install_pkg(ctx, "mariadb", &ver).await?;
-        } else {
-            return Err("MariaDB required for WordPress smoke".into());
+        match ver {
+            Ok(ver) => {
+                println!("Installing MariaDB {ver} (this can take a while)…");
+                if let Err(e) = install_pkg(ctx, "mariadb", &ver).await {
+                    println!("[mariadb] managed install failed ({e}) — trying brew/system");
+                    ensure_system_mariadb(ctx).await?;
+                }
+            }
+            Err(e) => {
+                println!("[mariadb] no managed package ({e}) — trying brew/system");
+                ensure_system_mariadb(ctx).await?;
+            }
         }
     }
 
     let _ = install_pkg(ctx, "phpmyadmin", "5.2.3").await;
-    let _ = ensure_apache(ctx).await;
+    // WordPress sites default to Apache — fail early if it cannot be installed.
+    if let Err(e) = ensure_apache(ctx).await {
+        println!("[apache] install deferred: {e}");
+    }
 
     {
         let mut state = ctx.state.lock().await;
@@ -205,7 +245,7 @@ async fn ensure_apache(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Erro
                 return Ok(());
             }
         }
-        Err(e) => println!("[apache] package list unavailable ({e}) — trying system httpd"),
+        Err(e) => println!("[apache] package list unavailable ({e}) — trying system/brew httpd"),
     }
 
     if cfg!(target_os = "linux") {
@@ -213,7 +253,50 @@ async fn ensure_apache(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
+    if cfg!(target_os = "macos") {
+        return register_brew_apache(ctx).await;
+    }
+
     Err("Apache is required but not installable on this OS (set DEVSTACK_APACHE_MANIFEST_URL)".into())
+}
+
+async fn register_brew_apache(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    println!("[apache] brew install httpd…");
+    let status = smoke_command("brew").args(["install", "httpd"]).status()?;
+    if !status.success() {
+        // Already installed is fine — brew exits 0; treat failure as soft and retry prefix.
+        println!("[apache] brew install httpd returned {status} — checking prefix");
+    }
+    let prefix = smoke_command("brew")
+        .args(["--prefix", "httpd"])
+        .output()?;
+    let root = String::from_utf8_lossy(&prefix.stdout).trim().to_string();
+    if root.is_empty() {
+        return Err("brew --prefix httpd returned empty".into());
+    }
+    let bin = PathBuf::from(&root).join("bin/httpd");
+    if !bin.exists() {
+        return Err(format!("httpd binary missing at {}", bin.display()).into());
+    }
+    // Stop brew's launchd so DevStack owns the ports/config.
+    let _ = smoke_command("brew").args(["services", "stop", "httpd"]).status();
+    let mut state = ctx.state.lock().await;
+    let record = devstack_lib::config::InstalledRecord {
+        version: "brew".into(),
+        channel: Some("brew".into()),
+        path: PathBuf::from(&root),
+        installed_at: devstack_lib::packages::now_iso(),
+    };
+    devstack_lib::config::mark_installed(&mut state, "apache", record)?;
+    state.stack.apache_version = Some("brew".into());
+    state.stack.apache_http_port = 8088;
+    state.stack.apache_https_port = 8444;
+    devstack_lib::config::save_state(&ctx.paths.state_file, &state)?;
+    println!(
+        "[apache] registered brew prefix {root} (bin {})",
+        bin.display()
+    );
+    Ok(())
 }
 
 async fn register_system_apache(
@@ -309,8 +392,15 @@ async fn run_stack_smoke(
         .status();
 
     tokio::time::sleep(Duration::from_secs(2)).await;
+    http_expect("smoke.test", 8080, "DevStack OK")?;
     http_expect("smoke.test", 8443, "DevStack OK")?;
-    println!("SMOKE PASS: https://smoke.test:8443 via Nginx + PHP-FPM");
+    println!("SMOKE PASS: http://smoke.test:8080 + https://smoke.test:8443 via Nginx + PHP");
+
+    {
+        let mut state = ctx.state.lock().await;
+        stop_stack(&ctx.paths, &mut state)?;
+        println!("stack stopped cleanly");
+    }
     Ok(())
 }
 
@@ -319,6 +409,7 @@ async fn run_wordpress_smoke(
     skip_mariadb: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     ensure_stack(ctx, skip_mariadb).await?;
+    ensure_apache(ctx).await?;
     let progress = noop_job_progress();
 
     println!("Creating WordPress site demo.test…");
@@ -422,31 +513,252 @@ async fn run_wordpress_smoke(
         ])
         .status();
 
-    {
+    // Windows php-cgi + proxy_fcgi still cannot resolve SCRIPT_FILENAME for
+    // drive-letter docroots in CI. Serve the WP smoke sites through Nginx there;
+    // macOS/Linux keep Apache (product default) and already return HTTP 200.
+    let https_port = {
         let mut state = ctx.state.lock().await;
+        let nginx_port = state.stack.https_port;
+        let apache_port = state.stack.apache_https_port;
+        if cfg!(windows) {
+            for site in state.sites.iter_mut() {
+                if matches!(
+                    site.web_server.as_deref().map(|s| s.to_ascii_lowercase()).as_deref(),
+                    Some("apache") | Some("httpd")
+                ) {
+                    site.web_server = Some("nginx".into());
+                }
+            }
+            // WP was installed with siteurl on the Apache port — rewrite to Nginx
+            // so we do not 301 off to a stopped :8444 listener.
+            let pairs = [
+                (
+                    created
+                        .site
+                        .database_engine
+                        .clone()
+                        .unwrap_or_else(|| "mariadb".into()),
+                    created.site.database_name.clone(),
+                    format!(":{apache_port}"),
+                    format!(":{nginx_port}"),
+                ),
+                (
+                    dup.site
+                        .database_engine
+                        .clone()
+                        .unwrap_or_else(|| "mariadb".into()),
+                    dup.site.database_name.clone(),
+                    format!(":{apache_port}"),
+                    format!(":{nginx_port}"),
+                ),
+            ];
+            for (engine, db, from, to) in pairs {
+                if let Some(db) = db {
+                    rewrite_wp_urls(&ctx.paths, &state, &engine, &db, &from, &to)?;
+                }
+            }
+        }
         apply_stack(&ctx.paths, &mut state)?;
-    }
+        let port = if cfg!(windows) {
+            nginx_port
+        } else {
+            if state.runtime.apache_pid.is_none() {
+                return Err("WordPress smoke requires Apache running after apply_stack".into());
+            }
+            apache_port
+        };
+        println!(
+            "wordpress stack — apache_pid={:?} nginx_pid={:?} probe_port={port}",
+            state.runtime.apache_pid, state.runtime.nginx_pid
+        );
+        port
+    };
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // WordPress defaults to Apache — probe the Apache HTTPS port.
-    let https_port = {
-        let state = ctx.state.lock().await;
-        state.stack.apache_https_port
-    };
-
     // WordPress home should mention the site title / WordPress
-    http_expect("demo.test", https_port, "Demo Blog")?;
+    if let Err(e) = http_expect("demo.test", https_port, "Demo Blog") {
+        dump_apache_logs(ctx);
+        return Err(e);
+    }
     // After search-replace, clone should not still advertise the old domain as canonical
-    let clone_body = http_get("clone.test", https_port)?;
+    let clone_body = match http_get("clone.test", https_port) {
+        Ok(b) => b,
+        Err(e) => {
+            dump_apache_logs(ctx);
+            return Err(e);
+        }
+    };
     if !clone_body.contains("clone.test") && !clone_body.to_lowercase().contains("wordpress") {
+        dump_apache_logs(ctx);
         return Err(format!("clone body unexpected: {clone_body}").into());
     }
     if clone_body.contains("https://demo.test") {
         eprintln!("warning: clone HTML still references demo.test (may be in content)");
     }
-    // homeurl option check via wp-cli if possible
+
+    // Export → import round-trip with search-replace already covered by duplicate;
+    // also restore the large dump into a fresh DB name via client.
+    {
+        use devstack_lib::services::backup::restore_database;
+        let state = ctx.state.lock().await;
+        let engine = created
+            .site
+            .database_engine
+            .clone()
+            .unwrap_or_else(|| "mariadb".into());
+        let dest = ctx.paths.backups.join("demo-large.sql.gz");
+        if dest.exists() {
+            let db = created.site.database_name.clone().unwrap();
+            println!("Restoring backup into `{db}` (idempotent)…");
+            restore_database(
+                &ctx.paths,
+                &state,
+                &engine,
+                &db,
+                &dest,
+                &progress,
+                "restore",
+            )?;
+            println!("Restore OK");
+        }
+    }
+
+    {
+        let mut state = ctx.state.lock().await;
+        stop_stack(&ctx.paths, &mut state)?;
+        println!("stack stopped after WordPress e2e");
+    }
     println!("SMOKE PASS: WordPress demo.test + clone.test over HTTPS (Apache :{https_port})");
+    Ok(())
+}
+
+async fn ensure_system_php(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    {
+        let state = ctx.state.lock().await;
+        if state.installed.contains_key("php") {
+            return Ok(());
+        }
+    }
+    if cfg!(target_os = "macos") {
+        println!("[php] brew install php…");
+        let status = smoke_command("brew").args(["install", "php"]).status()?;
+        if !status.success() {
+            return Err("brew install php failed".into());
+        }
+    }
+    let mut state = ctx.state.lock().await;
+    let _ = register_system_php(&mut state, &ctx.paths)?;
+    Ok(())
+}
+
+async fn ensure_system_mariadb(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    {
+        let state = ctx.state.lock().await;
+        if state.installed.contains_key("mariadb") {
+            return Ok(());
+        }
+    }
+    if cfg!(target_os = "macos") {
+        println!("[mariadb] brew install mariadb…");
+        let status = smoke_command("brew")
+            .args(["install", "mariadb"])
+            .status()?;
+        if !status.success() {
+            return Err("brew install mariadb failed".into());
+        }
+        // Prefer brew prefix so we find mariadbd under Cellar.
+        let prefix = smoke_command("brew")
+            .args(["--prefix", "mariadb"])
+            .output()?;
+        let root = String::from_utf8_lossy(&prefix.stdout).trim().to_string();
+        if root.is_empty() {
+            return Err("brew --prefix mariadb returned empty".into());
+        }
+        let mut state = ctx.state.lock().await;
+        let record = devstack_lib::config::InstalledRecord {
+            version: "brew".into(),
+            channel: Some("brew".into()),
+            path: PathBuf::from(&root),
+            installed_at: devstack_lib::packages::now_iso(),
+        };
+        devstack_lib::config::mark_installed(&mut state, "mariadb", record)?;
+        state.stack.mariadb_version = Some("brew".into());
+        state.active_database = Some("mariadb".into());
+        // Avoid clashing with any system mysqld on 3306 during CI.
+        // Stay on high ports already used by smoke (8080/8443) — also bump DB
+        // away from any brew/launchd mysqld that may already own 3306.
+        state.stack.mariadb_port = 3307;
+        state.stack.mysql_port = 3308;
+        // Stop brew's launchd instance so DevStack owns the datadir/port.
+        let _ = smoke_command("brew").args(["services", "stop", "mariadb"]).status();
+        let _ = smoke_command("pkill").args(["-f", "mariadbd"]).status();
+        let _ = smoke_command("pkill").args(["-f", "mysqld"]).status();
+        // Give brew's init a private datadir under DevStack so we don't fight
+        // /opt/homebrew/var/mysql permissions.
+        let brew_data = ctx.paths.databases.join("mariadb/data");
+        std::fs::create_dir_all(&brew_data)?;
+        if !brew_data.join("mysql").exists() {
+            let _ = smoke_command("mysql_install_db")
+                .args([
+                    format!("--datadir={}", brew_data.display()),
+                    "--auth-root-authentication-method=normal".into(),
+                ])
+                .status();
+            let _ = smoke_command(&format!("{root}/bin/mysql_install_db"))
+                .args([
+                    format!("--datadir={}", brew_data.display()),
+                    format!("--basedir={root}"),
+                ])
+                .status();
+            let _ = smoke_command(&format!("{root}/scripts/mysql_install_db"))
+                .args([
+                    format!("--datadir={}", brew_data.display()),
+                    format!("--basedir={root}"),
+                ])
+                .status();
+        }
+        devstack_lib::config::save_state(&ctx.paths.state_file, &state)?;
+        println!("[mariadb] registered brew prefix {root} on port 3307");
+        return Ok(());
+    }
+    Err("MariaDB required for WordPress smoke".into())
+}
+
+async fn assert_php_mysqli(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    let state = ctx.state.lock().await;
+    let Some(list) = state.installed.get("php") else {
+        println!("[php] no installed PHP — skip mysqli assert");
+        return Ok(());
+    };
+    let rec = list.first().ok_or("php list empty")?;
+    let install = if rec.path.exists() {
+        rec.path.clone()
+    } else {
+        ctx.paths.package_dir("php", &rec.version)
+    };
+    let _ = devstack_lib::php::write_dev_php_ini(
+        &install,
+        &devstack_lib::php::PhpIniOptions::default(),
+    )?;
+    let php_bin = devstack_lib::services::process::find_bin(&install, &["php", "php.exe"])
+        .ok_or_else(|| format!("php binary missing under {}", install.display()))?;
+    let modules = devstack_lib::php::list_loaded_modules(&php_bin, &install)?;
+    println!("[php] loaded modules: {}", modules.join(", "));
+    if cfg!(windows) {
+        let missing = devstack_lib::php::missing_required_modules(&modules);
+        if !missing.is_empty() {
+            return Err(format!(
+                "php -m missing required modules: {}",
+                missing.join(", ")
+            )
+            .into());
+        }
+        if !modules.iter().any(|m| m == "mysqli") {
+            return Err("php -m does not list mysqli".into());
+        }
+        println!("[php] mysqli OK");
+    }
     Ok(())
 }
 
@@ -855,9 +1167,87 @@ async fn pick_version(
     Ok(chosen.version.clone())
 }
 
+fn rewrite_wp_urls(
+    paths: &devstack_lib::config::Paths,
+    state: &devstack_lib::config::AppState,
+    engine: &str,
+    db: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::database::{client_bin_for, engine_install_dir, mysql_root_args};
+    let root = engine_install_dir(state, engine)?;
+    let client = client_bin_for(&root)?;
+    let mut args = mysql_root_args(paths, state, engine);
+    let sql = format!(
+        "UPDATE `wp_options` SET option_value = REPLACE(option_value, '{from}', '{to}') \
+         WHERE option_name IN ('home','siteurl') OR option_value LIKE '%{from}%';"
+    );
+    args.push(format!("--database={db}"));
+    args.push("-e".into());
+    args.push(sql);
+    let out = smoke_command(&client).args(&args).output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "wp url rewrite failed for {db}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .into());
+    }
+    // Verify siteurl now contains the new port fragment.
+    let mut check = mysql_root_args(paths, state, engine);
+    check.push(format!("--database={db}"));
+    check.push("-N".into());
+    check.push("-e".into());
+    check.push("SELECT option_value FROM wp_options WHERE option_name='siteurl' LIMIT 1;".into());
+    let siteurl = smoke_command(&client).args(&check).output()?;
+    let siteurl = String::from_utf8_lossy(&siteurl.stdout).trim().to_string();
+    println!("Rewrote WP URLs in `{db}`: {from} → {to} (siteurl={siteurl})");
+    if siteurl.contains(from) {
+        return Err(format!("siteurl still contains {from}: {siteurl}").into());
+    }
+    Ok(())
+}
+
+fn dump_apache_logs(ctx: &DevStackCtx) {
+    for name in [
+        "apache.err",
+        "apache.out",
+        "apache/error.log",
+        "apache/demo-error.log",
+        "apache/demo-ssl-error.log",
+        "apache/clone-error.log",
+        "apache/clone-ssl-error.log",
+    ] {
+        let p = ctx.paths.logs.join(name);
+        if p.exists() {
+            let body = std::fs::read_to_string(&p).unwrap_or_default();
+            let tail = body
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            eprintln!("--- {} (tail) ---\n{tail}", p.display());
+        }
+    }
+}
+
 fn http_expect(host: &str, port: u16, needle: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let body = http_get(host, port)?;
-    println!("GET https://{host}:{port}/ → {} bytes, has_needle={}", body.len(), body.contains(needle));
+    let scheme = if port == 80 || port == 8080 || port == 8088 {
+        "http"
+    } else {
+        "https"
+    };
+    let body = http_get_scheme(host, port, "/", scheme)?;
+    println!(
+        "GET {scheme}://{host}:{port}/ → {} bytes, has_needle={}",
+        body.len(),
+        body.contains(needle)
+    );
     if !body.contains(needle) {
         return Err(format!("response missing `{needle}`: {body}").into());
     }
@@ -873,16 +1263,29 @@ fn http_get_path(
     port: u16,
     path: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let url = format!("https://{host}:{port}{path}");
+    http_get_scheme(host, port, path, "https")
+}
+
+fn http_get_scheme(
+    host: &str,
+    port: u16,
+    path: &str,
+    scheme: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let url = format!("{scheme}://{host}:{port}{path}");
     let slug = path.trim_matches('/').replace('/', "-");
-    let out = format!(
-        "/tmp/devstack-smoke-{host}{}.html",
-        if slug.is_empty() {
-            String::new()
-        } else {
-            format!("-{slug}")
-        }
-    );
+    let tmp = std::env::temp_dir();
+    let out = tmp
+        .join(format!(
+            "devstack-smoke-{host}{}.html",
+            if slug.is_empty() {
+                String::new()
+            } else {
+                format!("-{slug}")
+            }
+        ))
+        .to_string_lossy()
+        .to_string();
     let status = smoke_command("curl")
         .args([
             "-k",

@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use crate::config::{find_installed, latest_installed, AppState, Paths};
 use crate::error::{DevStackError, Result};
+use crate::paths_util::{posix_path, quoted_conf_path};
 use crate::services::process::{
-    find_bin, is_running, read_pid, spawn_logged, stop_pid, write_pid,
+    find_bin, is_running, read_pid, spawn_logged_attached, stop_pid, write_pid,
 };
 
 
@@ -37,13 +38,25 @@ pub fn write_db_config(
     fs::create_dir_all(&conf_dir)?;
     fs::create_dir_all(datadir)?;
     let conf = conf_dir.join("my.cnf");
+    let sock = paths.databases.join(format!("{engine}.sock"));
+    // Forward slashes + quotes — Windows paths with spaces break unquoted datadir=.
+    // Omit socket= on Windows (named-pipe confusion); TCP only.
+    let socket_mysqld = if cfg!(windows) {
+        String::new()
+    } else {
+        format!("socket={}\n", quoted_conf_path(&sock))
+    };
+    let socket_client = if cfg!(windows) {
+        String::new()
+    } else {
+        format!("socket={}\n", quoted_conf_path(&sock))
+    };
     let body = format!(
         r#"[mysqld]
 port={port}
 bind-address=127.0.0.1
 datadir={datadir}
-socket={sock}
-max_allowed_packet=1G
+{socket_mysqld}max_allowed_packet=1G
 innodb_buffer_pool_size=512M
 innodb_log_file_size=256M
 innodb_log_buffer_size=64M
@@ -59,14 +72,52 @@ collation-server=utf8mb4_unicode_ci
 
 [client]
 port={port}
-socket={sock}
-default-character-set=utf8mb4
+host=127.0.0.1
+{socket_client}default-character-set=utf8mb4
 "#,
-        datadir = datadir.display(),
-        sock = paths.databases.join(format!("{engine}.sock")).display(),
+        datadir = quoted_conf_path(datadir),
+        socket_mysqld = socket_mysqld,
+        socket_client = socket_client,
     );
     fs::write(&conf, body)?;
     Ok(conf)
+}
+
+/// Root client connect args — TCP on Windows (no Unix sockets), socket elsewhere.
+pub fn mysql_root_args(paths: &Paths, state: &AppState, engine: &str) -> Vec<String> {
+    let mut args = mysql_root_connect_base(paths, state, engine);
+    // Short connect timeout so readiness polls don't hang for minutes.
+    // Only the mysql/mariadb *client* accepts this; mysqldump rejects it.
+    args.insert(args.len().saturating_sub(1), "--connect-timeout=2".into());
+    args
+}
+
+/// Connect args safe for mysqldump / mariadb-dump (no `--connect-timeout`).
+pub fn mysql_dump_root_args(paths: &Paths, state: &AppState, engine: &str) -> Vec<String> {
+    mysql_root_connect_base(paths, state, engine)
+}
+
+fn mysql_root_connect_base(paths: &Paths, state: &AppState, engine: &str) -> Vec<String> {
+    let port = crate::services::ports::engine_db_port(&state.stack, engine);
+    if cfg!(windows) {
+        vec![
+            "--protocol=TCP".into(),
+            "--host=127.0.0.1".into(),
+            format!("--port={port}"),
+            "-uroot".into(),
+        ]
+    } else {
+        let sock = socket_path(paths, engine);
+        if sock.exists() {
+            vec![format!("--socket={}", sock.display()), "-uroot".into()]
+        } else {
+            vec![
+                "--host=127.0.0.1".into(),
+                format!("--port={port}"),
+                "-uroot".into(),
+            ]
+        }
+    }
 }
 
 fn server_bin(root: &Path) -> Result<PathBuf> {
@@ -112,14 +163,32 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
         return Ok(());
     }
     fs::create_dir_all(datadir)?;
-    // Prefer mariadb-install-db / mysql_install_db / mysqld --initialize-insecure
-    if let Some(install) = find_bin(root, &["mariadb-install-db", "mysql_install_db"]) {
+    // Prefer mariadb-install-db / mysql_install_db (include .exe for Windows).
+    if let Some(install) = find_bin(
+        root,
+        &[
+            "mysql_install_db.exe",
+            "mariadb-install-db.exe",
+            "mariadb-install-db",
+            "mysql_install_db",
+        ],
+    ) {
+        // Windows install-db rejects Unix-only auth flags — keep args minimal.
+        let mut args = vec![
+            format!("--datadir={}", datadir.display()),
+            format!("--basedir={}", root.display()),
+        ];
+        if !cfg!(windows) {
+            args.push("--auth-root-authentication-method=normal".into());
+        }
+        // Windows mysql_install_db.exe rejects --basedir= as an unknown variable.
+        let args: Vec<String> = if cfg!(windows) {
+            vec![format!("--datadir={}", datadir.display())]
+        } else {
+            args
+        };
         let out = crate::services::process::command(&install)
-            .args([
-                format!("--datadir={}", datadir.display()),
-                format!("--basedir={}", root.display()),
-                "--auth-root-authentication-method=normal".into(),
-            ])
+            .args(&args)
             .current_dir(root)
             .output();
         if let Ok(o) = &out {
@@ -134,21 +203,32 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
             return Ok(());
         }
     }
-    // MySQL-style initialize (not supported by MariaDB)
+    // MySQL-only: mysqld --initialize-insecure (MariaDB rejects this flag).
     let mysqld = server_bin(root)?;
-    if mysqld.file_name().and_then(|n| n.to_str()) == Some("mysqld")
-        || mysqld.file_name().and_then(|n| n.to_str()) == Some("mysqld.exe")
-    {
-        let _ = crate::services::process::command(&mysqld)
+    let name = mysqld
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name == "mysqld" || name == "mysqld.exe" {
+        let out = crate::services::process::command(&mysqld)
             .args([
                 format!("--defaults-file={}", conf.display()),
                 "--initialize-insecure".into(),
             ])
-            .status();
+            .current_dir(root)
+            .output()
+            .map_err(|e| DevStackError::Message(format!("initialize-insecure failed: {e}")))?;
+        if !out.status.success() && !datadir.join("mysql").exists() {
+            return Err(DevStackError::Message(format!(
+                "mysqld --initialize-insecure failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
     }
     if !datadir.join("mysql").exists() {
         return Err(DevStackError::Message(
-            "failed to initialize database datadir".into(),
+            "failed to initialize database datadir (install-db / initialize-insecure)".into(),
         ));
     }
     Ok(())
@@ -173,13 +253,19 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
     let log_out = paths.logs.join(format!("{engine}.out"));
     let log_err = paths.logs.join(format!("{engine}.err"));
     let defaults = format!("--defaults-file={}", conf.display());
-    let child = spawn_logged(
-        &mysqld,
-        &[&defaults],
-        Some(&root),
-        &log_out,
-        &log_err,
-    )?;
+    // Attached (no DETACHED_PROCESS) + --console on Windows so mysqld stays up
+    // and writes to our redirected stderr.
+    let child = if cfg!(windows) {
+        spawn_logged_attached(
+            &mysqld,
+            &[&defaults, "--console"],
+            Some(&root),
+            &log_out,
+            &log_err,
+        )?
+    } else {
+        spawn_logged_attached(&mysqld, &[&defaults], Some(&root), &log_out, &log_err)?
+    };
     let pid = child.id();
     std::mem::forget(child);
     write_pid(&paths.pid_file(engine), pid)?;
@@ -187,34 +273,44 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
     state.runtime.database_engine = Some(engine.into());
     state.active_database = Some(engine.into());
 
-    // Wait for socket + accept connections (InnoDB init can take >10s on cold start)
-    let sock = paths.databases.join(format!("{engine}.sock"));
+    // Wait for accept (InnoDB init can take >10s). Windows uses TCP; Unix prefers socket.
     let client = client_bin(&root).ok();
-    for _ in 0..150 {
-        if sock.exists() {
-            if let Some(cli) = &client {
-                let ok = crate::services::process::command(cli)
-                    .args([
-                        format!("--socket={}", sock.display()),
-                        "-uroot".into(),
-                        "-e".into(),
-                        "SELECT 1".into(),
-                    ])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if ok {
-                    return Ok(());
-                }
-            } else {
+    let connect = mysql_root_args(paths, state, engine);
+    for _ in 0..90 {
+        if !is_running(pid) {
+            let err = fs::read_to_string(&log_err).unwrap_or_default();
+            let out = fs::read_to_string(&log_out).unwrap_or_default();
+            return Err(DevStackError::Message(format!(
+                "{engine} exited during startup.\nstderr:\n{err}\nstdout:\n{out}"
+            )));
+        }
+        if let Some(cli) = &client {
+            let mut args = connect.clone();
+            args.push("-e".into());
+            args.push("SELECT 1".into());
+            let ok = crate::services::process::command(cli)
+                .args(&args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if ok {
+                return Ok(());
+            }
+        } else if !cfg!(windows) {
+            let sock = paths.databases.join(format!("{engine}.sock"));
+            if sock.exists() {
                 thread::sleep(Duration::from_millis(300));
                 return Ok(());
             }
+        } else if !crate::services::ports::port_is_free(port) {
+            thread::sleep(Duration::from_millis(500));
+            return Ok(());
         }
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(500));
     }
+    let err = fs::read_to_string(&log_err).unwrap_or_default();
     Err(DevStackError::Message(format!(
-        "{engine} started but never became ready (no socket/accept)"
+        "{engine} started but never became ready (no accept on port {port}).\nstderr:\n{err}"
     )))
 }
 
@@ -250,7 +346,7 @@ pub fn ensure_database(
 ) -> Result<()> {
     let root = engine_install_dir(state, engine)?;
     let client = client_bin(&root)?;
-    let sock = paths.databases.join(format!("{engine}.sock"));
+    let connect = mysql_root_args(paths, state, engine);
     // Always (re)set password — CREATE USER IF NOT EXISTS leaves stale passwords around.
     let sql = format!(
         "CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n\
@@ -262,13 +358,11 @@ pub fn ensure_database(
          GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{user}'@'127.0.0.1';\n\
          FLUSH PRIVILEGES;"
     );
+    let mut args = connect.clone();
+    args.push("-e".into());
+    args.push(sql);
     let status = crate::services::process::command(&client)
-        .args([
-            format!("--socket={}", sock.display()),
-            "-uroot".into(),
-            "-e".into(),
-            sql,
-        ])
+        .args(&args)
         .status()
         .map_err(|e| DevStackError::Message(e.to_string()))?;
     if !status.success() {
@@ -279,13 +373,11 @@ pub fn ensure_database(
              GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{user}'@'127.0.0.1' IDENTIFIED BY '{pass}';\n\
              FLUSH PRIVILEGES;"
         );
+        let mut args2 = connect;
+        args2.push("-e".into());
+        args2.push(sql2);
         let status2 = crate::services::process::command(&client)
-            .args([
-                format!("--socket={}", sock.display()),
-                "-uroot".into(),
-                "-e".into(),
-                sql2,
-            ])
+            .args(&args2)
             .status()
             .map_err(|e| DevStackError::Message(e.to_string()))?;
         if !status2.success() {
@@ -306,21 +398,44 @@ pub fn configure_phpmyadmin(paths: &Paths, state: &AppState) -> Result<()> {
         .clone()
         .or_else(|| state.runtime.database_engine.clone())
         .unwrap_or_else(|| "mariadb".into());
+    let port = crate::services::ports::engine_db_port(&state.stack, &engine);
     let sock = paths.databases.join(format!("{engine}.sock"));
     let conf = pma.path.join("config.inc.php");
     let signon = pma.path.join("devstack-signon.php");
+    // Windows: TCP only. Unix: socket when available.
+    let (host, connect_type, socket_line) = if cfg!(windows) {
+        (
+            "127.0.0.1".to_string(),
+            "tcp".to_string(),
+            String::new(),
+        )
+    } else {
+        (
+            "localhost".to_string(),
+            "socket".to_string(),
+            format!(
+                "$cfg['Servers'][$i]['socket'] = '{}';\n",
+                posix_path(&sock)
+            ),
+        )
+    };
     fs::write(
         &signon,
-        r#"<?php
+        format!(
+            r#"<?php
 session_start();
-if (!empty($_GET['db'])) {
+if (!empty($_GET['db'])) {{
   $_SESSION['PMA_single_signon_user'] = $_GET['user'] ?? 'root';
   $_SESSION['PMA_single_signon_password'] = $_GET['pass'] ?? '';
-  $_SESSION['PMA_single_signon_host'] = 'localhost';
+  $_SESSION['PMA_single_signon_host'] = '{host}';
+  $_SESSION['PMA_single_signon_port'] = '{port}';
   $_SESSION['PMA_single_signon_only_database'] = $_GET['db'];
-}
+}}
 header('Location: index.php');
 "#,
+            host = host,
+            port = port,
+        ),
     )?;
     let cfg = format!(
         r#"<?php
@@ -336,19 +451,24 @@ $i++;
 $cfg['Servers'][$i]['auth_type'] = 'signon';
 $cfg['Servers'][$i]['SignonSession'] = 'SignonSession';
 $cfg['Servers'][$i]['SignonURL'] = 'devstack-signon.php';
-$cfg['Servers'][$i]['host'] = 'localhost';
-$cfg['Servers'][$i]['socket'] = '{sock}';
-$cfg['Servers'][$i]['AllowNoPassword'] = true;
+$cfg['Servers'][$i]['host'] = '{host}';
+$cfg['Servers'][$i]['port'] = '{port}';
+$cfg['Servers'][$i]['connect_type'] = '{connect_type}';
+{socket_line}$cfg['Servers'][$i]['AllowNoPassword'] = true;
 $cfg['Servers'][$i]['compress'] = false;
 $cfg['Servers'][$i]['AllowRoot'] = true;
 // Also keep a cookie server for manual login
 $i++;
 $cfg['Servers'][$i]['auth_type'] = 'cookie';
-$cfg['Servers'][$i]['host'] = 'localhost';
-$cfg['Servers'][$i]['socket'] = '{sock}';
-$cfg['Servers'][$i]['AllowNoPassword'] = true;
+$cfg['Servers'][$i]['host'] = '{host}';
+$cfg['Servers'][$i]['port'] = '{port}';
+$cfg['Servers'][$i]['connect_type'] = '{connect_type}';
+{socket_line}$cfg['Servers'][$i]['AllowNoPassword'] = true;
 "#,
-        sock = sock.display()
+        host = host,
+        port = port,
+        connect_type = connect_type,
+        socket_line = socket_line,
     );
     fs::write(conf, cfg)?;
     Ok(())

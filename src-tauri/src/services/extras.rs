@@ -331,8 +331,8 @@ fn start_mongodb(paths: &Paths, state: &mut AppState) -> Result<()> {
     fs::write(
         &conf,
         format!(
-            "storage:\n  dbPath: {}\nnet:\n  bindIp: 127.0.0.1\n  port: {port}\n",
-            dbpath.display()
+            "storage:\n  dbPath: \"{}\"\nnet:\n  bindIp: 127.0.0.1\n  port: {port}\n",
+            crate::paths_util::conf_path(&dbpath)
         ),
     )?;
     let child = spawn_logged(
@@ -546,8 +546,8 @@ pub fn write_mailpit_nginx(paths: &Paths, state: &AppState) -> Result<()> {
   }}
 }}
 "#,
-        cert = certs.site_cert.display(),
-        key = certs.site_key.display(),
+        cert = crate::paths_util::quoted_conf_path(&certs.site_cert),
+        key = crate::paths_util::quoted_conf_path(&certs.site_key),
     );
     fs::write(sites.join("mailpit.conf"), body)?;
     Ok(())

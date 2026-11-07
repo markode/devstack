@@ -99,17 +99,49 @@ pub fn spawn_logged(
     log_out: &Path,
     log_err: &Path,
 ) -> Result<Child> {
+    spawn_logged_env(program, args, cwd, log_out, log_err, &[], true)
+}
+
+/// Spawn with redirected logs but **without** `DETACHED_PROCESS` (needed for
+/// Windows mysqld/`--console` so the process stays alive and writes stderr).
+pub fn spawn_logged_attached(
+    program: &Path,
+    args: &[&str],
+    cwd: Option<&Path>,
+    log_out: &Path,
+    log_err: &Path,
+) -> Result<Child> {
+    spawn_logged_env(program, args, cwd, log_out, log_err, &[], false)
+}
+
+/// Like [`spawn_logged`], with extra environment variables (e.g. `PHPRC` for php-cgi).
+pub fn spawn_logged_env(
+    program: &Path,
+    args: &[&str],
+    cwd: Option<&Path>,
+    log_out: &Path,
+    log_err: &Path,
+    envs: &[(&str, &OsStr)],
+    detached: bool,
+) -> Result<Child> {
     if let Some(parent) = log_out.parent() {
         fs::create_dir_all(parent)?;
     }
     let out = fs::File::create(log_out)?;
     let err = fs::File::create(log_err)?;
     let mut cmd = command(program);
-    no_window_detached(&mut cmd);
+    if detached {
+        no_window_detached(&mut cmd);
+    } else {
+        no_window(&mut cmd);
+    }
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }

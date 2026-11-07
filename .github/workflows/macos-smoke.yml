@@ -1,0 +1,44 @@
+# macOS unit tests + end-to-end stack smoke (PHP + MariaDB + Nginx + sites).
+name: macOS smoke
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos-smoke:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo test
+        working-directory: src-tauri
+        run: cargo test --lib -- --nocapture
+
+      - name: Brew PHP + MariaDB + httpd (managed packages are Windows-first)
+        run: |
+          set -euo pipefail
+          brew update
+          brew install php mariadb httpd || brew upgrade php mariadb httpd || true
+          php -v
+          php -m | grep -i mysqli
+          brew --prefix mariadb
+          brew --prefix httpd
+          brew services stop httpd || true
+
+      - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip
+        working-directory: src-tauri
+        env:
+          DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-e2e
+          DEVSTACK_RESET_SITES: "1"
+        run: |
+          set -euo pipefail
+          cargo build --bin devstack_smoke --release
+          ./target/release/devstack_smoke --e2e

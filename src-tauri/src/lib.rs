@@ -3,6 +3,7 @@ pub mod config;
 pub mod downloads;
 pub mod error;
 pub mod packages;
+pub mod paths_util;
 pub mod php;
 pub mod services;
 
@@ -16,11 +17,12 @@ use commands::{
     get_service_log, get_site_details, get_sites, get_stack_status, get_templates,
     import_database_from_folder, import_site_database_file, install_package, list_database_files,
     list_installed, list_managed_services_cmd, list_package_versions, list_packages,
-    list_php_extension_settings, list_site_details, mark_template, prefetch_version_lists,
-    register_system_php_cmd, repair_hosts, restore_site_database, seed_site_large_table,
-    set_coexistence_mode, set_php_manifest_url, set_php_xdebug, start_dev_stack,
-    start_managed_service, stop_dev_stack, stop_managed_service, uninstall_package,
-    update_db_files_settings, update_package, update_ports_config, update_site_environment,
+    list_php_extension_settings, list_site_details, mark_template, open_path_cmd,
+    prefetch_version_lists, register_system_php_cmd, repair_hosts, restore_site_database,
+    reveal_path_cmd, seed_site_large_table, set_coexistence_mode, set_php_manifest_url,
+    set_php_xdebug, start_dev_stack, start_managed_service, stop_dev_stack,
+    stop_managed_service, uninstall_package, update_db_files_settings, update_package,
+    update_ports_config, update_site_environment,
 };
 use config::default_data_root;
 use services::db_files::{
@@ -44,6 +46,27 @@ pub fn run() {
     let ctx = bootstrap_ctx(default_data_root()).expect("failed to init DevStack data dir");
     let ctx = Arc::new(ctx);
     prefetch_version_lists(ctx.clone());
+    // Auto-sync hosts+CA on launch when the DevStack block is missing (may prompt UAC),
+    // and regenerate managed php.ini (Windows extension_dir + modules).
+    {
+        let launch_ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async {
+                let state = launch_ctx.state.lock().await;
+                let _ = crate::php::regenerate_all_php_ini(&launch_ctx.paths, &state);
+                match crate::services::dns::ensure_hosts_if_needed(&launch_ctx.paths, &state) {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("devstack hosts auto-sync: {e}"),
+                }
+            });
+        });
+    }
 
     // Folder watcher + scheduled auto-export for Databases/
     {
@@ -175,6 +198,8 @@ pub fn run() {
             apply_next_free_ports,
             get_hosts_status,
             repair_hosts,
+            open_path_cmd,
+            reveal_path_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");

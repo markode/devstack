@@ -1,7 +1,8 @@
-/** Cross-platform open helpers (Tauri opener + dialog). Errors are thrown for callers to toast. */
+/** Cross-platform open helpers. Prefer Rust open_path_cmd (no opener scope). */
 
-import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./api";
 
 function errMessage(e: unknown): string {
@@ -23,7 +24,7 @@ export async function openInBrowser(url: string): Promise<void> {
   }
 }
 
-/** Open a folder or file with the OS default handler (Explorer / Finder / app). */
+/** Open a folder or file via Rust (explorer/open) — never "Not allowed". */
 export async function openInFileManager(path: string): Promise<void> {
   if (!path) throw new Error("No path to open");
   if (!isTauri()) {
@@ -31,16 +32,9 @@ export async function openInFileManager(path: string): Promise<void> {
   }
   const normalized = normalizeFsPath(path);
   try {
-    // revealItemInDir selects the item; for directories openPath is more reliable on Windows.
-    await openPath(normalized);
+    await invoke("open_path_cmd", { path: normalized });
   } catch (e) {
-    try {
-      await revealItemInDir(normalized);
-    } catch (e2) {
-      throw new Error(
-        `Could not open folder: ${errMessage(e)}; reveal failed: ${errMessage(e2)}`,
-      );
-    }
+    throw new Error(`Could not open folder: ${errMessage(e)}`);
   }
 }
 
@@ -52,7 +46,7 @@ export async function openInEditor(path: string): Promise<void> {
   }
   const normalized = normalizeFsPath(path);
   try {
-    await openPath(normalized);
+    await invoke("open_path_cmd", { path: normalized });
   } catch (e) {
     throw new Error(`Could not open in editor: ${errMessage(e)}`);
   }
@@ -75,7 +69,9 @@ export async function browseDatabaseDump(
       multiple: false,
       directory: false,
       title: opts.title ?? "Select database dump",
-      defaultPath: opts.defaultPath ? normalizeFsPath(opts.defaultPath) : undefined,
+      defaultPath: opts.defaultPath
+        ? normalizeFsPath(opts.defaultPath)
+        : undefined,
       filters: [
         {
           name: "Database dumps",
@@ -91,8 +87,34 @@ export async function browseDatabaseDump(
   }
 }
 
+/** Pick an existing folder (link site) or cancel → null. */
+export async function browseFolder(
+  opts: { title?: string; defaultPath?: string } = {},
+): Promise<string | null> {
+  if (!isTauri()) {
+    throw new Error("Browse is only available in the desktop app");
+  }
+  try {
+    const selected = await openDialog({
+      multiple: false,
+      directory: true,
+      title: opts.title ?? "Select site folder",
+      defaultPath: opts.defaultPath
+        ? normalizeFsPath(opts.defaultPath)
+        : undefined,
+    });
+    if (selected == null) return null;
+    return typeof selected === "string" ? selected : selected[0] ?? null;
+  } catch (e) {
+    throw new Error(`Folder picker failed: ${errMessage(e)}`);
+  }
+}
+
 /** Normalize Windows paths that may use mixed separators. */
 export function normalizeFsPath(path: string): string {
-  // Keep UNC and drive letters; opener accepts both / and \ on Windows.
-  return path.trim();
+  const trimmed = path.trim();
+  if (/^[A-Za-z]:/.test(trimmed) || trimmed.startsWith("\\\\")) {
+    return trimmed.replace(/\//g, "\\");
+  }
+  return trimmed;
 }

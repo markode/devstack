@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Hero, VersionTable } from "../components/VersionTable";
+import { PortConflictDialog } from "../components/PortConflictDialog";
 import { usePackageVersions } from "../hooks/usePackageVersions";
 import * as client from "../client";
 import type {
@@ -8,30 +9,7 @@ import type {
   PortCheckResult,
 } from "../types";
 import { openInBrowser } from "../open";
-
-/** Parse `… |DEVSTACK_PORT_BUSY:{json}|` from a start error. */
-function parsePortBusy(message: string): PortCheckResult | null {
-  const marker = "|DEVSTACK_PORT_BUSY:";
-  const idx = message.indexOf(marker);
-  if (idx < 0) return null;
-  const jsonPart = message.slice(idx + marker.length).replace(/\|\s*$/, "");
-  try {
-    const raw = JSON.parse(jsonPart) as {
-      serviceId?: string;
-      suggested?: Record<string, number>;
-      conflicts?: PortCheckResult["conflicts"];
-    };
-    return {
-      serviceId: raw.serviceId ?? "",
-      ok: false,
-      conflicts: raw.conflicts ?? [],
-      message: message.slice(0, idx).trim(),
-      suggested: raw.suggested ?? {},
-    };
-  } catch {
-    return null;
-  }
-}
+import { humanizeError, parsePortBusy } from "../portBusy";
 
 const SERVICE_IDS = [
   "nginx",
@@ -109,9 +87,9 @@ export function ServicesPage() {
       const busy = parsePortBusy(msg);
       if (busy) {
         setPortConflict(busy);
-        setError(busy.message ?? msg);
+        setError(busy.message ?? humanizeError(msg));
       } else {
-        setError(msg);
+        setError(humanizeError(msg));
       }
     } finally {
       setBusyId(null);
@@ -132,9 +110,32 @@ export function ServicesPage() {
       const busy = parsePortBusy(msg);
       if (busy) {
         setPortConflict(busy);
-        setError(busy.message ?? msg);
+        setError(busy.message ?? humanizeError(msg));
       } else {
-        setError(msg);
+        setError(humanizeError(msg));
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const useCoexistence = async () => {
+    if (!portConflict?.serviceId) return;
+    setBusyId(portConflict.serviceId);
+    setError(null);
+    try {
+      await client.setCoexistenceMode(true);
+      setPortConflict(null);
+      await client.startManagedService(portConflict.serviceId);
+      await refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const busy = parsePortBusy(msg);
+      if (busy) {
+        setPortConflict(busy);
+        setError(busy.message ?? humanizeError(msg));
+      } else {
+        setError(humanizeError(msg));
       }
     } finally {
       setBusyId(null);
@@ -158,25 +159,15 @@ export function ServicesPage() {
         color="#5856d6"
         glyph="Sv"
       />
-      {error ? (
-        <div className="error-banner">
-          <div>{error}</div>
-          {portConflict && !portConflict.ok ? (
-            <div style={{ marginTop: 10 }}>
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={!!busyId}
-                onClick={() => void useNextFreePort()}
-              >
-                Use next free port
-                {Object.keys(portConflict.suggested).length
-                  ? ` (${Object.values(portConflict.suggested).join(", ")})`
-                  : ""}
-              </button>
-            </div>
-          ) : null}
-        </div>
+      {error ? <div className="error-banner">{error}</div> : null}
+      {portConflict && !portConflict.ok ? (
+        <PortConflictDialog
+          conflict={portConflict}
+          busy={!!busyId}
+          onCancel={() => setPortConflict(null)}
+          onUseSuggested={() => void useNextFreePort()}
+          onCoexistence={() => void useCoexistence()}
+        />
       ) : null}
 
       <div className="section-head">

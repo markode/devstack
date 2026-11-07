@@ -13,7 +13,9 @@ use crate::config::{find_installed, latest_installed, AppState, Paths, SiteRecor
 use crate::error::{DevStackError, Result};
 use crate::services::nginx::expand_home;
 use crate::services::php_runtime::{nginx_fastcgi_pass, resolve_php, start_php, PhpRuntime};
-use crate::services::process::{find_bin, is_running, read_pid, spawn_logged, stop_pid, write_pid};
+use crate::services::process::{
+    find_bin, is_running, read_pid, spawn_logged_attached, stop_pid, write_pid,
+};
 use crate::services::tls::ensure_site_cert;
 
 pub fn site_uses_apache(site: &SiteRecord) -> bool {
@@ -68,14 +70,19 @@ fn php_for_site<'a>(
 fn fcgi_target(runtime: &PhpRuntime) -> String {
     let pass = nginx_fastcgi_pass(runtime);
     if let Some(path) = pass.strip_prefix("unix:") {
-        // Apache proxy_fcgi Unix socket form
-        format!("unix:{path}|fcgi://localhost")
+        // Trailing slash required — without it Apache glues SCRIPT_FILENAME onto the
+        // authority (on Windows: `127.0.0.1:9000` + `D:\…` → DNS host `127.0.0.1:9000d`).
+        format!("unix:{path}|fcgi://localhost/")
     } else {
-        format!("fcgi://{pass}")
+        format!("fcgi://{pass}/")
     }
 }
 
 fn module_line(root: &Path, name: &str) -> Option<String> {
+    // unixd is Unix-only; Windows Lounge builds do not ship it.
+    if name == "unixd" && cfg!(windows) {
+        return None;
+    }
     let candidates = [
         root.join("modules").join(format!("mod_{name}.so")),
         root.join("modules").join(format!("mod_{name}.dll")),
@@ -90,19 +97,11 @@ fn module_line(root: &Path, name: &str) -> Option<String> {
             // or a system prefix without a relative modules/ tree.
             return Some(format!(
                 "LoadModule {name}_module \"{}\"",
-                c.display()
+                crate::paths_util::conf_path(c)
             ));
         }
     }
-    // Apache Lounge / static package: relative modules/ only when that dir exists.
-    // Skip when missing — many distro builds compile log_config/unixd in.
-    let rel = root.join("modules").join(format!("mod_{name}.so"));
-    if root.join("modules").is_dir() {
-        return Some(format!(
-            "LoadModule {name}_module \"{}\"",
-            rel.display()
-        ));
-    }
+    // Never invent LoadModule lines for missing files (Lounge modules/ may omit unixd).
     None
 }
 
@@ -175,11 +174,6 @@ pub fn render_stack(
     }
     for m in modules {
         if let Some(line) = module_line(&root, m) {
-            // Skip modules that don't exist on this layout (e.g. unixd on Windows)
-            let path_hint = line.split('"').nth(1).unwrap_or("");
-            if !path_hint.is_empty() && !Path::new(path_hint).exists() && system_layout {
-                continue;
-            }
             load_modules.push_str(&line);
             load_modules.push('\n');
         }
@@ -191,17 +185,23 @@ pub fn render_stack(
         // but we load modules by absolute path so /usr is fine.
         "/etc/apache2".to_string()
     } else {
-        root.display().to_string()
+        crate::paths_util::conf_path(&root)
     };
     let runtime_dir = paths.apache.join("run");
     fs::create_dir_all(&runtime_dir)?;
-    let mime = if root.join("conf").join("mime.types").exists() {
-        root.join("conf").join("mime.types")
-    } else if Path::new("/etc/mime.types").exists() {
-        PathBuf::from("/etc/mime.types")
-    } else {
-        root.join("conf").join("mime.types")
-    };
+    let mime = [
+        root.join("conf").join("mime.types"),
+        // Homebrew httpd keeps mime.types under etc/ or share/, not conf/.
+        root.join("share").join("httpd").join("mime.types"),
+        PathBuf::from("/opt/homebrew/etc/httpd/mime.types"),
+        PathBuf::from("/usr/local/etc/httpd/mime.types"),
+        PathBuf::from("/etc/apache2/mime.types"),
+        PathBuf::from("/etc/mime.types"),
+        PathBuf::from("/etc/httpd/conf/mime.types"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
+    .unwrap_or_else(|| root.join("conf").join("mime.types"));
     let identity = if cfg!(windows) {
         String::new()
     } else if nix_geteuid() == 0 {
@@ -215,19 +215,21 @@ pub fn render_stack(
     } else {
         format!(
             "DefaultRuntimeDir \"{}\"\nMutex default\n",
-            runtime_dir.display()
+            crate::paths_util::conf_path(&runtime_dir)
         )
     };
     let body = format!(
         r#"ServerRoot "{server_root}"
-Listen {http_port}
-Listen {https_port}
+Listen 127.0.0.1:{http_port}
+Listen 127.0.0.1:{https_port}
 {load_modules}
 ServerName localhost
 ServerAdmin admin@localhost
 PidFile "{pid}"
 ErrorLog "{error_log}"
 LogLevel warn
+LogFormat "%h %l %u %t \"%r\" %>s %b" common
+LogFormat "%h %l %u %t \"%r\" %>s %b \"%{{Referer}}i\" \"%{{User-Agent}}i\"" combined
 Timeout 3600
 KeepAlive On
 MaxKeepAliveRequests 100
@@ -245,11 +247,11 @@ SSLSessionCacheTimeout 300
 
 IncludeOptional "{sites}/*.conf"
 "#,
-        pid = paths.pid_file("apache").display(),
-        error_log = paths.logs.join("apache/error.log").display(),
-        sites = sites_dir.display(),
-        mime = mime.display(),
-        cache = paths.apache.join("run/ssl_scache").display(),
+        pid = crate::paths_util::conf_path(&paths.pid_file("apache")),
+        error_log = crate::paths_util::conf_path(&paths.logs.join("apache/error.log")),
+        sites = crate::paths_util::conf_path(&sites_dir),
+        mime = crate::paths_util::conf_path(&mime),
+        cache = crate::paths_util::conf_path(&paths.apache.join("run/ssl_scache")),
     );
     fs::write(&conf, body)?;
     Ok(conf)
@@ -258,20 +260,58 @@ IncludeOptional "{sites}/*.conf"
 fn nix_geteuid() -> u32 {
     #[cfg(unix)]
     {
-        // Avoid a libc dependency — parse from /proc when available, else assume non-root.
-        std::fs::read_to_string("/proc/self/status")
+        // Linux: /proc. macOS/BSD: `id -u` (no /proc).
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            if let Some(uid) = s
+                .lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+            {
+                return uid;
+            }
+        }
+        crate::services::process::command("id")
+            .arg("-u")
+            .output()
             .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("Uid:"))
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .and_then(|v| v.parse().ok())
-            })
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
             .unwrap_or(1000)
     }
     #[cfg(not(unix))]
     {
         0
+    }
+}
+
+/// PHP proxy directives for a vhost.
+///
+/// Windows php-cgi needs an absolute SCRIPT_FILENAME. Trailing-slash SetHandler
+/// alone leaves a URL path ("No input file specified"); no slash glues `D:` onto
+/// the host. Fix: trailing slash + ProxyFCGISetEnvIf rebuild from DOCUMENT_ROOT.
+///
+/// Unix php-fpm uses SetHandler with a trailing slash.
+fn php_proxy_block(runtime: &PhpRuntime, _docroot_conf: &str) -> String {
+    let fcgi = fcgi_target(runtime);
+    if cfg!(windows) {
+        // ProxyPassMatch embeds the absolute docroot so php-cgi gets a real path.
+        // (SetHandler±slash either glues D: onto the host or leaves a URL path.)
+        let host = nginx_fastcgi_pass(runtime);
+        let docroot = _docroot_conf.trim_end_matches('/');
+        format!(
+            r#"  ProxyFCGIBackendType GENERIC
+  ProxyPassMatch "^/(.*\.php(/.*)?)$" "fcgi://{host}/{docroot}/$1"
+  ProxyTimeout 3600
+"#
+        )
+    } else {
+        format!(
+            r#"  <FilesMatch "\.php$">
+    SetHandler "proxy:{fcgi}"
+  </FilesMatch>
+  ProxyTimeout 3600
+"#
+        )
     }
 }
 
@@ -288,7 +328,8 @@ fn write_vhost(
     let Some(runtime) = php_for_site(site, runtimes, state) else {
         return Ok(());
     };
-    let fcgi = fcgi_target(runtime);
+    let root = crate::paths_util::conf_path(&docroot);
+    let php = php_proxy_block(runtime, &root);
     let mut conf = format!(
         r#"<VirtualHost *:{http_port}>
   ServerName {domain}
@@ -301,19 +342,19 @@ fn write_vhost(
   DirectoryIndex index.php index.html
   LimitRequestBody 0
   Timeout 3600
-  <FilesMatch "\.php$">
-    SetHandler "proxy:{fcgi}"
-  </FilesMatch>
-  ProxyTimeout 3600
-  ErrorLog "{err}"
+{php}  ErrorLog "{err}"
   CustomLog "{access}" common
 </VirtualHost>
 "#,
         domain = site.domain,
-        root = docroot.display(),
-        fcgi = fcgi,
-        err = paths.logs.join(format!("apache/{}-error.log", site.id)).display(),
-        access = paths.logs.join(format!("apache/{}-access.log", site.id)).display(),
+        root = root,
+        php = php,
+        err = crate::paths_util::conf_path(
+            &paths.logs.join(format!("apache/{}-error.log", site.id)),
+        ),
+        access = crate::paths_util::conf_path(
+            &paths.logs.join(format!("apache/{}-access.log", site.id)),
+        ),
     );
 
     if site.https {
@@ -334,24 +375,21 @@ fn write_vhost(
   DirectoryIndex index.php index.html
   LimitRequestBody 0
   Timeout 3600
-  <FilesMatch "\.php$">
-    SetHandler "proxy:{fcgi}"
-  </FilesMatch>
-  ProxyTimeout 3600
-  ErrorLog "{err}"
+{php}  ErrorLog "{err}"
   CustomLog "{access}" common
 </VirtualHost>
 "#,
             domain = site.domain,
-            root = docroot.display(),
-            cert = certs.site_cert.display(),
-            key = certs.site_key.display(),
-            fcgi = fcgi,
-            err = paths.logs.join(format!("apache/{}-ssl-error.log", site.id)).display(),
-            access = paths
-                .logs
-                .join(format!("apache/{}-ssl-access.log", site.id))
-                .display(),
+            root = root,
+            cert = crate::paths_util::conf_path(&certs.site_cert),
+            key = crate::paths_util::conf_path(&certs.site_key),
+            php = php,
+            err = crate::paths_util::conf_path(
+                &paths.logs.join(format!("apache/{}-ssl-error.log", site.id)),
+            ),
+            access = crate::paths_util::conf_path(
+                &paths.logs.join(format!("apache/{}-ssl-access.log", site.id)),
+            ),
         ));
     }
 
@@ -385,6 +423,21 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     if let Some(pid) = state.runtime.apache_pid {
         if is_running(pid) {
             return reload_apache(paths, state);
+        }
+    }
+    // Reclaim a stale FOREGROUND httpd left from a prior crash / DETACHED spawn.
+    if let Some(old) = read_pid(&paths.pid_file("apache")) {
+        let _ = stop_pid(old);
+        state.runtime.apache_pid = None;
+        for _ in 0..20 {
+            let http_free =
+                std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
+            let https_free =
+                std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_https_port)).is_ok();
+            if http_free && https_free {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
     crate::services::ports::ensure_ports_free(&state.stack, "apache")?;
@@ -423,7 +476,25 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     }
 
     let conf_s = conf.display().to_string();
-    let child = spawn_logged(
+    // Configtest first so we surface syntax/module errors instead of a silent exit.
+    let test = crate::services::process::command(&bin)
+        .args(["-f", &conf_s, "-t"])
+        .current_dir(&root)
+        .output();
+    if let Ok(out) = &test {
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return Err(DevStackError::Message(format!(
+                "Apache configtest failed: {stderr}{stdout}"
+            )));
+        }
+    }
+
+    // Attached (not DETACHED_PROCESS): we must own the real FOREGROUND pid so
+    // later reload/stop can taskkill the listener. Detached spawns orphaned
+    // httpd.exe that still hold 8088/8444 and look like "WAMP" conflicts.
+    let child = spawn_logged_attached(
         &bin,
         &["-f", &conf_s, "-D", "FOREGROUND"],
         Some(&root),
@@ -433,6 +504,34 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     let pid = child.id();
     std::mem::forget(child);
     write_pid(&paths.pid_file("apache"), pid)?;
+
+    // Wait until the process is still alive and accepts TCP on the HTTPS port.
+    // Do NOT use bind()-fails-as-ready: Windows SO_REUSEADDR lets bind succeed
+    // while httpd is already listening, which false-negatived readiness.
+    let https_port = state.stack.apache_https_port;
+    let mut ready = false;
+    for _ in 0..50 {
+        if !is_running(pid) {
+            let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
+            let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
+            return Err(DevStackError::Message(format!(
+                "Apache exited immediately after start.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
+            )));
+        }
+        if std::net::TcpStream::connect(("127.0.0.1", https_port)).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !ready {
+        let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
+        let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "Apache started (pid {pid}) but port {https_port} never became ready.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
+        )));
+    }
+
     state.runtime.apache_pid = Some(pid);
     for site in state.sites.iter_mut().filter(|s| site_uses_apache(s)) {
         site.status = "running".into();
@@ -451,6 +550,25 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     let root = apache_root(paths, state)?;
     let bin = apache_bin(&root)?;
     if let Some(pid) = state.runtime.apache_pid.filter(|p| is_running(*p)) {
+        // Windows Lounge builds started with -D FOREGROUND are not a Windows service;
+        // `-k graceful` looks for "Apache2.4" and no-ops. Restart the process instead.
+        if cfg!(windows) {
+            let _ = stop_pid(pid);
+            if let Some(file_pid) = read_pid(&paths.pid_file("apache")) {
+                let _ = stop_pid(file_pid);
+            }
+            state.runtime.apache_pid = None;
+            // Wait until our ports are free (mpm_winnt child can lag behind taskkill).
+            for _ in 0..30 {
+                let http_free = std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
+                let https_free = std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_https_port)).is_ok();
+                if http_free && https_free {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            return start_apache(paths, state);
+        }
         let _ = crate::services::process::command(&bin)
             .args([
                 "-f",
@@ -489,4 +607,39 @@ pub fn apache_site_url(state: &AppState, site: &SiteRecord) -> String {
     };
     let scheme = if https { "https" } else { "http" };
     crate::services::ports::format_url(scheme, &site.domain, port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::php_runtime::PhpRuntime;
+    use std::path::PathBuf;
+
+    #[test]
+    fn fcgi_target_tcp_has_trailing_slash() {
+        let rt = PhpRuntime {
+            version: "8.3".into(),
+            root: PathBuf::from("."),
+            php_bin: PathBuf::from("php"),
+            fpm_bin: None,
+            cgi_bin: None,
+            listen: "127.0.0.1:9085".into(),
+            is_system: false,
+        };
+        assert_eq!(fcgi_target(&rt), "fcgi://127.0.0.1:9085/");
+    }
+
+    #[test]
+    fn fcgi_target_unix_has_trailing_slash() {
+        let rt = PhpRuntime {
+            version: "8.3".into(),
+            root: PathBuf::from("."),
+            php_bin: PathBuf::from("php"),
+            fpm_bin: None,
+            cgi_bin: None,
+            listen: "unix:/tmp/php.sock".into(),
+            is_system: false,
+        };
+        assert_eq!(fcgi_target(&rt), "unix:/tmp/php.sock|fcgi://localhost/");
+    }
 }

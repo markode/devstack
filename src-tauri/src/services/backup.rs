@@ -8,7 +8,9 @@ use std::thread;
 
 use crate::config::{AppState, Paths};
 use crate::error::{DevStackError, Result};
-use crate::services::database::{client_bin_for, dump_bin_for, engine_install_dir, socket_path};
+use crate::services::database::{
+    client_bin_for, dump_bin_for, engine_install_dir, mysql_dump_root_args, mysql_root_args,
+};
 use crate::services::progress::{emit, JobProgressFn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,21 +60,28 @@ pub fn backup_database(
 ) -> Result<u64> {
     let root = engine_install_dir(state, engine)?;
     let dump = dump_bin_for(&root)?;
-    let sock = socket_path(paths, engine);
+    let connect = mysql_dump_root_args(paths, state, engine);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let kind = if dest
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e == "zst" || e == "zstd")
-        .unwrap_or(false)
-        || dest
-            .to_string_lossy()
-            .ends_with(".sql.zst")
+    // Honor the destination extension — never write zstd bytes into a `.sql.gz`
+    // path just because `zstd` is on PATH (broke restore with "invalid gzip header").
+    let dest_name = dest.to_string_lossy().to_lowercase();
+    let kind = if dest_name.ends_with(".sql.zst")
+        || dest_name.ends_with(".zst")
+        || dest_name.ends_with(".zstd")
     {
         CompressKind::Zstd
+    } else if dest_name.ends_with(".sql.gz")
+        || dest_name.ends_with(".gz")
+        || dest
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gz"))
+            .unwrap_or(false)
+    {
+        CompressKind::Gzip
     } else {
         CompressKind::preferred()
     };
@@ -93,18 +102,18 @@ pub fn backup_database(
         None,
     );
 
+    let mut dump_args = connect;
+    dump_args.extend([
+        "--single-transaction".into(),
+        "--quick".into(),
+        "--routines".into(),
+        "--triggers".into(),
+        "--hex-blob".into(),
+        "--max_allowed_packet=1G".into(),
+        db_name.to_string(),
+    ]);
     let mut child = crate::services::process::command(&dump)
-        .args([
-            format!("--socket={}", sock.display()),
-            "-uroot".into(),
-            "--single-transaction".into(),
-            "--quick".into(),
-            "--routines".into(),
-            "--triggers".into(),
-            "--hex-blob".into(),
-            "--max_allowed_packet=1G".into(),
-            db_name.to_string(),
-        ])
+        .args(&dump_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -114,6 +123,7 @@ pub fn backup_database(
         .stdout
         .take()
         .ok_or_else(|| DevStackError::Message("mysqldump stdout missing".into()))?;
+    let stderr_pipe = child.stderr.take();
 
     let out_file = File::create(&dest)?;
     let bytes = compress_stream(stdout, out_file, kind, progress, job_id)?;
@@ -122,9 +132,16 @@ pub fn backup_database(
         .wait()
         .map_err(|e| DevStackError::Message(e.to_string()))?;
     if !status.success() {
-        return Err(DevStackError::Message(
-            "mysqldump failed — check database is running and the schema exists".into(),
-        ));
+        let err = stderr_pipe
+            .map(|mut s| {
+                let mut buf = String::new();
+                let _ = std::io::Read::read_to_string(&mut s, &mut buf);
+                buf
+            })
+            .unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "mysqldump failed — check database is running and the schema exists: {err}"
+        )));
     }
 
     emit(
@@ -149,7 +166,9 @@ pub fn restore_database(
 ) -> Result<()> {
     let root = engine_install_dir(state, engine)?;
     let client = client_bin_for(&root)?;
-    let sock = socket_path(paths, engine);
+    let mut connect = mysql_root_args(paths, state, engine);
+    connect.push(format!("--database={db_name}"));
+    connect.push("--max_allowed_packet=1G".into());
     let kind = CompressKind::detect(archive);
     let total = fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
 
@@ -163,12 +182,7 @@ pub fn restore_database(
     );
 
     let mut child = crate::services::process::command(&client)
-        .args([
-            format!("--socket={}", sock.display()),
-            "-uroot".into(),
-            format!("--database={db_name}"),
-            "--max_allowed_packet=1G".into(),
-        ])
+        .args(&connect)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -178,6 +192,7 @@ pub fn restore_database(
         .stdin
         .take()
         .ok_or_else(|| DevStackError::Message("mysql stdin missing".into()))?;
+    let stderr_pipe = child.stderr.take();
 
     let file = File::open(archive)?;
     decompress_to_writer(file, stdin, kind, progress, job_id, total)?;
@@ -186,9 +201,16 @@ pub fn restore_database(
         .wait()
         .map_err(|e| DevStackError::Message(e.to_string()))?;
     if !status.success() {
-        return Err(DevStackError::Message(
-            "mysql import failed — dump may be corrupt or credentials invalid".into(),
-        ));
+        let detail = stderr_pipe
+            .and_then(|mut p| {
+                let mut s = String::new();
+                std::io::Read::read_to_string(&mut p, &mut s).ok()?;
+                Some(s)
+            })
+            .unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "mysql import failed — dump may be corrupt or credentials invalid: {detail}"
+        )));
     }
 
     emit(
@@ -256,12 +278,10 @@ fn decompress_to_writer<R: Read + Send + 'static, W: Write + Send + 'static>(
 ) -> Result<u64> {
     match kind {
         CompressKind::Gzip => {
-            if which::which("gzip").is_ok() {
-                pipe_via_compressor(reader, writer, "gzip", &["-dc"], progress, job_id)
-            } else {
-                let mut dec = flate2::read::GzDecoder::new(reader);
-                copy_counting(&mut dec, writer, progress, job_id, Some(total))
-            }
+            // Always decompress in-process. Piping through system `gzip -dc` fails
+            // in CI when the mysql client closes stdin early (reported as "gzip failed").
+            let mut dec = flate2::read::GzDecoder::new(reader);
+            copy_counting(&mut dec, writer, progress, job_id, Some(total))
         }
         CompressKind::Zstd => {
             if which::which("zstd").is_ok() {
@@ -493,7 +513,7 @@ pub fn seed_large_demo_table(
 ) -> Result<()> {
     let root = engine_install_dir(state, engine)?;
     let client = client_bin_for(&root)?;
-    let sock = socket_path(paths, engine);
+    let connect = mysql_root_args(paths, state, engine);
     let sql = format!(
         "USE `{db_name}`;
 CREATE TABLE IF NOT EXISTS devstack_big (
@@ -502,13 +522,11 @@ CREATE TABLE IF NOT EXISTS devstack_big (
 ) ENGINE=InnoDB;
 "
     );
+    let mut create_args = connect.clone();
+    create_args.push("-e".into());
+    create_args.push(sql);
     let _ = crate::services::process::command(&client)
-        .args([
-            format!("--socket={}", sock.display()),
-            "-uroot".into(),
-            "-e".into(),
-            sql,
-        ])
+        .args(&create_args)
         .status();
 
     // Insert via temp SQL files to avoid ARG_MAX limits on huge -e strings.
@@ -531,12 +549,10 @@ CREATE TABLE IF NOT EXISTS devstack_big (
         }
         sql.push(';');
         fs::write(&tmp, &sql)?;
+        let mut insert_args = connect.clone();
+        insert_args.push(format!("--database={db_name}"));
         let status = crate::services::process::command(&client)
-            .args([
-                format!("--socket={}", sock.display()),
-                "-uroot".into(),
-                format!("--database={db_name}"),
-            ])
+            .args(&insert_args)
             .stdin(Stdio::from(File::open(&tmp)?))
             .status()
             .map_err(|e| DevStackError::Message(e.to_string()))?;
