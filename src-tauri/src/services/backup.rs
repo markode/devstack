@@ -116,6 +116,7 @@ pub fn backup_database(
         .stdout
         .take()
         .ok_or_else(|| DevStackError::Message("mysqldump stdout missing".into()))?;
+    let stderr_pipe = child.stderr.take();
 
     let out_file = File::create(&dest)?;
     let bytes = compress_stream(stdout, out_file, kind, progress, job_id)?;
@@ -124,9 +125,16 @@ pub fn backup_database(
         .wait()
         .map_err(|e| DevStackError::Message(e.to_string()))?;
     if !status.success() {
-        return Err(DevStackError::Message(
-            "mysqldump failed — check database is running and the schema exists".into(),
-        ));
+        let err = stderr_pipe
+            .map(|mut s| {
+                let mut buf = String::new();
+                let _ = std::io::Read::read_to_string(&mut s, &mut buf);
+                buf
+            })
+            .unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "mysqldump failed — check database is running and the schema exists: {err}"
+        )));
     }
 
     emit(

@@ -47,6 +47,8 @@ pub fn render_stack(
     fs::create_dir_all(&sites_dir)?;
     fs::create_dir_all(paths.nginx.join("temp"))?;
     fs::create_dir_all(paths.logs.join("nginx"))?;
+    // Some nginx builds also probe `$prefix/logs/error.log` before reading conf.
+    fs::create_dir_all(paths.nginx.join("logs"))?;
 
     if sites_dir.exists() {
         for entry in fs::read_dir(&sites_dir)? {

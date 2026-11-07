@@ -29,7 +29,9 @@ pub fn normalize_separators(path: &Path) -> PathBuf {
     if cfg!(windows) {
         let bytes = s.as_bytes();
         if bytes.len() >= 2 && bytes[1] == b':' {
-            let mut out = PathBuf::from(format!("{}:", (bytes[0] as char).to_ascii_uppercase()));
+            // `PathBuf::from("D:")` is "cwd on D:", not the drive root — use `D:\`.
+            let drive = (bytes[0] as char).to_ascii_uppercase();
+            let mut out = PathBuf::from(format!("{drive}:\\"));
             let rest = &s[2..];
             push_normalized(&mut out, rest.trim_start_matches(['/', '\\']));
             return out;
@@ -252,5 +254,17 @@ mod tests {
             st.contains('/') && st.contains('\\')
         });
         assert!(!has_mixed_component, "{p:?}");
+    }
+
+    #[test]
+    fn windows_drive_root_is_absolute() {
+        let p = normalize_separators(Path::new(r"D:\a\_temp\devstack\data"));
+        let s = conf_path(&p);
+        // Must keep the slash after the drive letter — `D:a` is cwd-relative.
+        assert!(
+            s.starts_with("D:/a/") || s.starts_with(r"D:\a\"),
+            "drive root lost: {s} ({p:?})"
+        );
+        assert!(!s.starts_with("D:a"), "relative drive path: {s}");
     }
 }

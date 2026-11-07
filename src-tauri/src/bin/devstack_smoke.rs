@@ -579,8 +579,38 @@ async fn ensure_system_mariadb(ctx: &DevStackCtx) -> Result<(), Box<dyn std::err
         state.stack.mariadb_version = Some("brew".into());
         state.active_database = Some("mariadb".into());
         // Avoid clashing with any system mysqld on 3306 during CI.
+        // Stay on high ports already used by smoke (8080/8443) — also bump DB
+        // away from any brew/launchd mysqld that may already own 3306.
         state.stack.mariadb_port = 3307;
         state.stack.mysql_port = 3308;
+        // Stop brew's launchd instance so DevStack owns the datadir/port.
+        let _ = smoke_command("brew").args(["services", "stop", "mariadb"]).status();
+        let _ = smoke_command("pkill").args(["-f", "mariadbd"]).status();
+        let _ = smoke_command("pkill").args(["-f", "mysqld"]).status();
+        // Give brew's init a private datadir under DevStack so we don't fight
+        // /opt/homebrew/var/mysql permissions.
+        let brew_data = ctx.paths.databases.join("mariadb/data");
+        std::fs::create_dir_all(&brew_data)?;
+        if !brew_data.join("mysql").exists() {
+            let _ = smoke_command("mysql_install_db")
+                .args([
+                    format!("--datadir={}", brew_data.display()),
+                    "--auth-root-authentication-method=normal".into(),
+                ])
+                .status();
+            let _ = smoke_command(&format!("{root}/bin/mysql_install_db"))
+                .args([
+                    format!("--datadir={}", brew_data.display()),
+                    format!("--basedir={root}"),
+                ])
+                .status();
+            let _ = smoke_command(&format!("{root}/scripts/mysql_install_db"))
+                .args([
+                    format!("--datadir={}", brew_data.display()),
+                    format!("--basedir={root}"),
+                ])
+                .status();
+        }
         devstack_lib::config::save_state(&ctx.paths.state_file, &state)?;
         println!("[mariadb] registered brew prefix {root} on port 3307");
         return Ok(());
