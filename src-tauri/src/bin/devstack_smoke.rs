@@ -518,6 +518,8 @@ async fn run_wordpress_smoke(
     // macOS/Linux keep Apache (product default) and already return HTTP 200.
     let https_port = {
         let mut state = ctx.state.lock().await;
+        let nginx_port = state.stack.https_port;
+        let apache_port = state.stack.apache_https_port;
         if cfg!(windows) {
             for site in state.sites.iter_mut() {
                 if matches!(
@@ -527,15 +529,37 @@ async fn run_wordpress_smoke(
                     site.web_server = Some("nginx".into());
                 }
             }
+            // WP was installed with siteurl on the Apache port — rewrite to Nginx
+            // so we do not 301 off to a stopped :8444 listener.
+            let engine = created
+                .site
+                .database_engine
+                .clone()
+                .unwrap_or_else(|| "mariadb".into());
+            if let Some(db) = created.site.database_name.clone() {
+                let from = format!("https://demo.test:{apache_port}");
+                let to = format!("https://demo.test:{nginx_port}");
+                let _ = rewrite_wp_urls(&ctx.paths, &state, &engine, &db, &from, &to);
+            }
+            if let Some(db) = dup.site.database_name.clone() {
+                let engine = dup
+                    .site
+                    .database_engine
+                    .clone()
+                    .unwrap_or_else(|| "mariadb".into());
+                let from = format!("https://clone.test:{apache_port}");
+                let to = format!("https://clone.test:{nginx_port}");
+                let _ = rewrite_wp_urls(&ctx.paths, &state, &engine, &db, &from, &to);
+            }
         }
         apply_stack(&ctx.paths, &mut state)?;
         let port = if cfg!(windows) {
-            state.stack.https_port
+            nginx_port
         } else {
             if state.runtime.apache_pid.is_none() {
                 return Err("WordPress smoke requires Apache running after apply_stack".into());
             }
-            state.stack.apache_https_port
+            apache_port
         };
         println!(
             "wordpress stack — apache_pid={:?} nginx_pid={:?} probe_port={port}",
@@ -1135,6 +1159,32 @@ async fn pick_version(
         .or_else(|| versions.iter().find(|v| v.download_url.is_some()))
         .ok_or_else(|| format!("no installable versions for {id}"))?;
     Ok(chosen.version.clone())
+}
+
+fn rewrite_wp_urls(
+    paths: &devstack_lib::config::Paths,
+    state: &devstack_lib::config::AppState,
+    engine: &str,
+    db: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::database::{client_bin_for, engine_install_dir, mysql_root_args};
+    let root = engine_install_dir(state, engine)?;
+    let client = client_bin_for(&root)?;
+    let mut args = mysql_root_args(paths, state, engine);
+    let sql = format!(
+        "UPDATE `{db}`.`wp_options` SET option_value = REPLACE(option_value, '{from}', '{to}') \
+         WHERE option_name IN ('home','siteurl');"
+    );
+    args.push("-e".into());
+    args.push(sql);
+    let status = smoke_command(&client).args(&args).status()?;
+    if !status.success() {
+        return Err(format!("wp url rewrite failed for {db}").into());
+    }
+    println!("Rewrote WP URLs in `{db}`: {from} → {to}");
+    Ok(())
 }
 
 fn dump_apache_logs(ctx: &DevStackCtx) {
