@@ -303,8 +303,8 @@ pub async fn create_wordpress_site(
     );
     ensure_database(paths, state, &engine, &db_name, &db_user, &db_pass)?;
 
-    let https_port = state.stack.https_port;
-    // Include non-standard ports so redirects / siteurl stay reachable in smoke/CI.
+    // WordPress defaults to Apache — use Apache HTTPS port in siteurl.
+    let https_port = state.stack.apache_https_port;
     let public_url = if https_port == 443 {
         format!("https://{domain}")
     } else {
@@ -365,6 +365,15 @@ pub async fn create_wordpress_site(
     let arg_refs: Vec<&str> = install_args.iter().map(|s| s.as_str()).collect();
     run_wp_cli(&php_rt.php_bin, &wp_cli, &abs, &arg_refs)?;
 
+    // Pretty permalinks need Apache AllowOverride + mod_rewrite (.htaccess).
+    let _ = run_wp_cli(
+        &php_rt.php_bin,
+        &wp_cli,
+        &abs,
+        &["rewrite", "structure", "/%postname%/", "--hard"],
+    );
+    ensure_wordpress_htaccess(&abs)?;
+
     let mut site = SiteRecord {
         id: id.clone(),
         name: req.name.clone(),
@@ -373,6 +382,8 @@ pub async fn create_wordpress_site(
         php_version: Some(php_version),
         node_version: None,
         https: true,
+        // WordPress defaults to Apache for full .htaccess / pretty permalinks.
+        web_server: Some("apache".into()),
         framework: Some("wordpress".into()),
         database_engine: Some(engine),
         database_name: Some(db_name),
@@ -407,6 +418,33 @@ pub async fn create_wordpress_site(
         url: public_url,
         wordpress_version: version,
     })
+}
+
+/// Standard WordPress rewrite rules — WP-CLI `--hard` may skip writing when it
+/// cannot detect Apache; DevStack Apache vhosts always use `AllowOverride All`.
+pub fn ensure_wordpress_htaccess(site_path: &Path) -> Result<()> {
+    let path = expand_home(site_path).join(".htaccess");
+    let body = "\
+# BEGIN WordPress
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteBase /
+RewriteRule ^index\\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.php [L]
+</IfModule>
+# END WordPress
+";
+    if path.exists() {
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        if existing.contains("RewriteRule . /index.php") || existing.contains("RewriteRule ./index.php") {
+            return Ok(());
+        }
+    }
+    fs::write(path, body)?;
+    Ok(())
 }
 
 pub fn update_wp_config_credentials(

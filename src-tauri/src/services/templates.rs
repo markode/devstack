@@ -355,6 +355,7 @@ pub async fn duplicate_from_source(
         php_version: Some(php_version),
         node_version: None,
         https: true,
+        web_server: Some("apache".into()),
         framework: Some(framework),
         database_engine: Some(engine),
         database_name: Some(db_name),

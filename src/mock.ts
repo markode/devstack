@@ -20,11 +20,14 @@ const installed = new Map<string, InstalledPackage[]>();
 
 export const mockStackStatus: StackStatus = {
   nginx: true,
+  apache: true,
   dns: true,
   database: true,
   databaseEngine: "mariadb",
   httpPort: 80,
   httpsPort: 443,
+  apacheHttpPort: 8088,
+  apacheHttpsPort: 8444,
   phpVersions: ["8.5.1"],
 };
 
@@ -57,6 +60,13 @@ export const mockPackages: PackageInfo[] = [
     id: "nginx",
     name: "Nginx",
     description: "One Nginx for all sites.",
+    category: "service",
+    installReady: true,
+  },
+  {
+    id: "apache",
+    name: "Apache",
+    description: "Apache HTTP Server — full .htaccess / mod_rewrite for WordPress.",
     category: "service",
     installReady: true,
   },
@@ -120,6 +130,16 @@ let managed: ManagedServiceStatus[] = [
     version: "1.28.3",
     ports: [80, 443],
     logPath: "/tmp/nginx.err",
+  },
+  {
+    id: "apache",
+    name: "Apache",
+    running: true,
+    installed: true,
+    version: "2.4.66",
+    ports: [8088, 8444],
+    logPath: "/tmp/apache.err",
+    notes: "HTTP :8088 · HTTPS :8444 (alongside Nginx)",
   },
   {
     id: "mariadb",
@@ -198,6 +218,17 @@ const versionTables: Record<string, PackageVersion[]> = {
       downloadUrl: "https://nginx.org/download/nginx-1.27.5.zip",
     },
   ],
+  apache: [
+    {
+      version: "2.4.66",
+      channel: "2.4",
+      label: "2.4.66 (Apache Lounge VS17 x64)",
+      lts: true,
+      downloadUrl:
+        "https://www.apachelounge.com/download/VS17/binaries/httpd-2.4.66-251206-Win64-VS17.zip",
+      notes: "Official Apache Lounge Win64 VS17 build",
+    },
+  ],
   phpmyadmin: [
     {
       version: "5.2.3",
@@ -261,6 +292,7 @@ let sites: SiteRecord[] = [
     phpVersion: "8.5",
     nodeVersion: "24",
     https: true,
+    webServer: "nginx",
     framework: "laravel",
     databaseEngine: "mariadb",
     databaseName: "acme",
@@ -274,6 +306,7 @@ let sites: SiteRecord[] = [
     phpVersion: "8.4",
     nodeVersion: null,
     https: true,
+    webServer: "apache",
     framework: "wordpress",
     databaseEngine: "mariadb",
     databaseName: "blog",
@@ -288,6 +321,7 @@ let sites: SiteRecord[] = [
     domain: "api-kit.test",
     phpVersion: "8.3",
     https: false,
+    webServer: "nginx",
     framework: "other",
     status: "stopped",
     isTemplate: false,
@@ -351,13 +385,24 @@ function toDetails(s: SiteRecord): SiteDetails {
   const framework = s.framework ?? "other";
   const icon =
     framework === "wordpress" ? "WP" : framework === "laravel" ? "LV" : "?";
+  const apache = (s.webServer ?? "").toLowerCase() === "apache";
+  const httpPort = apache ? mockStackStatus.apacheHttpPort : mockStackStatus.httpPort;
+  const httpsPort = apache
+    ? mockStackStatus.apacheHttpsPort
+    : mockStackStatus.httpsPort;
   return {
     site: s,
     framework,
     frameworkIcon: icon,
     absolutePath: s.path.replace("~", "/Users/dev"),
-    url: `http://${s.domain}`,
-    httpsUrl: `https://${s.domain}`,
+    url:
+      httpPort === 80
+        ? `http://${s.domain}`
+        : `http://${s.domain}:${httpPort}`,
+    httpsUrl:
+      httpsPort === 443
+        ? `https://${s.domain}`
+        : `https://${s.domain}:${httpsPort}`,
     databaseName: s.databaseName,
     databaseUser: s.databaseUser,
     phpmyadminUrl:
@@ -421,6 +466,7 @@ seedInstalled("php", "8.5.1", "8.5");
 seedInstalled("node", "24.18.0", "24");
 seedInstalled("node", "22.23.2", "22");
 seedInstalled("nginx", "1.28.3", "1.28");
+seedInstalled("apache", "2.4.66", "2.4");
 seedInstalled("mariadb", "11.4.5", "11.4");
 seedInstalled("phpmyadmin", "5.2.3", "5.2");
 
@@ -436,6 +482,7 @@ export async function mockCreateWordpress(
     domain: request.domain || `${id}.test`,
     phpVersion: request.phpVersion || "8.4",
     https: true,
+    webServer: "apache",
     framework: "wordpress",
     databaseEngine: request.databaseEngine || "mariadb",
     databaseName: `wp_${id.replace(/-/g, "_")}`,
@@ -449,7 +496,7 @@ export async function mockCreateWordpress(
     adminUser: request.adminUser || "admin",
     adminPassword: "OnceOnly-Passw0rd!",
     adminEmail: `admin@${site.domain}`,
-    url: `https://${site.domain}`,
+    url: `https://${site.domain}:8444`,
     wordpressVersion: "6.8.1",
   };
 }
@@ -496,6 +543,7 @@ export async function mockDuplicateSite(
     domain: request.domain || `${id}.test`,
     phpVersion: request.phpVersion || "8.4",
     https: true,
+    webServer: "apache",
     framework: "wordpress",
     databaseEngine: request.databaseEngine || "mariadb",
     databaseName: `wp_${id.replace(/-/g, "_")}`,
@@ -504,7 +552,7 @@ export async function mockDuplicateSite(
     isTemplate: false,
   };
   sites = [...sites, site];
-  return { site, url: `https://${site.domain}` };
+  return { site, url: `https://${site.domain}:8444` };
 }
 
 export async function mockBackupSite(siteId: string): Promise<BackupResult> {

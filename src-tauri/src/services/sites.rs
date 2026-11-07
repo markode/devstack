@@ -93,18 +93,62 @@ pub fn detect_site(site: &SiteRecord) -> SiteDetails {
         updated.database_user = db_user.clone();
     }
 
+    let (http_port, https_port) = if crate::services::httpd::site_uses_apache(site) {
+        (
+            // Ports come from stack prefs; detect_site has no AppState — use defaults
+            // overridden by list_site_details which rewrites URLs when state is available.
+            8088u16,
+            8444u16,
+        )
+    } else {
+        (80u16, 443u16)
+    };
+    let url = if http_port == 80 {
+        format!("http://{}", site.domain)
+    } else {
+        format!("http://{}:{http_port}", site.domain)
+    };
+    let https_url = if https_port == 443 {
+        format!("https://{}", site.domain)
+    } else {
+        format!("https://{}:{https_port}", site.domain)
+    };
+
     SiteDetails {
         site: updated,
         framework,
         framework_icon: icon,
         absolute_path: abs,
-        url: format!("http://{}", site.domain),
-        https_url: format!("https://{}", site.domain),
+        url,
+        https_url,
         database_name: db_name,
         database_user: db_user,
         phpmyadmin_url: pma,
         has_wp_config: has_wp,
     }
+}
+
+/// Rewrite site detail URLs using live stack port preferences.
+pub fn apply_stack_ports(details: &mut SiteDetails, state: &AppState) {
+    let apache = crate::services::httpd::site_uses_apache(&details.site);
+    let (http_port, https_port) = if apache {
+        (
+            state.stack.apache_http_port,
+            state.stack.apache_https_port,
+        )
+    } else {
+        (state.stack.http_port, state.stack.https_port)
+    };
+    details.url = if http_port == 80 {
+        format!("http://{}", details.site.domain)
+    } else {
+        format!("http://{}:{http_port}", details.site.domain)
+    };
+    details.https_url = if https_port == 443 {
+        format!("https://{}", details.site.domain)
+    } else {
+        format!("https://{}:{https_port}", details.site.domain)
+    };
 }
 
 fn urlencoding_minimal(s: &str) -> String {
@@ -150,6 +194,7 @@ pub fn create_site(
         php_version,
         node_version: None,
         https: true,
+        web_server: Some("nginx".into()),
         framework: None,
         database_engine: state.active_database.clone(),
         database_name: None,

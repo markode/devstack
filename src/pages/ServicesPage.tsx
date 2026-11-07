@@ -7,6 +7,7 @@ import { openInBrowser } from "../open";
 
 const SERVICE_IDS = [
   "nginx",
+  "apache",
   "phpmyadmin",
   "mysql",
   "mariadb",

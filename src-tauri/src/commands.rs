@@ -18,7 +18,9 @@ use crate::services::backup::{
     backup_database, default_backup_path, restore_database, seed_large_demo_table,
 };
 use crate::services::progress::{JobProgress, JobProgressFn};
-use crate::services::sites::{create_site, detect_site, refresh_site_metadata, SiteDetails};
+use crate::services::sites::{
+    apply_stack_ports, create_site, detect_site, refresh_site_metadata, SiteDetails,
+};
 use crate::services::stack::{
     apply_stack, reload_sites, stack_status, start_stack, stop_stack, StackStatus,
 };
@@ -155,7 +157,15 @@ pub async fn list_site_details(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDe
     let mut state = ctx.state.lock().await;
     ensure_demo_site(&mut state);
     refresh_site_metadata(&mut state);
-    let details: Vec<_> = state.sites.iter().map(detect_site).collect();
+    let details: Vec<_> = state
+        .sites
+        .iter()
+        .map(|s| {
+            let mut d = detect_site(s);
+            apply_stack_ports(&mut d, &state);
+            d
+        })
+        .collect();
     save_state(&ctx.paths.state_file, &state)?;
     Ok(details)
 }
@@ -173,7 +183,9 @@ pub async fn get_site_details(
         .find(|s| s.id == site_id)
         .ok_or_else(|| crate::error::DevStackError::Message(format!("site not found: {site_id}")))?
         .clone();
-    Ok(detect_site(&site))
+    let mut details = detect_site(&site);
+    apply_stack_ports(&mut details, &state);
+    Ok(details)
 }
 
 #[tauri::command]
@@ -202,6 +214,7 @@ pub async fn update_site_environment(
     php_version: Option<String>,
     node_version: Option<String>,
     https: Option<bool>,
+    web_server: Option<String>,
 ) -> Result<SiteRecord> {
     let mut state = ctx.state.lock().await;
     ensure_demo_site(&mut state);
@@ -218,6 +231,13 @@ pub async fn update_site_environment(
     }
     if let Some(h) = https {
         site.https = h;
+    }
+    if let Some(ws) = web_server {
+        let normalized = match ws.to_ascii_lowercase().as_str() {
+            "apache" | "httpd" => "apache".to_string(),
+            _ => "nginx".to_string(),
+        };
+        site.web_server = Some(normalized);
     }
     let out = site.clone();
     save_state(&ctx.paths.state_file, &state)?;

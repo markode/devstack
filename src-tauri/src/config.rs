@@ -13,6 +13,8 @@ pub struct AppState {
     pub php_manifest_url: Option<String>,
     /// Optional URL for macOS/Linux Nginx static-binary manifest.
     pub nginx_manifest_url: Option<String>,
+    /// Optional URL for macOS/Linux Apache httpd prebuilt manifest.
+    pub apache_manifest_url: Option<String>,
     /// package_id -> list of installed versions
     pub installed: HashMap<String, Vec<InstalledRecord>>,
     /// PHP version -> enabled extensions (e.g. xdebug)
@@ -33,25 +35,33 @@ pub struct AppState {
 #[serde(default, rename_all = "camelCase")]
 pub struct StackPreferences {
     pub nginx_version: Option<String>,
+    pub apache_version: Option<String>,
     pub php_version: Option<String>,
     pub mariadb_version: Option<String>,
     pub mysql_version: Option<String>,
     pub phpmyadmin_version: Option<String>,
-    /// HTTP listen port (80 preferred; falls back when unprivileged)
+    /// Nginx HTTP listen port (80 preferred; falls back when unprivileged)
     pub http_port: u16,
     pub https_port: u16,
+    /// Apache HTTP/HTTPS ports (defaults leave 80/443 free for Nginx, or
+    /// swap when Apache is the only front-end — see docs/apache.md).
+    pub apache_http_port: u16,
+    pub apache_https_port: u16,
 }
 
 impl Default for StackPreferences {
     fn default() -> Self {
         Self {
             nginx_version: None,
+            apache_version: None,
             php_version: None,
             mariadb_version: None,
             mysql_version: None,
             phpmyadmin_version: None,
             http_port: 80,
             https_port: 443,
+            apache_http_port: 8088,
+            apache_https_port: 8444,
         }
     }
 }
@@ -60,6 +70,7 @@ impl Default for StackPreferences {
 #[serde(default, rename_all = "camelCase")]
 pub struct RuntimeState {
     pub nginx_pid: Option<u32>,
+    pub apache_pid: Option<u32>,
     pub dns_pid: Option<u32>,
     /// php version -> fpm/cgi master pid
     pub php_pids: HashMap<String, u32>,
@@ -98,6 +109,9 @@ pub struct SiteRecord {
     pub php_version: Option<String>,
     pub node_version: Option<String>,
     pub https: bool,
+    /// `"nginx"` | `"apache"` — which front-end serves this site.
+    #[serde(default)]
+    pub web_server: Option<String>,
     #[serde(default)]
     pub framework: Option<String>,
     #[serde(default)]
@@ -161,6 +175,7 @@ pub struct Paths {
     pub templates: PathBuf,
     pub backups: PathBuf,
     pub tools: PathBuf,
+    pub apache: PathBuf,
 }
 
 impl Paths {
@@ -179,6 +194,7 @@ impl Paths {
         let templates = root.join("templates");
         let backups = root.join("backups");
         let tools = root.join("tools");
+        let apache = root.join("apache");
         for p in [
             &packages,
             &downloads,
@@ -193,6 +209,7 @@ impl Paths {
             &templates,
             &backups,
             &tools,
+            &apache,
         ] {
             fs::create_dir_all(p)?;
         }
@@ -212,7 +229,16 @@ impl Paths {
             templates,
             backups,
             tools,
+            apache,
         })
+    }
+
+    pub fn apache_conf_dir(&self) -> PathBuf {
+        self.apache.join("conf")
+    }
+
+    pub fn apache_sites_dir(&self) -> PathBuf {
+        self.apache.join("sites")
     }
 
     pub fn package_dir(&self, package_id: &str, version: &str) -> PathBuf {
@@ -291,6 +317,7 @@ pub fn ensure_demo_site(state: &mut AppState) {
             php_version: None,
             node_version: None,
             https: true,
+            web_server: Some("nginx".into()),
             framework: Some("other".into()),
             database_engine: None,
             database_name: None,
