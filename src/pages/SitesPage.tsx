@@ -8,6 +8,7 @@ import {
 } from "../open";
 import type {
   CreateWordPressResult,
+  HostsStatus,
   InstalledPackage,
   JobProgress,
   SiteDetails,
@@ -24,6 +25,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   const [phpInstalled, setPhpInstalled] = useState<InstalledPackage[]>([]);
   const [nodeInstalled, setNodeInstalled] = useState<InstalledPackage[]>([]);
   const [stack, setStack] = useState<StackStatus | null>(null);
+  const [hosts, setHosts] = useState<HostsStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<JobProgress | null>(null);
@@ -35,21 +37,52 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
 
   const refresh = async () => {
     try {
-      const [d, php, node, st, tpl] = await Promise.all([
+      const [d, php, node, st, tpl, h] = await Promise.all([
         client.listSiteDetails(),
         client.listInstalled("php"),
         client.listInstalled("node"),
         client.getStackStatus(),
         client.getTemplates(),
+        client.getHostsStatus(),
       ]);
       setDetails(d);
       setPhpInstalled(php);
       setNodeInstalled(node);
       setStack(st);
       setTemplates(tpl);
+      setHosts(h);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  const repairHosts = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const h = await client.repairHosts();
+      setHosts(h);
+      if (!h.ok) {
+        setError(h.message ?? "Hosts repair incomplete");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openWithHostsCheck = async (url: string) => {
+    const h = await client.getHostsStatus();
+    setHosts(h);
+    if (!h.ok) {
+      setError(
+        h.message ??
+          "Hosts file is missing DevStack entries. Click Fix hosts, then try again.",
+      );
+      return;
+    }
+    await openInBrowser(url);
   };
 
   useEffect(() => {
@@ -150,6 +183,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
           nodeInstalled={nodeInstalled}
           busy={busy}
           lastBackup={lastBackup}
+          hostsOk={hosts?.ok !== false}
           onBack={backToGrid}
           onPatch={(u) => void patch(selected.site.id, u)}
           onMarkTemplate={() =>
@@ -169,6 +203,8 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
               await client.restoreSiteDatabase(selected.site.id, path);
             })
           }
+          onOpenInBrowser={(url) => void openWithHostsCheck(url)}
+          onFixHosts={() => void repairHosts()}
           onToast={setError}
         />
         {showDuplicate ? (
@@ -197,6 +233,25 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
           />
         ) : null}
         {progress ? <ProgressToast progress={progress} /> : null}
+        {hosts && !hosts.ok ? (
+          <div
+            className="error-banner"
+            style={{ display: "flex", gap: 12, alignItems: "center" }}
+          >
+            <span style={{ flex: 1 }}>
+              {hosts.message ??
+                "Hosts file is missing DevStack entries for .test domains."}
+            </span>
+            <button
+              type="button"
+              className="btn btn-install"
+              disabled={busy}
+              onClick={() => void repairHosts()}
+            >
+              Fix hosts
+            </button>
+          </div>
+        ) : null}
         {error ? <div className="error-banner">{error}</div> : null}
       </>
     );
@@ -242,6 +297,25 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
           </button>
         </div>
       </div>
+      {hosts && !hosts.ok ? (
+        <div
+          className="error-banner"
+          style={{ display: "flex", gap: 12, alignItems: "center" }}
+        >
+          <span style={{ flex: 1 }}>
+            {hosts.message ??
+              "Hosts file is missing DevStack entries for .test domains."}
+          </span>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={busy}
+            onClick={() => void repairHosts()}
+          >
+            Fix hosts
+          </button>
+        </div>
+      ) : null}
       {error ? <div className="error-banner">{error}</div> : null}
       {progress ? <ProgressToast progress={progress} /> : null}
       <div className="sites-grid">
@@ -694,12 +768,15 @@ function SiteDetail({
   nodeInstalled,
   busy,
   lastBackup,
+  hostsOk,
   onBack,
   onPatch,
   onMarkTemplate,
   onDuplicate,
   onBackup,
   onRestore,
+  onOpenInBrowser,
+  onFixHosts,
   onToast,
 }: {
   details: SiteDetails;
@@ -707,6 +784,7 @@ function SiteDetail({
   nodeInstalled: InstalledPackage[];
   busy: boolean;
   lastBackup: string | null;
+  hostsOk: boolean;
   onBack: () => void;
   onPatch: (u: {
     phpVersion?: string | null;
@@ -718,6 +796,8 @@ function SiteDetail({
   onDuplicate: () => void;
   onBackup: () => void;
   onRestore: (path: string) => void;
+  onOpenInBrowser: (url: string) => void;
+  onFixHosts: () => void;
   onToast: (message: string | null) => void;
 }) {
   const site = details.site;
@@ -776,13 +856,21 @@ function SiteDetail({
           </div>
         </div>
         <div className="row-actions">
+          {!hostsOk ? (
+            <button
+              type="button"
+              className="btn btn-install"
+              disabled={busy}
+              onClick={onFixHosts}
+            >
+              Fix hosts
+            </button>
+          ) : null}
           <button
             type="button"
             className="btn btn-primary"
             onClick={() =>
-              runOpen(() =>
-                openInBrowser(site.https ? details.httpsUrl : details.url),
-              )
+              onOpenInBrowser(site.https ? details.httpsUrl : details.url)
             }
           >
             Open in browser
