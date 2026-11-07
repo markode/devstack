@@ -14,6 +14,7 @@ import type {
   StackStatus,
   ManagedServiceStatus,
   TemplateRecord,
+  VersionListResponse,
 } from "./types";
 
 const installed = new Map<string, InstalledPackage[]>();
@@ -414,9 +415,16 @@ let templates: TemplateRecord[] = [];
 
 const phpExt = new Map<string, boolean>();
 
-export async function mockListVersions(id: string): Promise<PackageVersion[]> {
+export async function mockListVersions(id: string): Promise<VersionListResponse> {
   await delay(120);
-  return versionTables[id] ?? [];
+  return {
+    packageId: id,
+    versions: versionTables[id] ?? [],
+    fromCache: false,
+    refreshing: false,
+    fetchedAt: new Date().toISOString(),
+    warning: null,
+  };
 }
 
 export async function mockListInstalled(id?: string): Promise<InstalledPackage[]> {

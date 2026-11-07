@@ -11,6 +11,7 @@ pub mod php;
 mod phpmyadmin;
 mod postgresql;
 mod redis;
+pub mod version_cache;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

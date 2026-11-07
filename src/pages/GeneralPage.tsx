@@ -4,6 +4,7 @@ import type {
   AppInfo,
   DatabaseFilesSettings,
   DbFileEntry,
+  HostsStatus,
   PortsConfig,
 } from "../types";
 
@@ -40,18 +41,20 @@ export function GeneralPage() {
   const [dbFiles, setDbFiles] = useState<DbFileEntry[]>([]);
   const [folderInput, setFolderInput] = useState("");
   const [ports, setPorts] = useState<PortsConfig | null>(null);
+  const [hosts, setHosts] = useState<HostsStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
   const refresh = async () => {
     try {
-      const [i, s, folder, files, p] = await Promise.all([
+      const [i, s, folder, files, p, h] = await Promise.all([
         client.getAppInfo(),
         client.getDbFilesSettings(),
         client.getDatabasesFolder(),
         client.listDatabaseFiles(),
         client.getPortsConfig(),
+        client.getHostsStatus(),
       ]);
       setInfo(i);
       setDbSettings(s);
@@ -59,8 +62,27 @@ export function GeneralPage() {
       setFolderInput(s.folder ?? "");
       setDbFiles(files);
       setPorts(p);
+      setHosts(h);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const repairHosts = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const h = await client.repairHosts();
+      setHosts(h);
+      setNote(
+        h.ok
+          ? "Hosts and CA trust updated — .test sites should resolve locally"
+          : (h.message ?? "Hosts repair incomplete"),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -140,6 +162,22 @@ export function GeneralPage() {
           {note}
         </div>
       ) : null}
+      {hosts && !hosts.ok ? (
+        <div className="error-banner" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <span style={{ flex: 1 }}>
+            {hosts.message ??
+              "Some .test domains are missing from the hosts file."}
+          </span>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={busy}
+            onClick={() => void repairHosts()}
+          >
+            Fix hosts
+          </button>
+        </div>
+      ) : null}
 
       <div className="panel-card settings-list">
         <div className="settings-row">
@@ -180,6 +218,36 @@ export function GeneralPage() {
             </span>
           </label>
           <span className="muted">{client.useMock() ? "Mock" : "Live"}</span>
+        </div>
+      </div>
+
+      <div className="section-head" style={{ marginTop: 22 }}>
+        <h2>Local DNS / hosts</h2>
+        <p>
+          DevStack maps <code>*.test</code> to 127.0.0.1. On Windows this uses
+          one UAC prompt for hosts + CA trust — no manual edits.
+        </p>
+      </div>
+      <div className="panel-card settings-list">
+        <div className="settings-row">
+          <label>
+            Hosts status
+            <span className="hint">
+              {hosts?.ok
+                ? "All configured .test domains resolve locally"
+                : hosts?.missing?.length
+                  ? `Missing: ${hosts.missing.join(", ")}`
+                  : "Checking…"}
+            </span>
+          </label>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={busy}
+            onClick={() => void repairHosts()}
+          >
+            {hosts?.ok ? "Repair / re-trust CA" : "Fix hosts"}
+          </button>
         </div>
       </div>
 

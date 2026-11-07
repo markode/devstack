@@ -31,6 +31,9 @@ pub struct AppState {
     pub runtime: RuntimeState,
     /// Plain-file database exports (Databases folder)
     pub db_files: DatabaseFilesSettings,
+    /// Set after the first-launch `welcome.test` site has been seeded (or
+    /// skipped). Prevents recreating the site after the user deletes it.
+    pub welcome_site_seeded: bool,
 }
 
 /// Settings for the user-facing Databases folder (portable dumps, not raw datadirs).
@@ -350,32 +353,85 @@ pub fn mark_uninstalled(state: &mut AppState, package_id: &str, version: &str) -
     Ok(())
 }
 
-pub fn ensure_demo_site(state: &mut AppState) {
-    if state.sites.is_empty() {
-        let mut site = SiteRecord {
-            id: "acme-dashboard".into(),
-            name: "acme-dashboard".into(),
-            path: PathBuf::from("~/Sites/acme-dashboard"),
-            domain: "acme-dashboard.test".into(),
-            php_version: None,
-            node_version: None,
-            https: true,
-            web_server: Some("nginx".into()),
-            framework: Some("other".into()),
-            database_engine: None,
-            database_name: None,
-            database_user: None,
-            database_password: None,
-            status: "stopped".into(),
-            is_template: false,
-        };
+/// Ensure every site has a `.test` domain. Seed `welcome.test` once on first launch.
+pub fn ensure_welcome_site(paths: &Paths, state: &mut AppState) {
+    for site in &mut state.sites {
         site.ensure_domain();
-        state.sites.push(site);
-    } else {
-        for site in &mut state.sites {
-            site.ensure_domain();
-        }
     }
+    if state.welcome_site_seeded {
+        return;
+    }
+    // Already have sites from a previous install / import — don't inject welcome.
+    if !state.sites.is_empty() {
+        state.welcome_site_seeded = true;
+        return;
+    }
+
+    let site_path = default_sites_root().join("welcome");
+    let _ = fs::create_dir_all(&site_path);
+    let index = site_path.join("index.php");
+    if !index.exists() {
+        let _ = fs::write(
+            &index,
+            r#"<?php
+header('Content-Type: text/html; charset=utf-8');
+?><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Welcome · DevStack</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1.25rem; color: #1a1a1a; }
+    h1 { font-size: 1.75rem; margin-bottom: 0.5rem; }
+    p { line-height: 1.55; color: #444; }
+    code { background: #f3f3f3; padding: 0.1em 0.35em; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Welcome to DevStack</h1>
+  <p>Your local stack is ready. This site lives at <code>welcome.test</code> —
+     create more sites from the Sites panel.</p>
+  <p>PHP <?= PHP_VERSION ?></p>
+</body>
+</html>
+"#,
+        );
+    }
+
+    let mut site = SiteRecord {
+        id: "welcome".into(),
+        name: "welcome".into(),
+        path: site_path,
+        domain: "welcome.test".into(),
+        php_version: None,
+        node_version: None,
+        https: true,
+        web_server: Some("nginx".into()),
+        framework: Some("other".into()),
+        database_engine: None,
+        database_name: None,
+        database_user: None,
+        database_password: None,
+        status: "stopped".into(),
+        is_template: false,
+    };
+    site.ensure_domain();
+    state.sites.push(site);
+    state.welcome_site_seeded = true;
+    let _ = paths; // reserved for future cert/hosts bootstrap at seed time
+}
+
+/// Back-compat alias used by older call sites / smoke tests.
+pub fn ensure_demo_site(state: &mut AppState) {
+    for site in &mut state.sites {
+        site.ensure_domain();
+    }
+}
+
+fn default_sites_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Sites")
 }
 
 pub fn remove_dir_if_exists(path: &Path) -> Result<()> {

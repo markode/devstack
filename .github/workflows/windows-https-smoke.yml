@@ -1,0 +1,107 @@
+# Best-effort Windows HTTPS / hosts / process-flags verification for PRs and tags.
+name: Windows HTTPS smoke
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo test (incl. CREATE_NO_WINDOW / hosts helpers)
+        working-directory: src-tauri
+        run: cargo test --lib -- --nocapture
+
+      - name: Process flag + hosts merge unit checks
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          cargo test --lib services::process::tests -- --nocapture
+          cargo test --lib services::dns::tests -- --nocapture
+          cargo test --lib packages::version_cache::tests -- --nocapture
+
+      - name: Synthetic HTTPS probe (hosts + openssl self-signed + Invoke-WebRequest)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $site = 'devstack-ci.test'
+          $tmp = Join-Path $env:TEMP "devstack-https-smoke"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $cert = Join-Path $tmp 'cert.pem'
+          $key = Join-Path $tmp 'key.pem'
+
+          $openssl = Get-Command openssl -ErrorAction SilentlyContinue
+          if (-not $openssl) {
+            Write-Host 'openssl not on PATH — skipping live HTTPS probe'
+            exit 0
+          }
+
+          & openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes `
+            -keyout $key -out $cert -subj "/CN=$site"
+          if (-not (Test-Path $cert)) { throw 'openssl failed to write cert' }
+
+          $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
+          $entry = "127.0.0.1 $site"
+          try {
+            Add-Content -LiteralPath $hostsFile -Value "`n$entry" -ErrorAction Stop
+            ipconfig /flushdns | Out-Null
+            Write-Host "Wrote hosts entry for $site"
+            Resolve-DnsName $site -ErrorAction SilentlyContinue | Format-Table | Out-String | Write-Host
+          } catch {
+            Write-Host "Hosts write skipped (no admin): $($_.Exception.Message)"
+            $site = '127.0.0.1'
+          }
+
+          $py = Get-Command python -ErrorAction SilentlyContinue
+          if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
+          if (-not $py) {
+            Write-Host 'Python missing — skipping live server probe'
+            exit 0
+          }
+
+          $server = Join-Path $tmp 'serve.py'
+          # No leading indent — Python rejects indented top-level statements.
+          @(
+            'import http.server, ssl, sys'
+            'class H(http.server.BaseHTTPRequestHandler):'
+            '    def do_GET(self):'
+            '        self.send_response(200)'
+            '        self.end_headers()'
+            '        self.wfile.write(b"ok")'
+            '    def log_message(self, *a):'
+            '        pass'
+            'httpd = http.server.HTTPServer(("127.0.0.1", 8443), H)'
+            'ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)'
+            'ctx.load_cert_chain(sys.argv[1], sys.argv[2])'
+            'httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)'
+            'httpd.handle_request()'
+          ) | Set-Content -LiteralPath $server -Encoding ascii
+
+          $proc = Start-Process -FilePath $py.Source -ArgumentList @($server, $cert, $key) `
+            -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 2
+          if ($proc.HasExited) {
+            throw "HTTPS probe server exited early (code $($proc.ExitCode))"
+          }
+          try {
+            $url = if ($site -eq '127.0.0.1') {
+              'https://127.0.0.1:8443/'
+            } else {
+              "https://${site}:8443/"
+            }
+            # PowerShell 7+: -SkipCertificateCheck (ServicePointManager callback is ignored).
+            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 15 -SkipCertificateCheck
+            if ($resp.StatusCode -ne 200) { throw "Expected 200, got $($resp.StatusCode)" }
+            Write-Host "HTTPS probe OK: $url -> $($resp.StatusCode)"
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+          }

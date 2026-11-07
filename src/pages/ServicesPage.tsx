@@ -289,22 +289,27 @@ function ServiceBlock({
       {pkg.error || localError ? (
         <div className="error-banner">{pkg.error ?? localError}</div>
       ) : null}
-      {pkg.loading ? (
+      {pkg.loading && pkg.versions.length === 0 ? (
         <div className="loading">Loading versions…</div>
       ) : pkg.error && pkg.versions.length === 0 ? null : (
-        <VersionTable
-          versions={pkg.versions}
-          installed={pkg.installed}
-          busyKey={pkg.busyKey}
-          progress={pkg.progress}
-          installReady={installReady}
-          onInstall={(version) => {
-            setLocalError(null);
-            void pkg.install(version);
-          }}
-          onUninstall={pkg.uninstall}
-          onUnavailable={(message) => setLocalError(message)}
-        />
+        <>
+          {pkg.refreshing ? (
+            <div className="loading">Refreshing version list…</div>
+          ) : null}
+          <VersionTable
+            versions={pkg.versions}
+            installed={pkg.installed}
+            busyKey={pkg.busyKey}
+            progress={pkg.progress}
+            installReady={installReady}
+            onInstall={(version) => {
+              setLocalError(null);
+              void pkg.install(version);
+            }}
+            onUninstall={pkg.uninstall}
+            onUnavailable={(message) => setLocalError(message)}
+          />
+        </>
       )}
     </div>
   );

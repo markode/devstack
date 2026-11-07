@@ -33,17 +33,22 @@ export function PhpPage() {
         <p>Install, update and manage PHP.</p>
       </div>
       {pkg.error ? <div className="error-banner">{pkg.error}</div> : null}
-      {pkg.loading ? (
+      {pkg.loading && pkg.versions.length === 0 ? (
         <div className="loading">Loading versions…</div>
       ) : (
-        <VersionTable
-          versions={pkg.versions}
-          installed={pkg.installed}
-          busyKey={pkg.busyKey}
-          progress={pkg.progress}
-          onInstall={pkg.install}
-          onUninstall={pkg.uninstall}
-        />
+        <>
+          {pkg.refreshing || (pkg.loading && pkg.fromCache) ? (
+            <div className="loading">Refreshing version list…</div>
+          ) : null}
+          <VersionTable
+            versions={pkg.versions}
+            installed={pkg.installed}
+            busyKey={pkg.busyKey}
+            progress={pkg.progress}
+            onInstall={pkg.install}
+            onUninstall={pkg.uninstall}
+          />
+        </>
       )}
 
       {pkg.installed.length > 0 ? (

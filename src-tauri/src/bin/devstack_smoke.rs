@@ -2,6 +2,17 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+
+fn smoke_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -212,16 +223,16 @@ async fn register_system_apache(
         .or_else(|_| which::which("apache2"))
         .or_else(|_| {
             println!("[apache] apt-get install apache2…");
-            let _ = Command::new("sudo")
+            let _ = smoke_command("sudo")
                 .args(["-n", "apt-get", "install", "-y", "apache2"])
                 .status();
             which::which("apache2")
         })?;
     // Stop the distro service so DevStack owns the ports/config.
-    let _ = Command::new("sudo")
+    let _ = smoke_command("sudo")
         .args(["-n", "systemctl", "stop", "apache2"])
         .status();
-    let _ = Command::new("sudo")
+    let _ = smoke_command("sudo")
         .args(["-n", "systemctl", "disable", "apache2"])
         .status();
 
@@ -287,7 +298,7 @@ async fn run_stack_smoke(
         apply_stack(&ctx.paths, &mut state)?;
     }
 
-    let _ = Command::new("sudo")
+    let _ = smoke_command("sudo")
         .args([
             "-n",
             &ctx.paths.helper.join("devstack-helper.sh").to_string_lossy(),
@@ -400,7 +411,7 @@ async fn run_wordpress_smoke(
     };
     println!("Clone ready at {}", dup.url);
 
-    let _ = Command::new("sudo")
+    let _ = smoke_command("sudo")
         .args([
             "-n",
             &ctx.paths.helper.join("devstack-helper.sh").to_string_lossy(),
@@ -521,7 +532,7 @@ async fn run_apache_wordpress_smoke(
         };
         let wp_cli = ctx.paths.root.join("tools/wp-cli.phar");
         let abs = created.site.path.clone();
-        let status = Command::new(&php_bin)
+        let status = smoke_command(&php_bin)
             .args([
                 wp_cli.to_str().unwrap(),
                 "post",
@@ -536,7 +547,7 @@ async fn run_apache_wordpress_smoke(
         if !status.success() {
             return Err("wp post create failed".into());
         }
-        let _ = Command::new(&php_bin)
+        let _ = smoke_command(&php_bin)
             .args([
                 wp_cli.to_str().unwrap(),
                 "rewrite",
@@ -547,7 +558,7 @@ async fn run_apache_wordpress_smoke(
             .status();
     }
 
-    let _ = Command::new("sudo")
+    let _ = smoke_command("sudo")
         .args([
             "-n",
             &ctx.paths.helper.join("devstack-helper.sh").to_string_lossy(),
@@ -748,7 +759,7 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
             .map(|r| r.path.clone())
             .ok_or("redis missing")?;
         let cli = root.join("bin/redis-cli");
-        let out = Command::new(&cli).args(["-p", "6379", "PING"]).output()?;
+        let out = smoke_command(&cli).args(["-p", "6379", "PING"]).output()?;
         let body = String::from_utf8_lossy(&out.stdout);
         println!("redis-cli PING → {}", body.trim());
         if !body.contains("PONG") {
@@ -766,7 +777,7 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
             .map(|r| r.path.clone())
             .ok_or("postgresql missing")?;
         let psql = root.join("bin/psql");
-        let out = Command::new(&psql)
+        let out = smoke_command(&psql)
             .args(["-h", "127.0.0.1", "-U", "postgres", "-c", "SELECT 1 AS ok;"])
             .output()?;
         let body = String::from_utf8_lossy(&out.stdout);
@@ -791,7 +802,7 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
         ];
         let bin = mongosh.into_iter().find(|p| p.exists());
         if let Some(bin) = bin {
-            let out = Command::new(&bin)
+            let out = smoke_command(&bin)
                 .args(["--eval", "db.runCommand({ ping: 1 })"])
                 .output()?;
             println!("mongo ping status={}", out.status);
@@ -802,7 +813,7 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
     }
 
     // Mailpit HTTP UI
-    let status = Command::new("curl")
+    let status = smoke_command("curl")
         .args(["-sS", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:8025/"])
         .output()?;
     let code = String::from_utf8_lossy(&status.stdout).trim().to_string();
@@ -872,7 +883,7 @@ fn http_get_path(
             format!("-{slug}")
         }
     );
-    let status = Command::new("curl")
+    let status = smoke_command("curl")
         .args([
             "-k",
             "--resolve",
@@ -949,11 +960,14 @@ fn bootstrap() -> Result<DevStackCtx, Box<dyn std::error::Error>> {
         state.sites.clear();
         state.templates.clear();
     }
-    devstack_lib::config::ensure_demo_site(&mut state);
+    devstack_lib::config::ensure_welcome_site(&paths, &mut state);
     devstack_lib::config::save_state(&paths.state_file, &state)?;
     Ok(DevStackCtx {
         paths,
         state: tokio::sync::Mutex::new(state),
         registry: PackageRegistry::new()?,
+        version_refresh: std::sync::Arc::new(
+            devstack_lib::packages::version_cache::RefreshGuard::new(),
+        ),
     })
 }

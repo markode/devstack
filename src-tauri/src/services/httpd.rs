@@ -451,7 +451,7 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     let root = apache_root(paths, state)?;
     let bin = apache_bin(&root)?;
     if let Some(pid) = state.runtime.apache_pid.filter(|p| is_running(*p)) {
-        let _ = std::process::Command::new(&bin)
+        let _ = crate::services::process::command(&bin)
             .args([
                 "-f",
                 &conf.display().to_string(),

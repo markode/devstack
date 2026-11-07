@@ -5,13 +5,13 @@ use serde::Serialize;
 use crate::config::{save_state, AppState, Paths};
 use crate::error::Result;
 use crate::services::database::{configure_phpmyadmin, start_database, stop_database};
-use crate::services::dns::{start_dns, stop_dns, sync_hosts};
+use crate::services::dns::{start_dns, stop_dns, sync_hosts_and_trust_ca};
 use crate::services::httpd::{reload_apache, start_apache, stop_apache};
 use crate::services::nginx::{reload_nginx, start_nginx, stop_nginx};
 use crate::services::php_runtime::register_system_php;
 use crate::services::process::is_running;
 use crate::services::sites::refresh_site_metadata;
-use crate::services::tls::{ensure_root_ca, trust_ca_via_helper};
+use crate::services::tls::ensure_root_ca;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,8 +70,8 @@ pub fn stack_status(state: &AppState) -> StackStatus {
 pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     refresh_site_metadata(state);
     ensure_root_ca(paths)?;
-    let _ = trust_ca_via_helper(paths);
-    let _ = sync_hosts(paths, state);
+    // Single UAC on Windows for hosts + CA trust; unix uses helper/sudo separately.
+    let _ = sync_hosts_and_trust_ca(paths, state);
 
     let _ = start_dns(paths, state, 5353);
 
@@ -118,7 +118,8 @@ pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
 
 pub fn reload_sites(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     refresh_site_metadata(state);
-    let _ = sync_hosts(paths, state);
+    let _ = ensure_root_ca(paths);
+    let _ = sync_hosts_and_trust_ca(paths, state);
     let _ = reload_nginx(paths, state);
     let _ = reload_apache(paths, state);
     save_state(&paths.state_file, state)?;

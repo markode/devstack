@@ -7,10 +7,10 @@ import type {
   CreateWordPressResult,
   DuplicateRequest,
   DuplicateResult,
+  HostsStatus,
   InstalledPackage,
   JobProgress,
   PackageInfo,
-  PackageVersion,
   PhpExtensionView,
   ProgressEvent,
   SiteDetails,
@@ -18,7 +18,10 @@ import type {
   StackStatus,
   ManagedServiceStatus,
   TemplateRecord,
+  VersionListResponse,
+  VersionsUpdatedEvent,
 } from "./types";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 
 const useMock = () => !api.isTauri();
 
@@ -39,9 +42,30 @@ export async function listPackages(): Promise<PackageInfo[]> {
 
 export async function listPackageVersions(
   packageId: string,
-): Promise<PackageVersion[]> {
+): Promise<VersionListResponse> {
   if (useMock()) return mock.mockListVersions(packageId);
   return api.listPackageVersions(packageId);
+}
+
+export async function onVersionsUpdated(
+  handler: (ev: VersionsUpdatedEvent) => void,
+): Promise<UnlistenFn> {
+  if (useMock()) return () => {};
+  return api.onVersionsUpdated(handler);
+}
+
+export async function getHostsStatus(): Promise<HostsStatus> {
+  if (useMock()) {
+    return { ok: true, missing: [], message: null };
+  }
+  return api.getHostsStatus();
+}
+
+export async function repairHosts(): Promise<HostsStatus> {
+  if (useMock()) {
+    return { ok: true, missing: [], message: null };
+  }
+  return api.repairHosts();
 }
 
 export async function listInstalled(

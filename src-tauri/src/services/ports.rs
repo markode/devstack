@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -205,7 +204,7 @@ fn inspect_port_windows(port: u16) -> PortOccupant {
         process_name: None,
         hint: None,
     };
-    let out = Command::new("netstat")
+    let out = crate::services::process::command("netstat")
         .args(["-ano"])
         .output()
         .ok()
@@ -227,7 +226,7 @@ fn inspect_port_windows(port: u16) -> PortOccupant {
         let pid = line.split_whitespace().last().and_then(|s| s.parse().ok());
         occupant.pid = pid;
         if let Some(pid) = pid {
-            if let Ok(task) = Command::new("tasklist")
+            if let Ok(task) = crate::services::process::command("tasklist")
                 .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
                 .output()
             {
@@ -255,7 +254,7 @@ fn inspect_port_unix(port: u16) -> PortOccupant {
         process_name: None,
         hint: None,
     };
-    let out = Command::new("lsof")
+    let out = crate::services::process::command("lsof")
         .args([
             "-nP",
             &format!("-iTCP:{port}"),
@@ -277,7 +276,7 @@ fn inspect_port_unix(port: u16) -> PortOccupant {
     }
     // Fallback: lsof without -F
     if occupant.process_name.is_none() {
-        if let Ok(raw) = Command::new("lsof")
+        if let Ok(raw) = crate::services::process::command("lsof")
             .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
             .output()
         {

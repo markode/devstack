@@ -3,7 +3,7 @@
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Stdio};
 use std::thread;
 
 use crate::config::{AppState, Paths};
@@ -93,7 +93,7 @@ pub fn backup_database(
         None,
     );
 
-    let mut child = Command::new(&dump)
+    let mut child = crate::services::process::command(&dump)
         .args([
             format!("--socket={}", sock.display()),
             "-uroot".into(),
@@ -162,7 +162,7 @@ pub fn restore_database(
         Some(total),
     );
 
-    let mut child = Command::new(&client)
+    let mut child = crate::services::process::command(&client)
         .args([
             format!("--socket={}", sock.display()),
             "-uroot".into(),
@@ -283,7 +283,7 @@ fn pipe_via_compressor<R: Read + Send + 'static, W: Write + Send + 'static>(
     progress: &JobProgressFn,
     job_id: &str,
 ) -> Result<u64> {
-    let mut child = Command::new(bin)
+    let mut child = crate::services::process::command(bin)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -406,7 +406,7 @@ pub fn archive_directory(
         None,
     );
 
-    let mut tar = Command::new("tar")
+    let mut tar = crate::services::process::command("tar")
         .args(["-C", &src.to_string_lossy(), "-cf", "-", "."])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -453,7 +453,7 @@ pub fn extract_directory_archive(
         CompressKind::Gzip
     };
 
-    let mut tar = Command::new("tar")
+    let mut tar = crate::services::process::command("tar")
         .args(["-C", &dest.to_string_lossy(), "-xf", "-"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
@@ -502,7 +502,7 @@ CREATE TABLE IF NOT EXISTS devstack_big (
 ) ENGINE=InnoDB;
 "
     );
-    let _ = Command::new(&client)
+    let _ = crate::services::process::command(&client)
         .args([
             format!("--socket={}", sock.display()),
             "-uroot".into(),
@@ -531,7 +531,7 @@ CREATE TABLE IF NOT EXISTS devstack_big (
         }
         sql.push(';');
         fs::write(&tmp, &sql)?;
-        let status = Command::new(&client)
+        let status = crate::services::process::command(&client)
             .args([
                 format!("--socket={}", sock.display()),
                 "-uroot".into(),
