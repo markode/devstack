@@ -8,6 +8,7 @@ export function VersionTable({
   installReady = true,
   onInstall,
   onUninstall,
+  onUnavailable,
 }: {
   versions: PackageVersion[];
   installed: InstalledPackage[];
@@ -16,13 +17,33 @@ export function VersionTable({
   installReady?: boolean;
   onInstall: (version: string) => void;
   onUninstall: (version: string) => void;
+  /** Called when the user clicks Install but the row has no usable download. */
+  onUnavailable?: (message: string) => void;
 }) {
   const installedSet = new Set(
     installed.flatMap((i) => [i.version, i.channel].filter(Boolean) as string[]),
   );
 
+  const unavailableCount = versions.filter(
+    (v) =>
+      !installedSet.has(v.version) &&
+      !installedSet.has(v.channel) &&
+      (!installReady || !v.downloadUrl),
+  ).length;
+
   return (
     <div className="panel-card version-table">
+      {unavailableCount > 0 ? (
+        <div className="error-banner" style={{ margin: "12px 12px 0" }}>
+          {unavailableCount} version
+          {unavailableCount === 1 ? "" : "s"} cannot be installed on this
+          platform
+          {!installReady
+            ? " (package install is not enabled)."
+            : " (no download URL)."}{" "}
+          Click Install for details.
+        </div>
+      ) : null}
       <table>
         <thead>
           <tr>
@@ -38,12 +59,24 @@ export function VersionTable({
             const isBusy = busyKey === key || busyKey === v.version;
             const showProgress =
               isBusy && progress && progress.version === v.version;
+            const canInstall = installReady && !!v.downloadUrl;
+            const unavailableReason = !installReady
+              ? "Install is not enabled for this package yet."
+              : !v.downloadUrl
+                ? (v.notes ??
+                  "No download is available for this OS/architecture.")
+                : null;
 
             return (
               <tr key={key}>
                 <td>
                   {v.label}
                   {v.lts ? <span className="badge">LTS</span> : null}
+                  {!isInstalled && unavailableReason ? (
+                    <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                      {unavailableReason}
+                    </div>
+                  ) : null}
                 </td>
                 <td>
                   <div className="row-actions">
@@ -73,15 +106,18 @@ export function VersionTable({
                       <button
                         type="button"
                         className="btn btn-install"
-                        disabled={!!busyKey || !installReady || !v.downloadUrl}
-                        title={
-                          !installReady
-                            ? "Install wiring comes in the next milestone"
-                            : !v.downloadUrl
-                              ? v.notes ?? "No download for this platform yet"
-                              : undefined
-                        }
-                        onClick={() => onInstall(v.version)}
+                        disabled={!!busyKey}
+                        title={unavailableReason ?? undefined}
+                        onClick={() => {
+                          if (!canInstall) {
+                            onUnavailable?.(
+                              unavailableReason ??
+                                "No download is available for this platform.",
+                            );
+                            return;
+                          }
+                          onInstall(v.version);
+                        }}
                       >
                         Install
                       </button>

@@ -54,7 +54,7 @@ Every runtime/service implements `PackageProvider` (list → download → SHA256
 | --- | --- | --- |
 | `php` | Windows NTS x64 JSON; macOS/Linux pluggable static manifest | Yes |
 | `node` | nodejs.org `index.json` + `SHASUMS256.txt` | Yes |
-| `nginx` | Windows zip / Linux noble `.deb` from nginx.org; macOS via `DEVSTACK_NGINX_MANIFEST_URL` | Yes |
+| `nginx` | Windows zip from nginx.org; macOS compiles official source tarball; Linux noble `.deb`; optional `DEVSTACK_NGINX_MANIFEST_URL` | Yes |
 | `phpmyadmin` | phpmyadmin.net + `.sha256` | Yes |
 | `mysql` | Community archives (CDN) | Yes |
 | `mariadb` | downloads.mariadb.org REST + binary tarball/zip | Yes |

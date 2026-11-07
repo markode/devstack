@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use commands::{
     apply_dev_stack, backup_site_database, bootstrap_ctx, create_site_cmd, create_wordpress,
-    duplicate_site, get_app_info, get_service_log, get_site_details, get_sites, get_stack_status,
-    get_templates, install_package, list_installed, list_managed_services_cmd,
+    duplicate_site, get_app_info, get_backups_dir, get_service_log, get_site_details, get_sites,
+    get_stack_status, get_templates, install_package, list_installed, list_managed_services_cmd,
     list_package_versions, list_packages, list_php_extension_settings, list_site_details,
     mark_template, register_system_php_cmd, restore_site_database, seed_site_large_table,
     set_php_manifest_url, set_php_xdebug, start_dev_stack, start_managed_service, stop_dev_stack,
@@ -37,9 +37,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(ctx)
         .invoke_handler(tauri::generate_handler![
             get_app_info,
+            get_backups_dir,
             list_packages,
             list_package_versions,
             list_installed,

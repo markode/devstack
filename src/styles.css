@@ -58,7 +58,9 @@ select {
 .app-shell {
   display: grid;
   grid-template-columns: 220px 1fr;
+  grid-template-rows: minmax(0, 1fr);
   height: 100%;
+  max-height: 100%;
   max-width: 1100px;
   margin: 0 auto;
   background: rgba(255, 255, 255, 0.55);
@@ -101,6 +103,9 @@ select {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .brand {
@@ -179,6 +184,8 @@ select {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background: #f7f7f9;
 }
 
@@ -213,9 +220,40 @@ select {
 
 .content-body {
   padding: 18px 22px 28px;
-  overflow: auto;
-  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  -webkit-overflow-scrolling: touch;
   animation: page-in 280ms ease both;
+}
+
+.app-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 1000;
+  max-width: min(420px, calc(100vw - 48px));
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  animation: page-in 200ms ease both;
+}
+
+.app-toast-error {
+  background: var(--danger-bg);
+  color: #8a1f18;
+  border: 1px solid rgba(255, 59, 48, 0.25);
+}
+
+.app-toast-info,
+.app-toast-success {
+  background: #fff;
+  color: var(--text);
+  border: 1px solid var(--card-border);
 }
 
 @keyframes page-in {
@@ -838,6 +876,7 @@ select.native {
 
 .restore-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   flex: 1;
@@ -845,7 +884,8 @@ select.native {
 }
 
 .restore-row input {
-  min-width: 220px;
+  min-width: 160px;
+  flex: 1 1 160px;
   border: 1px solid var(--card-border);
   border-radius: 8px;
   padding: 7px 10px;

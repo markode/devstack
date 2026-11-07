@@ -29,6 +29,10 @@ export async function getAppInfo(): Promise<AppInfo> {
   return invoke<AppInfo>("get_app_info");
 }
 
+export async function getBackupsDir(): Promise<string> {
+  return invoke<string>("get_backups_dir");
+}
+
 export async function listPackages(): Promise<PackageInfo[]> {
   return invoke<PackageInfo[]>("list_packages");
 }
