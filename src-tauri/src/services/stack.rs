@@ -25,6 +25,12 @@ pub struct StackStatus {
     pub https_port: u16,
     pub apache_http_port: u16,
     pub apache_https_port: u16,
+    pub mysql_port: u16,
+    pub mariadb_port: u16,
+    pub postgresql_port: u16,
+    pub mongodb_port: u16,
+    pub php_fpm_port: u16,
+    pub coexistence_mode: bool,
     pub php_versions: Vec<String>,
 }
 
@@ -51,6 +57,12 @@ pub fn stack_status(state: &AppState) -> StackStatus {
         https_port: state.stack.https_port,
         apache_http_port: state.stack.apache_http_port,
         apache_https_port: state.stack.apache_https_port,
+        mysql_port: state.stack.mysql_port,
+        mariadb_port: state.stack.mariadb_port,
+        postgresql_port: state.stack.postgresql_port,
+        mongodb_port: state.stack.mongodb_port,
+        php_fpm_port: state.stack.php_fpm_port,
+        coexistence_mode: state.stack.coexistence_mode,
         php_versions: state.runtime.php_pids.keys().cloned().collect(),
     }
 }

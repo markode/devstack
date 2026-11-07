@@ -74,6 +74,16 @@ pub struct StackPreferences {
     /// swap when Apache is the only front-end — see docs/apache.md).
     pub apache_http_port: u16,
     pub apache_https_port: u16,
+    /// MySQL Community Server TCP port (default 3306).
+    pub mysql_port: u16,
+    /// MariaDB TCP port (default 3306; coexistence uses 3308).
+    pub mariadb_port: u16,
+    pub postgresql_port: u16,
+    pub mongodb_port: u16,
+    /// Base PHP-FPM / php-cgi TCP port on Windows (`php_fpm_port + version offset`).
+    pub php_fpm_port: u16,
+    /// When true, prefer non-default ports so DevStack can sit beside WAMP/MAMP.
+    pub coexistence_mode: bool,
 }
 
 impl Default for StackPreferences {
@@ -89,6 +99,12 @@ impl Default for StackPreferences {
             https_port: 443,
             apache_http_port: 8088,
             apache_https_port: 8444,
+            mysql_port: 3306,
+            mariadb_port: 3306,
+            postgresql_port: 5432,
+            mongodb_port: 27017,
+            php_fpm_port: 9000,
+            coexistence_mode: false,
         }
     }
 }

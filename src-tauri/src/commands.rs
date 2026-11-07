@@ -31,6 +31,9 @@ use crate::services::templates::{
 use crate::services::extras::{
     list_managed_services, read_service_log, start_service, stop_service, ManagedServiceStatus,
 };
+use crate::services::ports::{
+    apply_suggested_ports, check_service_ports, PortsConfig, PortCheckResult,
+};
 use crate::services::wordpress::{
     create_wordpress_site, CreateWordPressRequest, CreateWordPressResult,
 };
@@ -536,6 +539,86 @@ pub async fn smoke_list_node(ctx: &AppCtx) -> Result<Vec<PackageVersion>> {
     let state = ctx.state.lock().await;
     let _ = noop_progress();
     provider.list_versions(&state).await
+}
+
+// —— Ports / coexistence ———————————————————————————————————————————————
+
+#[tauri::command]
+pub async fn get_ports_config(ctx: State<'_, Arc<AppCtx>>) -> Result<PortsConfig> {
+    let state = ctx.state.lock().await;
+    Ok(PortsConfig::from_stack(&state.stack))
+}
+
+#[tauri::command]
+pub async fn update_ports_config(
+    ctx: State<'_, Arc<AppCtx>>,
+    config: PortsConfig,
+) -> Result<PortsConfig> {
+    let mut state = ctx.state.lock().await;
+    // phpMyAdmin is served by Nginx — keep the displayed URL port in sync.
+    let mut cfg = config;
+    cfg.phpmyadmin = cfg.nginx_https;
+    cfg.apply_to_stack(&mut state.stack);
+    save_state(&ctx.paths.state_file, &state)?;
+    // Regenerate configs so running services pick up new ports on next start/reload.
+    let _ = reload_sites(&ctx.paths, &mut state);
+    Ok(PortsConfig::from_stack(&state.stack))
+}
+
+#[tauri::command]
+pub async fn set_coexistence_mode(
+    ctx: State<'_, Arc<AppCtx>>,
+    enabled: bool,
+) -> Result<PortsConfig> {
+    let mut state = ctx.state.lock().await;
+    if enabled {
+        PortsConfig::coexistence().apply_to_stack(&mut state.stack);
+    } else {
+        // Restore classic defaults for web + DB ports; keep Apache on 8088/8444.
+        state.stack.coexistence_mode = false;
+        state.stack.http_port = 80;
+        state.stack.https_port = 443;
+        state.stack.mysql_port = 3306;
+        state.stack.mariadb_port = 3306;
+        state.stack.postgresql_port = 5432;
+        state.stack.mongodb_port = 27017;
+        state.stack.php_fpm_port = 9000;
+    }
+    save_state(&ctx.paths.state_file, &state)?;
+    let _ = reload_sites(&ctx.paths, &mut state);
+    Ok(PortsConfig::from_stack(&state.stack))
+}
+
+#[tauri::command]
+pub async fn check_service_ports_cmd(
+    ctx: State<'_, Arc<AppCtx>>,
+    service_id: String,
+) -> Result<PortCheckResult> {
+    let state = ctx.state.lock().await;
+    Ok(check_service_ports(&state.stack, &service_id))
+}
+
+#[tauri::command]
+pub async fn apply_next_free_ports(
+    ctx: State<'_, Arc<AppCtx>>,
+    service_id: String,
+) -> Result<PortsConfig> {
+    let mut state = ctx.state.lock().await;
+    let check = check_service_ports(&state.stack, &service_id);
+    if !check.suggested.is_empty() {
+        apply_suggested_ports(&mut state.stack, &check.suggested)?;
+        // Turning on individual alts should also flip coexistence when web/DB move off defaults.
+        if state.stack.http_port != 80
+            || state.stack.https_port != 443
+            || state.stack.mysql_port != 3306
+            || state.stack.mariadb_port != 3306
+        {
+            state.stack.coexistence_mode = true;
+        }
+        save_state(&ctx.paths.state_file, &state)?;
+        let _ = reload_sites(&ctx.paths, &mut state);
+    }
+    Ok(PortsConfig::from_stack(&state.stack))
 }
 
 // —— Databases folder (plain-file dumps) ————————————————————————————————

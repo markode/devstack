@@ -294,14 +294,13 @@ pub async fn duplicate_from_source(
         }
     }
 
-    update_wp_config_credentials(&dest, &db_name, &db_user, &db_pass, &sock)?;
+    let db_host = crate::services::ports::mysql_db_host(
+        crate::services::ports::engine_db_port(&state.stack, &engine),
+    );
+    update_wp_config_credentials(&dest, &db_name, &db_user, &db_pass, &db_host, &sock)?;
 
-    let https_port = state.stack.https_port;
-    let new_url = if https_port == 443 {
-        format!("https://{domain}")
-    } else {
-        format!("https://{domain}:{https_port}")
-    };
+    let new_url =
+        crate::services::ports::format_url("https", &domain, state.stack.https_port);
     if framework == "wordpress" || dest.join("wp-config.php").exists() {
         emit(
             progress,

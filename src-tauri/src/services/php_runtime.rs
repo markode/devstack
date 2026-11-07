@@ -45,7 +45,7 @@ pub fn resolve_php(paths: &Paths, state: &AppState, version: &str) -> Result<Php
             )
             .or_else(|| which::which(&cgi_name).ok())
             .or_else(|| which::which("php-cgi").ok());
-            let listen = fpm_listen_addr(paths, &rec.version);
+            let listen = fpm_listen_addr_with_base(paths, &rec.version, state.stack.php_fpm_port);
             // If FPM isn't inside the package tree, treat as system hybrid.
             let is_system = fpm_bin
                 .as_ref()
@@ -62,17 +62,17 @@ pub fn resolve_php(paths: &Paths, state: &AppState, version: &str) -> Result<Php
             });
         }
         // Installed record may point at a system prefix (e.g. /usr/sbin from php-fpm).
-        if let Ok(mut runtime) = resolve_system_php(paths, &rec.version) {
+        if let Ok(mut runtime) = resolve_system_php(paths, state, &rec.version) {
             runtime.version = rec.version.clone();
             return Ok(runtime);
         }
     }
 
     // System PHP fallback (useful on Linux CI / smoke)
-    resolve_system_php(paths, version)
+    resolve_system_php(paths, state, version)
 }
 
-fn resolve_system_php(paths: &Paths, version: &str) -> Result<PhpRuntime> {
+fn resolve_system_php(paths: &Paths, state: &AppState, version: &str) -> Result<PhpRuntime> {
     let candidates = [
         format!("php-fpm{version}"),
         format!("php-fpm{}", version.split('.').take(2).collect::<Vec<_>>().join(".")),
@@ -93,7 +93,7 @@ fn resolve_system_php(paths: &Paths, version: &str) -> Result<PhpRuntime> {
         .or_else(|_| which::which("php"))
         .unwrap_or_else(|_| PathBuf::from("php"));
     let ver = detect_php_version(&php).unwrap_or_else(|| version.to_string());
-    let listen = fpm_listen_addr(paths, &ver);
+    let listen = fpm_listen_addr_with_base(paths, &ver, state.stack.php_fpm_port);
     let root = php
         .parent()
         .and_then(|p| p.parent())
@@ -116,10 +116,14 @@ fn detect_php_version(php: &Path) -> Option<String> {
 }
 
 pub fn fpm_listen_addr(paths: &Paths, version: &str) -> String {
+    fpm_listen_addr_with_base(paths, version, 9000)
+}
+
+pub fn fpm_listen_addr_with_base(paths: &Paths, version: &str, base: u16) -> String {
     let sock = paths.php.join(format!("php-{version}.sock"));
     if cfg!(windows) {
         // TCP on Windows for php-cgi / fpm
-        let port = 9000 + version_port_offset(version);
+        let port = base.saturating_add(version_port_offset(version));
         format!("127.0.0.1:{port}")
     } else {
         format!("unix:{}", sock.display())
@@ -305,7 +309,7 @@ pub fn nginx_fastcgi_pass(runtime: &PhpRuntime) -> String {
 }
 
 pub fn register_system_php(state: &mut AppState, paths: &Paths) -> Result<PhpRuntime> {
-    let runtime = resolve_system_php(paths, "8.3")?;
+    let runtime = resolve_system_php(paths, state, "8.3")?;
     // Record as installed pointing at system paths so UI can select it
     use crate::config::{mark_installed, save_state, InstalledRecord};
     use crate::packages::now_iso;

@@ -9,16 +9,17 @@ pub mod services;
 use std::sync::Arc;
 
 use commands::{
-    apply_dev_stack, backup_site_database, bootstrap_ctx, create_site_cmd, create_wordpress,
-    download_site_database, duplicate_site, export_all_databases_to_folder,
-    export_database_to_folder, get_app_info, get_backups_dir, get_databases_folder,
-    get_db_files_settings, get_service_log, get_site_details, get_sites, get_stack_status,
-    get_templates, import_database_from_folder, import_site_database_file, install_package,
-    list_database_files, list_installed, list_managed_services_cmd, list_package_versions,
-    list_packages, list_php_extension_settings, list_site_details, mark_template,
-    register_system_php_cmd, restore_site_database, seed_site_large_table, set_php_manifest_url,
-    set_php_xdebug, start_dev_stack, start_managed_service, stop_dev_stack, stop_managed_service,
-    uninstall_package, update_db_files_settings, update_package, update_site_environment,
+    apply_dev_stack, apply_next_free_ports, backup_site_database, bootstrap_ctx,
+    check_service_ports_cmd, create_site_cmd, create_wordpress, download_site_database,
+    duplicate_site, export_all_databases_to_folder, export_database_to_folder, get_app_info,
+    get_backups_dir, get_databases_folder, get_db_files_settings, get_ports_config, get_service_log,
+    get_site_details, get_sites, get_stack_status, get_templates, import_database_from_folder,
+    import_site_database_file, install_package, list_database_files, list_installed,
+    list_managed_services_cmd, list_package_versions, list_packages, list_php_extension_settings,
+    list_site_details, mark_template, register_system_php_cmd, restore_site_database,
+    seed_site_large_table, set_coexistence_mode, set_php_manifest_url, set_php_xdebug,
+    start_dev_stack, start_managed_service, stop_dev_stack, stop_managed_service, uninstall_package,
+    update_db_files_settings, update_package, update_ports_config, update_site_environment,
 };
 use config::default_data_root;
 use services::db_files::{
@@ -165,6 +166,11 @@ pub fn run() {
             import_database_from_folder,
             download_site_database,
             import_site_database_file,
+            get_ports_config,
+            update_ports_config,
+            set_coexistence_mode,
+            check_service_ports_cmd,
+            apply_next_free_ports,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");

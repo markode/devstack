@@ -387,6 +387,7 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
             return reload_apache(paths, state);
         }
     }
+    crate::services::ports::ensure_ports_free(&state.stack, "apache")?;
 
     let needs_apache = state.sites.iter().any(site_uses_apache)
         || latest_installed(state, "apache").is_some();
@@ -487,9 +488,5 @@ pub fn apache_site_url(state: &AppState, site: &SiteRecord) -> String {
         state.stack.apache_http_port
     };
     let scheme = if https { "https" } else { "http" };
-    if (https && port == 443) || (!https && port == 80) {
-        format!("{scheme}://{}", site.domain)
-    } else {
-        format!("{scheme}://{}:{port}", site.domain)
-    }
+    crate::services::ports::format_url(scheme, &site.domain, port)
 }
