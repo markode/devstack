@@ -85,29 +85,35 @@ host=127.0.0.1
 
 /// Root client connect args — TCP on Windows (no Unix sockets), socket elsewhere.
 pub fn mysql_root_args(paths: &Paths, state: &AppState, engine: &str) -> Vec<String> {
-    let port = crate::services::ports::engine_db_port(&state.stack, engine);
+    let mut args = mysql_root_connect_base(paths, state, engine);
     // Short connect timeout so readiness polls don't hang for minutes.
+    // Only the mysql/mariadb *client* accepts this; mysqldump rejects it.
+    args.insert(args.len().saturating_sub(1), "--connect-timeout=2".into());
+    args
+}
+
+/// Connect args safe for mysqldump / mariadb-dump (no `--connect-timeout`).
+pub fn mysql_dump_root_args(paths: &Paths, state: &AppState, engine: &str) -> Vec<String> {
+    mysql_root_connect_base(paths, state, engine)
+}
+
+fn mysql_root_connect_base(paths: &Paths, state: &AppState, engine: &str) -> Vec<String> {
+    let port = crate::services::ports::engine_db_port(&state.stack, engine);
     if cfg!(windows) {
         vec![
             "--protocol=TCP".into(),
             "--host=127.0.0.1".into(),
             format!("--port={port}"),
-            "--connect-timeout=2".into(),
             "-uroot".into(),
         ]
     } else {
         let sock = socket_path(paths, engine);
         if sock.exists() {
-            vec![
-                format!("--socket={}", sock.display()),
-                "--connect-timeout=2".into(),
-                "-uroot".into(),
-            ]
+            vec![format!("--socket={}", sock.display()), "-uroot".into()]
         } else {
             vec![
                 "--host=127.0.0.1".into(),
                 format!("--port={port}"),
-                "--connect-timeout=2".into(),
                 "-uroot".into(),
             ]
         }

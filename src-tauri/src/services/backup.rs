@@ -9,7 +9,7 @@ use std::thread;
 use crate::config::{AppState, Paths};
 use crate::error::{DevStackError, Result};
 use crate::services::database::{
-    client_bin_for, dump_bin_for, engine_install_dir, mysql_root_args,
+    client_bin_for, dump_bin_for, engine_install_dir, mysql_dump_root_args, mysql_root_args,
 };
 use crate::services::progress::{emit, JobProgressFn};
 
@@ -60,7 +60,7 @@ pub fn backup_database(
 ) -> Result<u64> {
     let root = engine_install_dir(state, engine)?;
     let dump = dump_bin_for(&root)?;
-    let connect = mysql_root_args(paths, state, engine);
+    let connect = mysql_dump_root_args(paths, state, engine);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
