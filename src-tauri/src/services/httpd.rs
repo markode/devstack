@@ -13,7 +13,9 @@ use crate::config::{find_installed, latest_installed, AppState, Paths, SiteRecor
 use crate::error::{DevStackError, Result};
 use crate::services::nginx::expand_home;
 use crate::services::php_runtime::{nginx_fastcgi_pass, resolve_php, start_php, PhpRuntime};
-use crate::services::process::{find_bin, is_running, read_pid, spawn_logged, stop_pid, write_pid};
+use crate::services::process::{
+    find_bin, is_running, read_pid, spawn_logged_attached, stop_pid, write_pid,
+};
 use crate::services::tls::ensure_site_cert;
 
 pub fn site_uses_apache(site: &SiteRecord) -> bool {
@@ -187,13 +189,19 @@ pub fn render_stack(
     };
     let runtime_dir = paths.apache.join("run");
     fs::create_dir_all(&runtime_dir)?;
-    let mime = if root.join("conf").join("mime.types").exists() {
-        root.join("conf").join("mime.types")
-    } else if Path::new("/etc/mime.types").exists() {
-        PathBuf::from("/etc/mime.types")
-    } else {
-        root.join("conf").join("mime.types")
-    };
+    let mime = [
+        root.join("conf").join("mime.types"),
+        // Homebrew httpd keeps mime.types under etc/ or share/, not conf/.
+        root.join("share").join("httpd").join("mime.types"),
+        PathBuf::from("/opt/homebrew/etc/httpd/mime.types"),
+        PathBuf::from("/usr/local/etc/httpd/mime.types"),
+        PathBuf::from("/etc/apache2/mime.types"),
+        PathBuf::from("/etc/mime.types"),
+        PathBuf::from("/etc/httpd/conf/mime.types"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
+    .unwrap_or_else(|| root.join("conf").join("mime.types"));
     let identity = if cfg!(windows) {
         String::new()
     } else if nix_geteuid() == 0 {
@@ -417,6 +425,21 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
             return reload_apache(paths, state);
         }
     }
+    // Reclaim a stale FOREGROUND httpd left from a prior crash / DETACHED spawn.
+    if let Some(old) = read_pid(&paths.pid_file("apache")) {
+        let _ = stop_pid(old);
+        state.runtime.apache_pid = None;
+        for _ in 0..20 {
+            let http_free =
+                std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
+            let https_free =
+                std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_https_port)).is_ok();
+            if http_free && https_free {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
     crate::services::ports::ensure_ports_free(&state.stack, "apache")?;
 
     let needs_apache = state.sites.iter().any(site_uses_apache)
@@ -468,7 +491,10 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
         }
     }
 
-    let child = spawn_logged(
+    // Attached (not DETACHED_PROCESS): we must own the real FOREGROUND pid so
+    // later reload/stop can taskkill the listener. Detached spawns orphaned
+    // httpd.exe that still hold 8088/8444 and look like "WAMP" conflicts.
+    let child = spawn_logged_attached(
         &bin,
         &["-f", &conf_s, "-D", "FOREGROUND"],
         Some(&root),
@@ -482,7 +508,7 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     // Wait until the process is still alive and the HTTPS port is bound.
     let https_port = state.stack.apache_https_port;
     let mut ready = false;
-    for _ in 0..40 {
+    for _ in 0..50 {
         if !is_running(pid) {
             let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
             let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
@@ -526,9 +552,19 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
         // `-k graceful` looks for "Apache2.4" and no-ops. Restart the process instead.
         if cfg!(windows) {
             let _ = stop_pid(pid);
+            if let Some(file_pid) = read_pid(&paths.pid_file("apache")) {
+                let _ = stop_pid(file_pid);
+            }
             state.runtime.apache_pid = None;
-            // Let the FOREGROUND listener release the ports before rebinding.
-            std::thread::sleep(std::time::Duration::from_millis(400));
+            // Wait until our ports are free (mpm_winnt child can lag behind taskkill).
+            for _ in 0..30 {
+                let http_free = std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
+                let https_free = std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_https_port)).is_ok();
+                if http_free && https_free {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             return start_apache(paths, state);
         }
         let _ = crate::services::process::command(&bin)
