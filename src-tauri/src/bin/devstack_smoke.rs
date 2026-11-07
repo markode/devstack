@@ -531,25 +531,31 @@ async fn run_wordpress_smoke(
             }
             // WP was installed with siteurl on the Apache port — rewrite to Nginx
             // so we do not 301 off to a stopped :8444 listener.
-            let engine = created
-                .site
-                .database_engine
-                .clone()
-                .unwrap_or_else(|| "mariadb".into());
-            if let Some(db) = created.site.database_name.clone() {
-                let from = format!("https://demo.test:{apache_port}");
-                let to = format!("https://demo.test:{nginx_port}");
-                let _ = rewrite_wp_urls(&ctx.paths, &state, &engine, &db, &from, &to);
-            }
-            if let Some(db) = dup.site.database_name.clone() {
-                let engine = dup
-                    .site
-                    .database_engine
-                    .clone()
-                    .unwrap_or_else(|| "mariadb".into());
-                let from = format!("https://clone.test:{apache_port}");
-                let to = format!("https://clone.test:{nginx_port}");
-                let _ = rewrite_wp_urls(&ctx.paths, &state, &engine, &db, &from, &to);
+            let pairs = [
+                (
+                    created
+                        .site
+                        .database_engine
+                        .clone()
+                        .unwrap_or_else(|| "mariadb".into()),
+                    created.site.database_name.clone(),
+                    format!(":{apache_port}"),
+                    format!(":{nginx_port}"),
+                ),
+                (
+                    dup.site
+                        .database_engine
+                        .clone()
+                        .unwrap_or_else(|| "mariadb".into()),
+                    dup.site.database_name.clone(),
+                    format!(":{apache_port}"),
+                    format!(":{nginx_port}"),
+                ),
+            ];
+            for (engine, db, from, to) in pairs {
+                if let Some(db) = db {
+                    rewrite_wp_urls(&ctx.paths, &state, &engine, &db, &from, &to)?;
+                }
             }
         }
         apply_stack(&ctx.paths, &mut state)?;
@@ -1174,16 +1180,32 @@ fn rewrite_wp_urls(
     let client = client_bin_for(&root)?;
     let mut args = mysql_root_args(paths, state, engine);
     let sql = format!(
-        "UPDATE `{db}`.`wp_options` SET option_value = REPLACE(option_value, '{from}', '{to}') \
-         WHERE option_name IN ('home','siteurl');"
+        "UPDATE `wp_options` SET option_value = REPLACE(option_value, '{from}', '{to}') \
+         WHERE option_name IN ('home','siteurl') OR option_value LIKE '%{from}%';"
     );
+    args.push(format!("--database={db}"));
     args.push("-e".into());
     args.push(sql);
-    let status = smoke_command(&client).args(&args).status()?;
-    if !status.success() {
-        return Err(format!("wp url rewrite failed for {db}").into());
+    let out = smoke_command(&client).args(&args).output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "wp url rewrite failed for {db}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .into());
     }
-    println!("Rewrote WP URLs in `{db}`: {from} → {to}");
+    // Verify siteurl now contains the new port fragment.
+    let mut check = mysql_root_args(paths, state, engine);
+    check.push(format!("--database={db}"));
+    check.push("-N".into());
+    check.push("-e".into());
+    check.push("SELECT option_value FROM wp_options WHERE option_name='siteurl' LIMIT 1;".into());
+    let siteurl = smoke_command(&client).args(&check).output()?;
+    let siteurl = String::from_utf8_lossy(&siteurl.stdout).trim().to_string();
+    println!("Rewrote WP URLs in `{db}`: {from} → {to} (siteurl={siteurl})");
+    if siteurl.contains(from) {
+        return Err(format!("siteurl still contains {from}: {siteurl}").into());
+    }
     Ok(())
 }
 
