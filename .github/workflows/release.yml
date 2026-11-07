@@ -1,4 +1,4 @@
-# Build DevStack installers on tag push (v*) and upload to a draft GitHub Release.
+# Build DevStack installers on tag push (v*) and upload to a prerelease GitHub Release.
 # Unsigned builds work out of the box. Optional signing/notarization via secrets (see docs/packaging.md).
 
 name: Release
@@ -115,6 +115,6 @@ jobs:
 
             Unsigned CI builds are expected when signing secrets are unset.
             See `docs/packaging.md` for code signing and notarization.
-          releaseDraft: true
-          prerelease: false
+          releaseDraft: false
+          prerelease: true
           args: ${{ matrix.args }}
