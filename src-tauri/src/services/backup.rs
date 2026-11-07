@@ -185,6 +185,7 @@ pub fn restore_database(
         .stdin
         .take()
         .ok_or_else(|| DevStackError::Message("mysql stdin missing".into()))?;
+    let stderr_pipe = child.stderr.take();
 
     let file = File::open(archive)?;
     decompress_to_writer(file, stdin, kind, progress, job_id, total)?;
@@ -193,9 +194,16 @@ pub fn restore_database(
         .wait()
         .map_err(|e| DevStackError::Message(e.to_string()))?;
     if !status.success() {
-        return Err(DevStackError::Message(
-            "mysql import failed — dump may be corrupt or credentials invalid".into(),
-        ));
+        let detail = stderr_pipe
+            .and_then(|mut p| {
+                let mut s = String::new();
+                std::io::Read::read_to_string(&mut p, &mut s).ok()?;
+                Some(s)
+            })
+            .unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "mysql import failed — dump may be corrupt or credentials invalid: {detail}"
+        )));
     }
 
     emit(
@@ -263,12 +271,10 @@ fn decompress_to_writer<R: Read + Send + 'static, W: Write + Send + 'static>(
 ) -> Result<u64> {
     match kind {
         CompressKind::Gzip => {
-            if which::which("gzip").is_ok() {
-                pipe_via_compressor(reader, writer, "gzip", &["-dc"], progress, job_id)
-            } else {
-                let mut dec = flate2::read::GzDecoder::new(reader);
-                copy_counting(&mut dec, writer, progress, job_id, Some(total))
-            }
+            // Always decompress in-process. Piping through system `gzip -dc` fails
+            // in CI when the mysql client closes stdin early (reported as "gzip failed").
+            let mut dec = flate2::read::GzDecoder::new(reader);
+            copy_counting(&mut dec, writer, progress, job_id, Some(total))
         }
         CompressKind::Zstd => {
             if which::which("zstd").is_ok() {

@@ -286,25 +286,25 @@ fn nix_geteuid() -> u32 {
 
 /// PHP proxy directives for a vhost.
 ///
-/// Windows uses php-cgi + `ProxyPassMatch` with an absolute docroot inside the
-/// worker URL so SCRIPT_FILENAME is a real filesystem path (SetHandler with a
-/// trailing slash yields "No input file specified"; without it, Windows drive
-/// letters glue onto the host → `127.0.0.1:9000d`).
+/// Windows php-cgi needs an absolute SCRIPT_FILENAME. Trailing-slash SetHandler
+/// alone leaves a URL path ("No input file specified"); no slash glues `D:` onto
+/// the host. Fix: trailing slash + ProxyFCGISetEnvIf rebuild from DOCUMENT_ROOT.
 ///
-/// Unix uses php-fpm via SetHandler.
-fn php_proxy_block(runtime: &PhpRuntime, docroot_conf: &str) -> String {
-    let pass = nginx_fastcgi_pass(runtime);
+/// Unix php-fpm uses SetHandler with a trailing slash.
+fn php_proxy_block(runtime: &PhpRuntime, _docroot_conf: &str) -> String {
+    let fcgi = fcgi_target(runtime);
     if cfg!(windows) {
-        let host = pass.trim_start_matches("unix:");
-        // docroot_conf is already forward-slash form (D:/…).
         format!(
             r#"  ProxyFCGIBackendType GENERIC
-  ProxyPassMatch "^/(.*\.php(/.*)?)$" "fcgi://{host}/{docroot_conf}/$1"
+  <FilesMatch "\.php$">
+    SetHandler "proxy:{fcgi}"
+  </FilesMatch>
+  # Rebuild SCRIPT_FILENAME as DOCUMENT_ROOT + SCRIPT_NAME (Windows drive-safe).
+  ProxyFCGISetEnvIf "true" SCRIPT_FILENAME "%{{DOCUMENT_ROOT}}%{{SCRIPT_NAME}}"
   ProxyTimeout 3600
 "#
         )
     } else {
-        let fcgi = fcgi_target(runtime);
         format!(
             r#"  <FilesMatch "\.php$">
     SetHandler "proxy:{fcgi}"
