@@ -3,7 +3,6 @@
 use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -258,7 +257,7 @@ pub fn stop_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Man
             if let Some(root) = install_root(state, "postgresql") {
                 if let Some(pg_ctl) = find_bin(&root, &["pg_ctl", "pg_ctl.exe"]) {
                     let data = paths.databases.join("postgresql/data");
-                    let _ = Command::new(&pg_ctl)
+                    let _ = crate::services::process::command(&pg_ctl)
                         .args(["-D", &data.to_string_lossy(), "stop", "-m", "fast"])
                         .status();
                 }
@@ -366,7 +365,7 @@ fn start_postgresql(paths: &Paths, state: &mut AppState) -> Result<()> {
     let data = paths.databases.join("postgresql/data");
     if !data.join("PG_VERSION").exists() {
         fs::create_dir_all(data.parent().unwrap())?;
-        let status = Command::new(&initdb)
+        let status = crate::services::process::command(&initdb)
             .args([
                 "-D",
                 &data.to_string_lossy(),
@@ -415,7 +414,7 @@ fn start_postgresql(paths: &Paths, state: &mut AppState) -> Result<()> {
         }
     }
     let log = paths.logs.join("postgresql.err");
-    let status = Command::new(&pg_ctl)
+    let status = crate::services::process::command(&pg_ctl)
         .args([
             "-D",
             &data.to_string_lossy(),

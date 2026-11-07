@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -115,7 +114,7 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
     fs::create_dir_all(datadir)?;
     // Prefer mariadb-install-db / mysql_install_db / mysqld --initialize-insecure
     if let Some(install) = find_bin(root, &["mariadb-install-db", "mysql_install_db"]) {
-        let out = Command::new(&install)
+        let out = crate::services::process::command(&install)
             .args([
                 format!("--datadir={}", datadir.display()),
                 format!("--basedir={}", root.display()),
@@ -140,7 +139,7 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
     if mysqld.file_name().and_then(|n| n.to_str()) == Some("mysqld")
         || mysqld.file_name().and_then(|n| n.to_str()) == Some("mysqld.exe")
     {
-        let _ = Command::new(&mysqld)
+        let _ = crate::services::process::command(&mysqld)
             .args([
                 format!("--defaults-file={}", conf.display()),
                 "--initialize-insecure".into(),
@@ -194,7 +193,7 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
     for _ in 0..150 {
         if sock.exists() {
             if let Some(cli) = &client {
-                let ok = Command::new(cli)
+                let ok = crate::services::process::command(cli)
                     .args([
                         format!("--socket={}", sock.display()),
                         "-uroot".into(),
@@ -263,7 +262,7 @@ pub fn ensure_database(
          GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{user}'@'127.0.0.1';\n\
          FLUSH PRIVILEGES;"
     );
-    let status = Command::new(&client)
+    let status = crate::services::process::command(&client)
         .args([
             format!("--socket={}", sock.display()),
             "-uroot".into(),
@@ -280,7 +279,7 @@ pub fn ensure_database(
              GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{user}'@'127.0.0.1' IDENTIFIED BY '{pass}';\n\
              FLUSH PRIVILEGES;"
         );
-        let status2 = Command::new(&client)
+        let status2 = crate::services::process::command(&client)
             .args([
                 format!("--socket={}", sock.display()),
                 "-uroot".into(),

@@ -1,3 +1,6 @@
+//! Process helpers — PID files, spawn/kill, and Windows console suppression.
+
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -5,6 +8,44 @@ use std::process::{Child, Command, Stdio};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::error::{DevStackError, Result};
+
+/// Win32 `CREATE_NO_WINDOW` — hide console windows for GUI-launched children.
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Win32 `DETACHED_PROCESS` — detach from the parent console.
+#[cfg(windows)]
+pub const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+/// Apply Windows creation flags so helper/server processes never flash a cmd window.
+pub fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Like [`no_window`], plus `DETACHED_PROCESS` for long-lived daemons.
+pub fn no_window_detached(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+    cmd
+}
+
+/// Build a [`Command`] with Windows console suppression already applied.
+pub fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    no_window(&mut cmd);
+    cmd
+}
 
 pub fn write_pid(path: &Path, pid: u32) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -32,15 +73,19 @@ pub fn stop_pid(pid: u32) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        let _ = command("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
         std::thread::sleep(std::time::Duration::from_millis(400));
         if is_running(pid) {
-            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+            let _ = command("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
         }
     }
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
+        let _ = command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status();
     }
@@ -59,7 +104,8 @@ pub fn spawn_logged(
     }
     let out = fs::File::create(log_out)?;
     let err = fs::File::create(log_err)?;
-    let mut cmd = Command::new(program);
+    let mut cmd = command(program);
+    no_window_detached(&mut cmd);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(out)
@@ -73,7 +119,7 @@ pub fn spawn_logged(
 }
 
 pub fn run_capture(program: &Path, args: &[&str], cwd: Option<&Path>) -> Result<String> {
-    let mut cmd = Command::new(program);
+    let mut cmd = command(program);
     cmd.args(args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -108,4 +154,16 @@ pub fn find_bin(dir: &Path, names: &[&str]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_builder_returns_program() {
+        let cmd = command("echo");
+        // Just ensure construction does not panic on any platform.
+        let _ = format!("{cmd:?}");
+    }
 }

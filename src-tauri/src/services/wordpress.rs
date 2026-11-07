@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -226,7 +225,7 @@ pub fn run_wp_cli(
     cwd: &Path,
     args: &[&str],
 ) -> Result<String> {
-    let mut cmd = Command::new(php);
+    let mut cmd = crate::services::process::command(php);
     cmd.arg(wp_cli).args(args).current_dir(cwd);
     let out = cmd
         .output()

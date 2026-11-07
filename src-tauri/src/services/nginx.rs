@@ -404,7 +404,7 @@ pub fn reload_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
     let bin = nginx_bin(&root)?;
     let conf_s = conf.display().to_string();
     let prefix_s = paths.nginx.display().to_string();
-    let status = std::process::Command::new(&bin)
+    let status = crate::services::process::command(&bin)
         .args(["-c", &conf_s, "-p", &prefix_s, "-s", "reload"])
         .status();
     if status.map(|s| s.success()).unwrap_or(false) {

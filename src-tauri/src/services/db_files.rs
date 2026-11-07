@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -207,7 +207,7 @@ fn list_mysql_databases(paths: &Paths, state: &AppState, engine: &str) -> Result
     let root = engine_install_dir(state, engine)?;
     let client = client_bin_for(&root)?;
     let sock = socket_path(paths, engine);
-    let out = Command::new(&client)
+    let out = crate::services::process::command(&client)
         .args([
             format!("--socket={}", sock.display()),
             "-uroot".into(),
@@ -242,7 +242,7 @@ fn list_postgres_databases(paths: &Paths, state: &AppState) -> Result<Vec<String
         .ok_or_else(|| DevStackError::Message("psql not found".into()))?;
     let _ = paths;
     let port = state.stack.postgresql_port.to_string();
-    let out = Command::new(&psql)
+    let out = crate::services::process::command(&psql)
         .args([
             "-h",
             "127.0.0.1",
@@ -274,7 +274,7 @@ fn list_mongo_databases(paths: &Paths, state: &AppState) -> Result<Vec<String>> 
     let Some(shell) = shell else {
         return Ok(vec![]);
     };
-    let out = Command::new(&shell)
+    let out = crate::services::process::command(&shell)
         .args([
             "--quiet",
             "--eval",
@@ -441,7 +441,7 @@ fn export_postgres(
         None,
     );
     let port = state.stack.postgresql_port.to_string();
-    let mut child = Command::new(&pg_dump)
+    let mut child = crate::services::process::command(&pg_dump)
         .args([
             "-h",
             "127.0.0.1",
@@ -492,7 +492,7 @@ fn export_mongo(
         None,
     );
     let port = format!("--port={}", state.stack.mongodb_port);
-    let mut child = Command::new(&mongodump)
+    let mut child = crate::services::process::command(&mongodump)
         .args([
             "--host=127.0.0.1",
             &port,
@@ -541,7 +541,7 @@ fn gzip_stream<R: Read + Send + 'static, W: Write>(
     job_id: &str,
 ) -> Result<u64> {
     if which::which("gzip").is_ok() {
-        let mut child = Command::new("gzip")
+        let mut child = crate::services::process::command("gzip")
             .args(["-c", "-1"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -752,7 +752,7 @@ fn import_postgres(
     );
     let port = state.stack.postgresql_port.to_string();
     // Ensure DB exists
-    let _ = Command::new(&psql)
+    let _ = crate::services::process::command(&psql)
         .args([
             "-h",
             "127.0.0.1",
@@ -765,7 +765,7 @@ fn import_postgres(
         ])
         .output();
 
-    let mut child = Command::new(&psql)
+    let mut child = crate::services::process::command(&psql)
         .args([
             "-h",
             "127.0.0.1",
@@ -814,7 +814,7 @@ fn import_mongo(
         Some(total),
     );
     let port = format!("--port={}", state.stack.mongodb_port);
-    let status = Command::new(&mongorestore)
+    let status = crate::services::process::command(&mongorestore)
         .args([
             "--host=127.0.0.1",
             &port,
@@ -987,7 +987,7 @@ fn mysql_simple_replace(
          FROM information_schema.columns
          WHERE table_schema='{db}' AND data_type IN ('varchar','text','mediumtext','longtext','char');"
     );
-    let out = Command::new(&client)
+    let out = crate::services::process::command(&client)
         .args([
             format!("--socket={}", sock.display()),
             "-uroot".into(),
@@ -998,7 +998,7 @@ fn mysql_simple_replace(
         .output()?;
     let stmts = String::from_utf8_lossy(&out.stdout);
     for line in stmts.lines().filter(|l| !l.trim().is_empty()) {
-        let _ = Command::new(&client)
+        let _ = crate::services::process::command(&client)
             .args([
                 format!("--socket={}", sock.display()),
                 "-uroot".into(),

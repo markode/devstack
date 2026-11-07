@@ -28,6 +28,28 @@ export interface PackageVersion {
   notes?: string | null;
 }
 
+export interface VersionListResponse {
+  packageId: string;
+  versions: PackageVersion[];
+  fromCache: boolean;
+  refreshing: boolean;
+  fetchedAt?: string | null;
+  warning?: string | null;
+}
+
+export interface VersionsUpdatedEvent {
+  packageId: string;
+  versions: PackageVersion[];
+  fetchedAt: string;
+  error?: string | null;
+}
+
+export interface HostsStatus {
+  ok: boolean;
+  missing: string[];
+  message?: string | null;
+}
+
 export interface InstalledPackage {
   packageId: string;
   version: string;

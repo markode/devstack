@@ -6,13 +6,17 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 use crate::config::{
-    ensure_demo_site, load_state, save_state, AppState, Paths, SiteRecord, TemplateRecord,
+    ensure_welcome_site, load_state, save_state, AppState, Paths, SiteRecord, TemplateRecord,
 };
 use crate::downloads::{noop_progress, ProgressEvent, ProgressFn};
 use crate::error::Result;
+use crate::packages::version_cache::{
+    self, RefreshGuard, VersionListResponse, VersionsUpdatedEvent,
+};
 use crate::packages::{
     installed_from_state, InstalledPackage, PackageInfo, PackageRegistry, PackageVersion,
 };
+use crate::services::dns::{self, HostsStatus};
 use crate::php::{list_php_extensions, set_xdebug, PhpExtensionView};
 use crate::services::backup::{
     backup_database, default_backup_path, restore_database, seed_large_demo_table,
@@ -42,6 +46,7 @@ pub struct AppCtx {
     pub paths: Paths,
     pub state: Mutex<AppState>,
     pub registry: PackageRegistry,
+    pub version_refresh: Arc<RefreshGuard>,
 }
 
 #[derive(Serialize)]
@@ -87,12 +92,83 @@ pub async fn list_packages(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<PackageInf
 
 #[tauri::command]
 pub async fn list_package_versions(
+    app: AppHandle,
     ctx: State<'_, Arc<AppCtx>>,
     package_id: String,
-) -> Result<Vec<PackageVersion>> {
-    let provider = ctx.registry.get(&package_id)?;
-    let state = ctx.state.lock().await;
-    provider.list_versions(&state).await
+) -> Result<VersionListResponse> {
+    let cached = version_cache::cached_response(&ctx.paths, &package_id);
+
+    // Cold cache: fetch synchronously so the UI is not empty on first open.
+    if !cached.from_cache {
+        let state_snapshot = ctx.state.lock().await.clone();
+        return match version_cache::fetch_and_store(
+            &ctx.registry,
+            &ctx.paths,
+            &state_snapshot,
+            &package_id,
+        )
+        .await
+        {
+            Ok(entry) => Ok(VersionListResponse {
+                package_id,
+                versions: entry.versions,
+                from_cache: false,
+                refreshing: false,
+                fetched_at: Some(entry.fetched_at),
+                warning: None,
+            }),
+            Err(e) => Ok(VersionListResponse {
+                package_id,
+                versions: Vec::new(),
+                from_cache: false,
+                refreshing: false,
+                fetched_at: None,
+                warning: Some(e.to_string()),
+            }),
+        };
+    }
+
+    // Stale-while-revalidate: return cache now, refresh in the background.
+    let refresh_guard = ctx.version_refresh.clone();
+    if refresh_guard.try_begin(&package_id).await {
+        let ctx_arc = ctx.inner().clone();
+        let pkg = package_id.clone();
+        let app_handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state_snapshot = ctx_arc.state.lock().await.clone();
+            let result = version_cache::fetch_and_store(
+                &ctx_arc.registry,
+                &ctx_arc.paths,
+                &state_snapshot,
+                &pkg,
+            )
+            .await;
+            let event = match result {
+                Ok(entry) => VersionsUpdatedEvent {
+                    package_id: pkg.clone(),
+                    versions: entry.versions,
+                    fetched_at: entry.fetched_at,
+                    error: None,
+                },
+                Err(e) => VersionsUpdatedEvent {
+                    package_id: pkg.clone(),
+                    versions: cached_versions_fallback(&ctx_arc.paths, &pkg),
+                    fetched_at: String::new(),
+                    error: Some(e.to_string()),
+                },
+            };
+            let _ = app_handle.emit("versions-updated", &event);
+            refresh_guard.end(&pkg).await;
+        });
+    }
+
+    Ok(cached)
+}
+
+fn cached_versions_fallback(paths: &Paths, package_id: &str) -> Vec<PackageVersion> {
+    version_cache::read_cache(paths, package_id)
+        .map(|c| c.versions)
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -149,7 +225,7 @@ pub async fn uninstall_package(
 #[tauri::command]
 pub async fn get_sites(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteRecord>> {
     let mut state = ctx.state.lock().await;
-    ensure_demo_site(&mut state);
+    ensure_welcome_site(&ctx.paths, &mut state);
     refresh_site_metadata(&mut state);
     save_state(&ctx.paths.state_file, &state)?;
     Ok(state.sites.clone())
@@ -158,7 +234,7 @@ pub async fn get_sites(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteRecord>> {
 #[tauri::command]
 pub async fn list_site_details(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDetails>> {
     let mut state = ctx.state.lock().await;
-    ensure_demo_site(&mut state);
+    ensure_welcome_site(&ctx.paths, &mut state);
     refresh_site_metadata(&mut state);
     let details: Vec<_> = state
         .sites
@@ -179,7 +255,7 @@ pub async fn get_site_details(
     site_id: String,
 ) -> Result<SiteDetails> {
     let mut state = ctx.state.lock().await;
-    ensure_demo_site(&mut state);
+    ensure_welcome_site(&ctx.paths, &mut state);
     let site = state
         .sites
         .iter()
@@ -220,7 +296,7 @@ pub async fn update_site_environment(
     web_server: Option<String>,
 ) -> Result<SiteRecord> {
     let mut state = ctx.state.lock().await;
-    ensure_demo_site(&mut state);
+    ensure_welcome_site(&ctx.paths, &mut state);
     let site = state
         .sites
         .iter_mut()
@@ -839,12 +915,45 @@ pub async fn import_site_database_file(
 pub fn bootstrap_ctx(data_root: std::path::PathBuf) -> Result<AppCtx> {
     let paths = Paths::from_root(data_root)?;
     let mut state = load_state(&paths.state_file)?;
-    ensure_demo_site(&mut state);
+    ensure_welcome_site(&paths, &mut state);
     let _ = crate::services::db_files::databases_folder(&paths, &state.db_files);
     save_state(&paths.state_file, &state)?;
-    Ok(AppCtx {
+    let ctx = AppCtx {
         paths,
         state: Mutex::new(state),
         registry: PackageRegistry::new()?,
-    })
+        version_refresh: Arc::new(RefreshGuard::new()),
+    };
+    Ok(ctx)
+}
+
+/// Prefetch version lists into the disk cache (best-effort, non-blocking).
+pub fn prefetch_version_lists(ctx: Arc<AppCtx>) {
+    tauri::async_runtime::spawn(async move {
+        let ids = version_cache::all_package_ids(&ctx.registry);
+        for id in ids {
+            if !ctx.version_refresh.try_begin(&id).await {
+                continue;
+            }
+            let state = ctx.state.lock().await.clone();
+            let _ = version_cache::fetch_and_store(&ctx.registry, &ctx.paths, &state, &id).await;
+            ctx.version_refresh.end(&id).await;
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn get_hosts_status(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus> {
+    let state = ctx.state.lock().await;
+    Ok(dns::check_hosts_status(&state))
+}
+
+#[tauri::command]
+pub async fn repair_hosts(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus> {
+    let mut state = ctx.state.lock().await;
+    ensure_welcome_site(&ctx.paths, &mut state);
+    let _ = crate::services::tls::ensure_root_ca(&ctx.paths);
+    dns::sync_hosts_and_trust_ca(&ctx.paths, &state)?;
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(dns::check_hosts_status(&state))
 }

@@ -6,7 +6,6 @@ use serde::Deserialize;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::{
     default_uninstall, now_iso, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
@@ -331,7 +330,7 @@ impl NginxProvider {
             }
         }
 
-        let configure = Command::new("sh")
+        let configure = crate::services::process::command("sh")
             .arg("./configure")
             .args(&args)
             .current_dir(&src)
@@ -351,7 +350,7 @@ impl NginxProvider {
         let jobs = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2);
-        let make = Command::new("make")
+        let make = crate::services::process::command("make")
             .arg(format!("-j{jobs}"))
             .current_dir(&src)
             .output()
@@ -363,7 +362,7 @@ impl NginxProvider {
             )));
         }
 
-        let install = Command::new("make")
+        let install = crate::services::process::command("make")
             .arg("install")
             .current_dir(&src)
             .output()
@@ -525,7 +524,7 @@ fn find_nginx_bin(root: &Path) -> Option<PathBuf> {
 
 fn extract_deb(deb: &Path, dest: &Path) -> Result<()> {
     if which::which("dpkg-deb").is_ok() {
-        let status = Command::new("dpkg-deb")
+        let status = crate::services::process::command("dpkg-deb")
             .args(["-x", &deb.to_string_lossy(), &dest.to_string_lossy()])
             .status()
             .map_err(|e| DevStackError::Message(e.to_string()))?;

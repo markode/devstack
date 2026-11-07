@@ -9,8 +9,8 @@ import type {
   DuplicateResult,
   InstalledPackage,
   JobProgress,
+  HostsStatus,
   PackageInfo,
-  PackageVersion,
   PhpExtensionView,
   ProgressEvent,
   SiteDetails,
@@ -18,6 +18,8 @@ import type {
   StackStatus,
   ManagedServiceStatus,
   TemplateRecord,
+  VersionListResponse,
+  VersionsUpdatedEvent,
 } from "./types";
 
 export const isTauri = (): boolean =>
@@ -39,8 +41,24 @@ export async function listPackages(): Promise<PackageInfo[]> {
 
 export async function listPackageVersions(
   packageId: string,
-): Promise<PackageVersion[]> {
-  return invoke<PackageVersion[]>("list_package_versions", { packageId });
+): Promise<VersionListResponse> {
+  return invoke<VersionListResponse>("list_package_versions", { packageId });
+}
+
+export async function onVersionsUpdated(
+  handler: (ev: VersionsUpdatedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<VersionsUpdatedEvent>("versions-updated", (e) =>
+    handler(e.payload),
+  );
+}
+
+export async function getHostsStatus(): Promise<HostsStatus> {
+  return invoke<HostsStatus>("get_hosts_status");
+}
+
+export async function repairHosts(): Promise<HostsStatus> {
+  return invoke<HostsStatus>("repair_hosts");
 }
 
 export async function listInstalled(

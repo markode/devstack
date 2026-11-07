@@ -4,7 +4,6 @@
 use async_trait::async_trait;
 use regex::Regex;
 use std::fs;
-use std::process::Command;
 
 use super::{
     default_uninstall, now_iso, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
@@ -220,7 +219,7 @@ impl PackageProvider for RedisProvider {
             } else {
                 src.clone()
             };
-            let status = Command::new("make")
+            let status = crate::services::process::command("make")
                 .args([
                     "-j",
                     "2",

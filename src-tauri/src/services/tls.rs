@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::Paths;
 use crate::error::{DevStackError, Result};
@@ -137,7 +136,7 @@ pub fn trust_ca_via_helper(paths: &Paths) -> Result<()> {
 }
 
 fn run_openssl(args: &[&str]) -> Result<()> {
-    let status = Command::new("openssl")
+    let status = crate::services::process::command("openssl")
         .args(args)
         .status()
         .map_err(|e| DevStackError::Message(format!("openssl: {e}")))?;

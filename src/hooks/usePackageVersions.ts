@@ -6,9 +6,31 @@ export function usePackageVersions(packageId: string) {
   const [versions, setVersions] = useState<PackageVersion[]>([]);
   const [installed, setInstalled] = useState<InstalledPackage[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [fromCache, setFromCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
+
+  const applyVersions = useCallback(
+    (list: PackageVersion[], warning?: string | null) => {
+      setVersions(list);
+      if (
+        list.length === 0 &&
+        ["mysql", "mariadb", "postgresql", "mongodb"].includes(packageId)
+      ) {
+        setError(
+          warning ??
+            `No ${packageId} versions were returned. The version catalog may be unreachable.`,
+        );
+      } else if (warning) {
+        setError(warning);
+      } else {
+        setError(null);
+      }
+    },
+    [packageId],
+  );
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -18,41 +40,48 @@ export function usePackageVersions(packageId: string) {
         client.listPackageVersions(packageId),
         client.listInstalled(packageId),
       ]);
-      setVersions(v);
+      applyVersions(v.versions, v.warning);
+      setFromCache(v.fromCache);
+      setRefreshing(v.refreshing);
       setInstalled(i);
-      // Database providers must never succeed with an empty list — treat that
-      // as a fetch failure so the UI shows an error instead of a blank table.
-      if (
-        v.length === 0 &&
-        ["mysql", "mariadb", "postgresql", "mongodb"].includes(packageId)
-      ) {
-        setError(
-          `No ${packageId} versions were returned. The version catalog may be unreachable.`,
-        );
-      }
     } catch (e) {
       setVersions([]);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [packageId]);
+  }, [packageId, applyVersions]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
   useEffect(() => {
-    let unlisten: () => void = () => {};
+    let unlistenProgress: () => void = () => {};
+    let unlistenVersions: () => void = () => {};
     void client.onInstallProgress((ev) => {
       if (ev.packageId === packageId) setProgress(ev);
     }).then((fn) => {
-      unlisten = fn;
+      unlistenProgress = fn;
+    });
+    void client.onVersionsUpdated((ev) => {
+      if (ev.packageId !== packageId) return;
+      if (ev.error) {
+        setError(ev.error);
+        setRefreshing(false);
+        return;
+      }
+      applyVersions(ev.versions, null);
+      setFromCache(false);
+      setRefreshing(false);
+    }).then((fn) => {
+      unlistenVersions = fn;
     });
     return () => {
-      unlisten();
+      unlistenProgress();
+      unlistenVersions();
     };
-  }, [packageId]);
+  }, [packageId, applyVersions]);
 
   const install = async (version: string) => {
     setBusyKey(version);
@@ -85,6 +114,8 @@ export function usePackageVersions(packageId: string) {
     versions,
     installed,
     loading,
+    refreshing,
+    fromCache,
     error,
     busyKey,
     progress,

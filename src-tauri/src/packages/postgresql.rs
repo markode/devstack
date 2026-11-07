@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::fs;
-use std::process::Command;
 
 use super::{
     default_uninstall, now_iso, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
@@ -213,7 +212,7 @@ impl PackageProvider for PostgreSqlProvider {
         crate::config::remove_dir_if_exists(&dest)?;
         fs::create_dir_all(&dest)?;
         // System tar handles hard-linked timezone files that the Rust tar crate rejects.
-        let status = Command::new("tar")
+        let status = crate::services::process::command("tar")
             .args([
                 "-xzf",
                 &archive.to_string_lossy(),
@@ -225,7 +224,7 @@ impl PackageProvider for PostgreSqlProvider {
             .map_err(|e| DevStackError::Message(format!("tar extract: {e}")))?;
         if !status.success() {
             // Retry without strip in case layout differs
-            let status2 = Command::new("tar")
+            let status2 = crate::services::process::command("tar")
                 .args([
                     "-xzf",
                     &archive.to_string_lossy(),
