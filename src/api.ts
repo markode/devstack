@@ -271,3 +271,31 @@ export async function importSiteDatabaseFile(
     replace: replace ?? null,
   });
 }
+
+export async function getPortsConfig(): Promise<import("./types").PortsConfig> {
+  return invoke("get_ports_config");
+}
+
+export async function updatePortsConfig(
+  config: import("./types").PortsConfig,
+): Promise<import("./types").PortsConfig> {
+  return invoke("update_ports_config", { config });
+}
+
+export async function setCoexistenceMode(
+  enabled: boolean,
+): Promise<import("./types").PortsConfig> {
+  return invoke("set_coexistence_mode", { enabled });
+}
+
+export async function checkServicePorts(
+  serviceId: string,
+): Promise<import("./types").PortCheckResult> {
+  return invoke("check_service_ports_cmd", { serviceId });
+}
+
+export async function applyNextFreePorts(
+  serviceId: string,
+): Promise<import("./types").PortsConfig> {
+  return invoke("apply_next_free_ports", { serviceId });
+}

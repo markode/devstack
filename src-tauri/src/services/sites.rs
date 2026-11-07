@@ -103,16 +103,8 @@ pub fn detect_site(site: &SiteRecord) -> SiteDetails {
     } else {
         (80u16, 443u16)
     };
-    let url = if http_port == 80 {
-        format!("http://{}", site.domain)
-    } else {
-        format!("http://{}:{http_port}", site.domain)
-    };
-    let https_url = if https_port == 443 {
-        format!("https://{}", site.domain)
-    } else {
-        format!("https://{}:{https_port}", site.domain)
-    };
+    let url = crate::services::ports::format_url("http", &site.domain, http_port);
+    let https_url = crate::services::ports::format_url("https", &site.domain, https_port);
 
     SiteDetails {
         site: updated,
@@ -139,16 +131,26 @@ pub fn apply_stack_ports(details: &mut SiteDetails, state: &AppState) {
     } else {
         (state.stack.http_port, state.stack.https_port)
     };
-    details.url = if http_port == 80 {
-        format!("http://{}", details.site.domain)
-    } else {
-        format!("http://{}:{http_port}", details.site.domain)
-    };
-    details.https_url = if https_port == 443 {
-        format!("https://{}", details.site.domain)
-    } else {
-        format!("https://{}:{https_port}", details.site.domain)
-    };
+    details.url = crate::services::ports::format_url("http", &details.site.domain, http_port);
+    details.https_url =
+        crate::services::ports::format_url("https", &details.site.domain, https_port);
+    if let Some(pma) = details.phpmyadmin_url.as_mut() {
+        // Rebuild host so non-default Nginx HTTPS ports appear in the URL.
+        if let Some(rest) = pma.strip_prefix("https://phpmyadmin.test") {
+            let base = crate::services::ports::format_url(
+                "https",
+                "phpmyadmin.test",
+                state.stack.https_port,
+            );
+            // rest begins with `/…` or `:port/…`
+            let path = if let Some(idx) = rest.find('/') {
+                &rest[idx..]
+            } else {
+                ""
+            };
+            *pma = format!("{base}{path}");
+        }
+    }
 }
 
 fn urlencoding_minimal(s: &str) -> String {

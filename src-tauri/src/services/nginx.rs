@@ -347,6 +347,7 @@ pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
             return reload_nginx(paths, state);
         }
     }
+    crate::services::ports::ensure_ports_free(&state.stack, "nginx")?;
 
     let versions = collect_php_versions(state);
     let mut runtimes = Vec::new();

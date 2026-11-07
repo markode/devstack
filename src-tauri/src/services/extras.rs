@@ -31,14 +31,16 @@ pub struct ManagedServiceStatus {
 }
 
 pub fn default_ports(id: &str) -> Vec<u16> {
+    let d = crate::config::StackPreferences::default();
     match id {
-        "mongodb" => vec![27017],
-        "postgresql" => vec![5432],
+        "mongodb" => vec![d.mongodb_port],
+        "postgresql" => vec![d.postgresql_port],
         "redis" => vec![6379],
         "mailpit" => vec![1025, 8025],
-        "mariadb" | "mysql" => vec![3306],
-        "nginx" => vec![80, 443],
-        "apache" => vec![8088, 8444],
+        "mariadb" => vec![d.mariadb_port],
+        "mysql" => vec![d.mysql_port],
+        "nginx" => vec![d.http_port, d.https_port],
+        "apache" => vec![d.apache_http_port, d.apache_https_port],
         _ => vec![],
     }
 }
@@ -52,17 +54,19 @@ fn port_open(port: u16) -> bool {
 }
 
 pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServiceStatus {
+    let mailpit_url =
+        crate::services::ports::format_url("https", "mailpit.test", state.stack.https_port);
     let (name, pid, ports, ui) = match id {
         "mongodb" => (
             "MongoDB",
             state.runtime.mongodb_pid,
-            vec![27017u16],
+            vec![state.stack.mongodb_port],
             None,
         ),
         "postgresql" => (
             "PostgreSQL",
             state.runtime.postgresql_pid,
-            vec![5432],
+            vec![state.stack.postgresql_port],
             None,
         ),
         "redis" => ("Redis", state.runtime.redis_pid, vec![6379], None),
@@ -70,14 +74,14 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
             "Mailpit",
             state.runtime.mailpit_pid,
             vec![1025, 8025],
-            Some("https://mailpit.test".into()),
+            Some(mailpit_url),
         ),
         "mariadb" => (
             "MariaDB",
             state.runtime.database_pid.filter(|_| {
                 state.runtime.database_engine.as_deref() == Some("mariadb")
             }),
-            vec![3306],
+            vec![state.stack.mariadb_port],
             None,
         ),
         "mysql" => (
@@ -85,7 +89,7 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
             state.runtime.database_pid.filter(|_| {
                 state.runtime.database_engine.as_deref() == Some("mysql")
             }),
-            vec![3306],
+            vec![state.stack.mysql_port],
             None,
         ),
         "nginx" => (
@@ -153,16 +157,24 @@ pub fn list_managed_services(paths: &Paths, state: &AppState) -> Vec<ManagedServ
     .map(|id| {
         if id == "phpmyadmin" {
             let version = latest_installed(state, id).map(|r| r.version.clone());
+            let url = crate::services::ports::format_url(
+                "https",
+                "phpmyadmin.test",
+                state.stack.https_port,
+            );
             ManagedServiceStatus {
                 id: id.into(),
                 name: "phpMyAdmin".into(),
                 running: state.runtime.nginx_pid.map(is_running).unwrap_or(false),
                 installed: version.is_some(),
                 version,
-                ports: vec![],
+                ports: vec![state.stack.https_port],
                 log_path: None,
-                ui_url: Some("https://phpmyadmin.test".into()),
-                notes: Some("Served by Nginx".into()),
+                ui_url: Some(url),
+                notes: Some(format!(
+                    "Served by Nginx on :{}",
+                    state.stack.https_port
+                )),
             }
         } else {
             service_status(paths, state, id)
@@ -172,6 +184,28 @@ pub fn list_managed_services(paths: &Paths, state: &AppState) -> Vec<ManagedServ
 }
 
 pub fn start_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<ManagedServiceStatus> {
+    // Skip conflict check only when *our* recorded PID is still alive
+    // (idempotent re-start). A foreign process on the same port must error.
+    let our_pid_alive = match id {
+        "nginx" => state.runtime.nginx_pid.map(is_running).unwrap_or(false),
+        "apache" => state.runtime.apache_pid.map(is_running).unwrap_or(false),
+        "mongodb" => state.runtime.mongodb_pid.map(is_running).unwrap_or(false),
+        "postgresql" => state.runtime.postgresql_pid.map(is_running).unwrap_or(false),
+        "redis" => state.runtime.redis_pid.map(is_running).unwrap_or(false),
+        "mailpit" => state.runtime.mailpit_pid.map(is_running).unwrap_or(false),
+        "mysql" => {
+            state.runtime.database_engine.as_deref() == Some("mysql")
+                && state.runtime.database_pid.map(is_running).unwrap_or(false)
+        }
+        "mariadb" => {
+            state.runtime.database_engine.as_deref() == Some("mariadb")
+                && state.runtime.database_pid.map(is_running).unwrap_or(false)
+        }
+        _ => false,
+    };
+    if !our_pid_alive {
+        crate::services::ports::ensure_ports_free(&state.stack, id)?;
+    }
     match id {
         "mongodb" => start_mongodb(paths, state)?,
         "postgresql" => start_postgresql(paths, state)?,
@@ -294,10 +328,11 @@ fn start_mongodb(paths: &Paths, state: &mut AppState) -> Result<()> {
     let dbpath = paths.databases.join("mongodb/data");
     fs::create_dir_all(&dbpath)?;
     let conf = paths.databases.join("mongodb/mongod.conf");
+    let port = state.stack.mongodb_port;
     fs::write(
         &conf,
         format!(
-            "storage:\n  dbPath: {}\nnet:\n  bindIp: 127.0.0.1\n  port: 27017\n",
+            "storage:\n  dbPath: {}\nnet:\n  bindIp: 127.0.0.1\n  port: {port}\n",
             dbpath.display()
         ),
     )?;
@@ -312,7 +347,7 @@ fn start_mongodb(paths: &Paths, state: &mut AppState) -> Result<()> {
     std::mem::forget(child);
     write_pid(&paths.pid_file("mongodb"), pid)?;
     state.runtime.mongodb_pid = Some(pid);
-    wait_port(27017, 40)?;
+    wait_port(port, 40)?;
     Ok(())
 }
 
@@ -350,8 +385,33 @@ fn start_postgresql(paths: &Paths, state: &mut AppState) -> Result<()> {
         let conf = data.join("postgresql.conf");
         if conf.exists() {
             let mut raw = fs::read_to_string(&conf)?;
-            raw.push_str("\nlisten_addresses = '127.0.0.1'\nport = 5432\n");
+            raw.push_str(&format!(
+                "\nlisten_addresses = '127.0.0.1'\nport = {}\n",
+                state.stack.postgresql_port
+            ));
             fs::write(&conf, raw)?;
+        }
+    } else {
+        // Keep port in sync with stack prefs on subsequent starts.
+        let conf = data.join("postgresql.conf");
+        if conf.exists() {
+            let raw = fs::read_to_string(&conf)?;
+            let port = state.stack.postgresql_port;
+            let updated = if raw.lines().any(|l| l.trim_start().starts_with("port")) {
+                raw.lines()
+                    .map(|l| {
+                        if l.trim_start().starts_with("port") {
+                            format!("port = {port}")
+                        } else {
+                            l.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                format!("{raw}\nport = {port}\n")
+            };
+            fs::write(&conf, updated)?;
         }
     }
     let log = paths.logs.join("postgresql.err");
@@ -382,7 +442,7 @@ fn start_postgresql(paths: &Paths, state: &mut AppState) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(200));
     }
-    wait_port(5432, 40)?;
+    wait_port(state.stack.postgresql_port, 40)?;
     Ok(())
 }
 

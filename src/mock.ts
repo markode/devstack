@@ -28,8 +28,90 @@ export const mockStackStatus: StackStatus = {
   httpsPort: 443,
   apacheHttpPort: 8088,
   apacheHttpsPort: 8444,
+  mysqlPort: 3306,
+  mariadbPort: 3306,
+  postgresqlPort: 5432,
+  mongodbPort: 27017,
+  phpFpmPort: 9000,
+  coexistenceMode: false,
   phpVersions: ["8.5.1"],
 };
+
+let mockPorts: import("./types").PortsConfig = {
+  coexistenceMode: false,
+  nginxHttp: 80,
+  nginxHttps: 443,
+  apacheHttp: 8088,
+  apacheHttps: 8444,
+  mysql: 3306,
+  mariadb: 3306,
+  postgresql: 5432,
+  mongodb: 27017,
+  phpFpm: 9000,
+  phpmyadmin: 443,
+};
+
+export function mockPortsConfig() {
+  return { ...mockPorts };
+}
+
+export function mockUpdatePortsConfig(config: import("./types").PortsConfig) {
+  mockPorts = { ...config, phpmyadmin: config.nginxHttps };
+  return { ...mockPorts };
+}
+
+export function mockSetCoexistenceMode(enabled: boolean) {
+  if (enabled) {
+    mockPorts = {
+      coexistenceMode: true,
+      nginxHttp: 8080,
+      nginxHttps: 8443,
+      apacheHttp: 8088,
+      apacheHttps: 8444,
+      mysql: 3307,
+      mariadb: 3308,
+      postgresql: 5433,
+      mongodb: 27018,
+      phpFpm: 9001,
+      phpmyadmin: 8443,
+    };
+  } else {
+    mockPorts = {
+      coexistenceMode: false,
+      nginxHttp: 80,
+      nginxHttps: 443,
+      apacheHttp: 8088,
+      apacheHttps: 8444,
+      mysql: 3306,
+      mariadb: 3306,
+      postgresql: 5432,
+      mongodb: 27017,
+      phpFpm: 9000,
+      phpmyadmin: 443,
+    };
+  }
+  return { ...mockPorts };
+}
+
+export function mockCheckServicePorts(serviceId: string) {
+  return {
+    serviceId,
+    ok: true,
+    conflicts: [],
+    message: null,
+    suggested: {},
+  };
+}
+
+export function mockApplyNextFreePorts(serviceId: string) {
+  if (serviceId === "nginx") {
+    mockPorts.nginxHttp = 8080;
+    mockPorts.nginxHttps = 8443;
+    mockPorts.phpmyadmin = 8443;
+    mockPorts.coexistenceMode = true;
+  }
+  return { ...mockPorts };
+}
 
 export const mockAppInfo: AppInfo = {
   name: "DevStack",

@@ -54,7 +54,42 @@ export interface StackStatus {
   httpsPort: number;
   apacheHttpPort: number;
   apacheHttpsPort: number;
+  mysqlPort: number;
+  mariadbPort: number;
+  postgresqlPort: number;
+  mongodbPort: number;
+  phpFpmPort: number;
+  coexistenceMode: boolean;
   phpVersions: string[];
+}
+
+export interface PortsConfig {
+  coexistenceMode: boolean;
+  nginxHttp: number;
+  nginxHttps: number;
+  apacheHttp: number;
+  apacheHttps: number;
+  mysql: number;
+  mariadb: number;
+  postgresql: number;
+  mongodb: number;
+  phpFpm: number;
+  phpmyadmin: number;
+}
+
+export interface PortOccupant {
+  port: number;
+  pid?: number | null;
+  processName?: string | null;
+  hint?: string | null;
+}
+
+export interface PortCheckResult {
+  serviceId: string;
+  ok: boolean;
+  conflicts: PortOccupant[];
+  message?: string | null;
+  suggested: Record<string, number>;
 }
 
 export interface AppInfo {

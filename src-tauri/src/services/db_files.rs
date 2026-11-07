@@ -241,10 +241,13 @@ fn list_postgres_databases(paths: &Paths, state: &AppState) -> Result<Vec<String
     let psql = find_bin(&root, &["psql", "psql.exe"])
         .ok_or_else(|| DevStackError::Message("psql not found".into()))?;
     let _ = paths;
+    let port = state.stack.postgresql_port.to_string();
     let out = Command::new(&psql)
         .args([
             "-h",
             "127.0.0.1",
+            "-p",
+            &port,
             "-U",
             "postgres",
             "-Atc",
@@ -437,10 +440,13 @@ fn export_postgres(
         0,
         None,
     );
+    let port = state.stack.postgresql_port.to_string();
     let mut child = Command::new(&pg_dump)
         .args([
             "-h",
             "127.0.0.1",
+            "-p",
+            &port,
             "-U",
             "postgres",
             "--no-owner",
@@ -485,10 +491,11 @@ fn export_mongo(
         0,
         None,
     );
+    let port = format!("--port={}", state.stack.mongodb_port);
     let mut child = Command::new(&mongodump)
         .args([
             "--host=127.0.0.1",
-            "--port=27017",
+            &port,
             &format!("--db={db_name}"),
             "--archive",
             "--gzip",
@@ -743,11 +750,14 @@ fn import_postgres(
         0,
         Some(total),
     );
+    let port = state.stack.postgresql_port.to_string();
     // Ensure DB exists
     let _ = Command::new(&psql)
         .args([
             "-h",
             "127.0.0.1",
+            "-p",
+            &port,
             "-U",
             "postgres",
             "-c",
@@ -756,7 +766,16 @@ fn import_postgres(
         .output();
 
     let mut child = Command::new(&psql)
-        .args(["-h", "127.0.0.1", "-U", "postgres", "-d", db_name])
+        .args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port,
+            "-U",
+            "postgres",
+            "-d",
+            db_name,
+        ])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -794,10 +813,11 @@ fn import_mongo(
         0,
         Some(total),
     );
+    let port = format!("--port={}", state.stack.mongodb_port);
     let status = Command::new(&mongorestore)
         .args([
             "--host=127.0.0.1",
-            "--port=27017",
+            &port,
             &format!("--nsInclude={db_name}.*"),
             "--gzip",
             &format!("--archive={}", archive.display()),
@@ -879,12 +899,12 @@ pub async fn post_import_url_rewrite(
 }
 
 fn site_https_url(state: &AppState, site: &SiteRecord) -> String {
-    let port = state.stack.https_port;
-    if port == 443 {
-        format!("https://{}", site.domain)
+    let port = if crate::services::httpd::site_uses_apache(site) {
+        state.stack.apache_https_port
     } else {
-        format!("https://{}:{port}", site.domain)
-    }
+        state.stack.https_port
+    };
+    crate::services::ports::format_url("https", &site.domain, port)
 }
 
 pub fn wp_search_replace_urls(

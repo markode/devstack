@@ -288,4 +288,31 @@ export async function importSiteDatabaseFile(
   return api.importSiteDatabaseFile(siteId, archivePath, search, replace);
 }
 
+export async function getPortsConfig() {
+  if (useMock()) return mock.mockPortsConfig();
+  return api.getPortsConfig();
+}
+
+export async function updatePortsConfig(
+  config: import("./types").PortsConfig,
+) {
+  if (useMock()) return mock.mockUpdatePortsConfig(config);
+  return api.updatePortsConfig(config);
+}
+
+export async function setCoexistenceMode(enabled: boolean) {
+  if (useMock()) return mock.mockSetCoexistenceMode(enabled);
+  return api.setCoexistenceMode(enabled);
+}
+
+export async function checkServicePorts(serviceId: string) {
+  if (useMock()) return mock.mockCheckServicePorts(serviceId);
+  return api.checkServicePorts(serviceId);
+}
+
+export async function applyNextFreePorts(serviceId: string) {
+  if (useMock()) return mock.mockApplyNextFreePorts(serviceId);
+  return api.applyNextFreePorts(serviceId);
+}
+
 export { useMock };

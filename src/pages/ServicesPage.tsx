@@ -2,8 +2,36 @@ import { useEffect, useState } from "react";
 import { Hero, VersionTable } from "../components/VersionTable";
 import { usePackageVersions } from "../hooks/usePackageVersions";
 import * as client from "../client";
-import type { ManagedServiceStatus, PackageInfo } from "../types";
+import type {
+  ManagedServiceStatus,
+  PackageInfo,
+  PortCheckResult,
+} from "../types";
 import { openInBrowser } from "../open";
+
+/** Parse `… |DEVSTACK_PORT_BUSY:{json}|` from a start error. */
+function parsePortBusy(message: string): PortCheckResult | null {
+  const marker = "|DEVSTACK_PORT_BUSY:";
+  const idx = message.indexOf(marker);
+  if (idx < 0) return null;
+  const jsonPart = message.slice(idx + marker.length).replace(/\|\s*$/, "");
+  try {
+    const raw = JSON.parse(jsonPart) as {
+      serviceId?: string;
+      suggested?: Record<string, number>;
+      conflicts?: PortCheckResult["conflicts"];
+    };
+    return {
+      serviceId: raw.serviceId ?? "",
+      ok: false,
+      conflicts: raw.conflicts ?? [],
+      message: message.slice(0, idx).trim(),
+      suggested: raw.suggested ?? {},
+    };
+  } catch {
+    return null;
+  }
+}
 
 const SERVICE_IDS = [
   "nginx",
@@ -24,6 +52,9 @@ export function ServicesPage() {
   const [logText, setLogText] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [portConflict, setPortConflict] = useState<PortCheckResult | null>(
+    null,
+  );
 
   const refresh = async () => {
     // Load independently so a services-status failure cannot leave Install
@@ -59,15 +90,52 @@ export function ServicesPage() {
   const toggle = async (svc: ManagedServiceStatus) => {
     setBusyId(svc.id);
     setError(null);
+    setPortConflict(null);
     try {
       if (svc.running) {
         await client.stopManagedService(svc.id);
       } else {
+        const check = await client.checkServicePorts(svc.id);
+        if (!check.ok) {
+          setPortConflict(check);
+          setError(check.message ?? `Port(s) for ${svc.name} are in use`);
+          return;
+        }
         await client.startManagedService(svc.id);
       }
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      const busy = parsePortBusy(msg);
+      if (busy) {
+        setPortConflict(busy);
+        setError(busy.message ?? msg);
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const useNextFreePort = async () => {
+    if (!portConflict?.serviceId) return;
+    setBusyId(portConflict.serviceId);
+    setError(null);
+    try {
+      await client.applyNextFreePorts(portConflict.serviceId);
+      setPortConflict(null);
+      await client.startManagedService(portConflict.serviceId);
+      await refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const busy = parsePortBusy(msg);
+      if (busy) {
+        setPortConflict(busy);
+        setError(busy.message ?? msg);
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusyId(null);
     }
@@ -90,7 +158,26 @@ export function ServicesPage() {
         color="#5856d6"
         glyph="Sv"
       />
-      {error ? <div className="error-banner">{error}</div> : null}
+      {error ? (
+        <div className="error-banner">
+          <div>{error}</div>
+          {portConflict && !portConflict.ok ? (
+            <div style={{ marginTop: 10 }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={!!busyId}
+                onClick={() => void useNextFreePort()}
+              >
+                Use next free port
+                {Object.keys(portConflict.suggested).length
+                  ? ` (${Object.values(portConflict.suggested).join(", ")})`
+                  : ""}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="section-head">
         <h2>Runtime status</h2>

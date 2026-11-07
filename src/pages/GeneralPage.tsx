@@ -1,6 +1,35 @@
 import { useEffect, useState } from "react";
 import * as client from "../client";
-import type { AppInfo, DatabaseFilesSettings, DbFileEntry } from "../types";
+import type {
+  AppInfo,
+  DatabaseFilesSettings,
+  DbFileEntry,
+  PortsConfig,
+} from "../types";
+
+const PORT_FIELDS: {
+  key: keyof PortsConfig;
+  label: string;
+  hint: string;
+}[] = [
+  { key: "nginxHttp", label: "Nginx HTTP", hint: "Default 80" },
+  { key: "nginxHttps", label: "Nginx HTTPS", hint: "Default 443 · phpMyAdmin" },
+  { key: "apacheHttp", label: "Apache HTTP", hint: "Default 8088" },
+  { key: "apacheHttps", label: "Apache HTTPS", hint: "Default 8444" },
+  { key: "mysql", label: "MySQL", hint: "Default 3306 · coexistence 3307" },
+  { key: "mariadb", label: "MariaDB", hint: "Default 3306 · coexistence 3308" },
+  {
+    key: "postgresql",
+    label: "PostgreSQL",
+    hint: "Default 5432 · coexistence 5433",
+  },
+  {
+    key: "mongodb",
+    label: "MongoDB",
+    hint: "Default 27017 · coexistence 27018",
+  },
+  { key: "phpFpm", label: "PHP-FPM base", hint: "Windows TCP base (9000)" },
+];
 
 export function GeneralPage() {
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -10,23 +39,26 @@ export function GeneralPage() {
   const [dbFolder, setDbFolder] = useState("");
   const [dbFiles, setDbFiles] = useState<DbFileEntry[]>([]);
   const [folderInput, setFolderInput] = useState("");
+  const [ports, setPorts] = useState<PortsConfig | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
   const refresh = async () => {
     try {
-      const [i, s, folder, files] = await Promise.all([
+      const [i, s, folder, files, p] = await Promise.all([
         client.getAppInfo(),
         client.getDbFilesSettings(),
         client.getDatabasesFolder(),
         client.listDatabaseFiles(),
+        client.getPortsConfig(),
       ]);
       setInfo(i);
       setDbSettings(s);
       setDbFolder(folder);
       setFolderInput(s.folder ?? "");
       setDbFiles(files);
+      setPorts(p);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -44,6 +76,39 @@ export function GeneralPage() {
       setDbSettings(s);
       setDbFolder(await client.getDatabasesFolder());
       setNote("Databases settings saved");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const savePorts = async (next: PortsConfig) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const p = await client.updatePortsConfig(next);
+      setPorts(p);
+      setNote("Ports saved — restart services to bind the new listeners");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleCoexistence = async () => {
+    if (!ports) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const p = await client.setCoexistenceMode(!ports.coexistenceMode);
+      setPorts(p);
+      setNote(
+        p.coexistenceMode
+          ? "Coexistence mode on (8080/8443, MySQL 3307, MariaDB 3308, …)"
+          : "Coexistence mode off — classic default ports restored",
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -115,6 +180,64 @@ export function GeneralPage() {
             </span>
           </label>
           <span className="muted">{client.useMock() ? "Mock" : "Live"}</span>
+        </div>
+      </div>
+
+      <div className="section-head" style={{ marginTop: 22 }}>
+        <h2>Ports</h2>
+        <p>
+          Run DevStack beside WAMP (Windows) or MAMP PRO (Mac). Non-default
+          ports appear in site URLs (<code>https://app.test:8443</code>);{" "}
+          <code>.test</code> hosts entries stay the same.
+        </p>
+      </div>
+      <div className="panel-card settings-list">
+        <div className="settings-row">
+          <label>
+            Coexistence mode
+            <span className="hint">
+              Web 8080/8443 · MySQL 3307 · MariaDB 3308 · Postgres 5433 · Mongo
+              27018
+            </span>
+          </label>
+          <button
+            type="button"
+            className={`toggle ${ports?.coexistenceMode ? "on" : ""}`}
+            disabled={busy || !ports}
+            onClick={() => void toggleCoexistence()}
+          />
+        </div>
+        {PORT_FIELDS.map((field) => (
+          <div className="settings-row" key={field.key}>
+            <label>
+              {field.label}
+              <span className="hint">{field.hint}</span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              style={{ width: 100 }}
+              disabled={!ports || busy}
+              value={ports ? Number(ports[field.key]) : ""}
+              onChange={(e) => {
+                if (!ports) return;
+                const n = Number(e.target.value);
+                if (!Number.isFinite(n)) return;
+                setPorts({ ...ports, [field.key]: n });
+              }}
+              onBlur={() => {
+                if (ports) void savePorts(ports);
+              }}
+            />
+          </div>
+        ))}
+        <div className="settings-row">
+          <label>
+            phpMyAdmin URL port
+            <span className="hint">Uses Nginx HTTPS (served by Nginx)</span>
+          </label>
+          <span className="muted">{ports?.phpmyadmin ?? "…"}</span>
         </div>
       </div>
 

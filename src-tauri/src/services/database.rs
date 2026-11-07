@@ -12,28 +12,6 @@ use crate::services::process::{
     find_bin, is_running, read_pid, spawn_logged, stop_pid, write_pid,
 };
 
-const MY_CNF: &str = r#"
-[mysqld]
-port=3306
-bind-address=127.0.0.1
-max_allowed_packet=1G
-innodb_buffer_pool_size=512M
-innodb_log_file_size=256M
-innodb_log_buffer_size=64M
-innodb_flush_log_at_trx_commit=2
-wait_timeout=28800
-interactive_timeout=28800
-net_read_timeout=600
-net_write_timeout=600
-max_connections=200
-skip_name_resolve=ON
-character-set-server=utf8mb4
-collation-server=utf8mb4_unicode_ci
-
-[client]
-port=3306
-default-character-set=utf8mb4
-"#;
 
 pub fn engine_install_dir(state: &AppState, engine: &str) -> Result<PathBuf> {
     let preferred = match engine {
@@ -50,15 +28,19 @@ pub fn engine_install_dir(state: &AppState, engine: &str) -> Result<PathBuf> {
         .ok_or_else(|| DevStackError::Message(format!("{engine} is not installed")))
 }
 
-pub fn write_db_config(paths: &Paths, engine: &str, datadir: &Path) -> Result<PathBuf> {
+pub fn write_db_config(
+    paths: &Paths,
+    engine: &str,
+    datadir: &Path,
+    port: u16,
+) -> Result<PathBuf> {
     let conf_dir = paths.databases.join(engine);
     fs::create_dir_all(&conf_dir)?;
     fs::create_dir_all(datadir)?;
     let conf = conf_dir.join("my.cnf");
-    let _ = MY_CNF;
     let body = format!(
         r#"[mysqld]
-port=3306
+port={port}
 bind-address=127.0.0.1
 datadir={datadir}
 socket={sock}
@@ -77,7 +59,7 @@ character-set-server=utf8mb4
 collation-server=utf8mb4_unicode_ci
 
 [client]
-port=3306
+port={port}
 socket={sock}
 default-character-set=utf8mb4
 "#,
@@ -180,10 +162,12 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
         }
         let _ = stop_database(paths, state);
     }
+    crate::services::ports::ensure_ports_free(&state.stack, engine)?;
 
     let root = engine_install_dir(state, engine)?;
     let datadir = paths.databases.join(engine).join("data");
-    let conf = write_db_config(paths, engine, &datadir)?;
+    let port = crate::services::ports::engine_db_port(&state.stack, engine);
+    let conf = write_db_config(paths, engine, &datadir, port)?;
     install_db_if_needed(&root, &datadir, &conf)?;
 
     let mysqld = server_bin(&root)?;

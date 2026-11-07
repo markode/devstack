@@ -305,14 +305,14 @@ pub async fn create_wordpress_site(
 
     // WordPress defaults to Apache — use Apache HTTPS port in siteurl.
     let https_port = state.stack.apache_https_port;
-    let public_url = if https_port == 443 {
-        format!("https://{domain}")
-    } else {
-        format!("https://{domain}:{https_port}")
-    };
+    let public_url =
+        crate::services::ports::format_url("https", &domain, https_port);
+    let db_host = crate::services::ports::mysql_db_host(
+        crate::services::ports::engine_db_port(&state.stack, &engine),
+    );
 
     emit(progress, job_id, "config", "Writing wp-config.php…", 0, None);
-    // Use TCP 127.0.0.1 — custom sockets confuse WP's host:port parsing
+    // Use TCP 127.0.0.1[:port] — custom sockets confuse WP's host:port parsing
     run_wp_cli(
         &php_rt.php_bin,
         &wp_cli,
@@ -323,7 +323,7 @@ pub async fn create_wordpress_site(
             &format!("--dbname={db_name}"),
             &format!("--dbuser={db_user}"),
             &format!("--dbpass={db_pass}"),
-            "--dbhost=127.0.0.1",
+            &format!("--dbhost={db_host}"),
             "--dbcharset=utf8mb4",
             "--skip-check",
             "--force",
@@ -452,6 +452,7 @@ pub fn update_wp_config_credentials(
     db_name: &str,
     db_user: &str,
     db_pass: &str,
+    db_host: &str,
     _sock: &Path,
 ) -> Result<()> {
     let cfg = expand_home(site_path).join("wp-config.php");
@@ -460,7 +461,7 @@ pub fn update_wp_config_credentials(
         ("DB_NAME", db_name),
         ("DB_USER", db_user),
         ("DB_PASSWORD", db_pass),
-        ("DB_HOST", "127.0.0.1"),
+        ("DB_HOST", db_host),
     ] {
         let re = regex::Regex::new(&format!(
             r#"define\(\s*['\"]{key}['\"]\s*,\s*['\"][^'\"]*['\"]\s*\)"#
