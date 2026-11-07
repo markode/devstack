@@ -35,14 +35,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stack = args.iter().any(|a| a == "--stack");
     let services = args.iter().any(|a| a == "--services");
     let wordpress = args.iter().any(|a| a == "--wordpress");
+    let apache = args.iter().any(|a| a == "--apache");
     let skip_mariadb = args.iter().any(|a| a == "--skip-mariadb");
     // Default: services smoke when no mode flag given
     let services = services
-        || (!install_node && !stack && !wordpress && !args.iter().any(|a| a == "--help"));
+        || (!install_node
+            && !stack
+            && !wordpress
+            && !apache
+            && !args.iter().any(|a| a == "--help"));
 
     if args.iter().any(|a| a == "--help") {
         eprintln!(
-            "devstack_smoke [--stack] [--wordpress] [--services] [--skip-mariadb] [--install-node]"
+            "devstack_smoke [--stack] [--wordpress] [--apache] [--services] [--skip-mariadb] [--install-node]"
         );
         return Ok(());
     }
@@ -89,6 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if wordpress {
         run_wordpress_smoke(&ctx, skip_mariadb).await?;
+    }
+
+    if apache {
+        run_apache_wordpress_smoke(&ctx, skip_mariadb).await?;
     }
 
     if services {
@@ -141,19 +150,98 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
     }
 
     let _ = install_pkg(ctx, "phpmyadmin", "5.2.3").await;
+    let _ = ensure_apache(ctx).await;
 
     {
         let mut state = ctx.state.lock().await;
         let _ = stop_stack(&ctx.paths, &mut state);
         apply_stack(&ctx.paths, &mut state)?;
         println!(
-            "stack up — nginx={} db={:?} ports={}/{}",
+            "stack up — nginx={} apache={} db={:?} nginx={}/{} apache={}/{}",
             state.runtime.nginx_pid.is_some(),
+            state.runtime.apache_pid.is_some(),
             state.runtime.database_engine,
             state.stack.http_port,
-            state.stack.https_port
+            state.stack.https_port,
+            state.stack.apache_http_port,
+            state.stack.apache_https_port
         );
     }
+    Ok(())
+}
+
+/// Install Apache via PackageProvider, or register a system apache2/httpd on Linux.
+async fn ensure_apache(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    {
+        let state = ctx.state.lock().await;
+        if state.installed.contains_key("apache") {
+            println!("[apache] already installed");
+            return Ok(());
+        }
+    }
+
+    // Prefer PackageProvider (Lounge on Windows; manifest on macOS/Linux).
+    match pick_version(ctx, "apache", |_| true).await {
+        Ok(ver) => {
+            println!("Installing Apache {ver}…");
+            if install_pkg(ctx, "apache", &ver).await.is_ok() {
+                return Ok(());
+            }
+        }
+        Err(e) => println!("[apache] package list unavailable ({e}) — trying system httpd"),
+    }
+
+    if cfg!(target_os = "linux") {
+        register_system_apache(ctx).await?;
+        return Ok(());
+    }
+
+    Err("Apache is required but not installable on this OS (set DEVSTACK_APACHE_MANIFEST_URL)".into())
+}
+
+async fn register_system_apache(
+    ctx: &DevStackCtx,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bin = which::which("httpd")
+        .or_else(|_| which::which("apache2"))
+        .or_else(|_| {
+            println!("[apache] apt-get install apache2…");
+            let _ = Command::new("sudo")
+                .args(["-n", "apt-get", "install", "-y", "apache2"])
+                .status();
+            which::which("apache2")
+        })?;
+    // Stop the distro service so DevStack owns the ports/config.
+    let _ = Command::new("sudo")
+        .args(["-n", "systemctl", "stop", "apache2"])
+        .status();
+    let _ = Command::new("sudo")
+        .args(["-n", "systemctl", "disable", "apache2"])
+        .status();
+
+    let root = bin
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| std::path::Path::new("/usr"))
+        .to_path_buf();
+    let mut state = ctx.state.lock().await;
+    let record = devstack_lib::config::InstalledRecord {
+        version: "system".into(),
+        channel: Some("system".into()),
+        path: root.clone(),
+        installed_at: devstack_lib::packages::now_iso(),
+    };
+    devstack_lib::config::mark_installed(&mut state, "apache", record)?;
+    state.stack.apache_version = Some("system".into());
+    // Smoke uses high ports so we don't need root for Listen.
+    state.stack.apache_http_port = 8088;
+    state.stack.apache_https_port = 8444;
+    devstack_lib::config::save_state(&ctx.paths.state_file, &state)?;
+    println!(
+        "[apache] registered system binary {} (root {})",
+        bin.display(),
+        root.display()
+    );
     Ok(())
 }
 
@@ -324,10 +412,16 @@ async fn run_wordpress_smoke(
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
+    // WordPress defaults to Apache — probe the Apache HTTPS port.
+    let https_port = {
+        let state = ctx.state.lock().await;
+        state.stack.apache_https_port
+    };
+
     // WordPress home should mention the site title / WordPress
-    http_expect("demo.test", 8443, "Demo Blog")?;
+    http_expect("demo.test", https_port, "Demo Blog")?;
     // After search-replace, clone should not still advertise the old domain as canonical
-    let clone_body = http_get("clone.test", 8443)?;
+    let clone_body = http_get("clone.test", https_port)?;
     if !clone_body.contains("clone.test") && !clone_body.to_lowercase().contains("wordpress") {
         return Err(format!("clone body unexpected: {clone_body}").into());
     }
@@ -335,7 +429,165 @@ async fn run_wordpress_smoke(
         eprintln!("warning: clone HTML still references demo.test (may be in content)");
     }
     // homeurl option check via wp-cli if possible
-    println!("SMOKE PASS: WordPress demo.test + clone.test over HTTPS");
+    println!("SMOKE PASS: WordPress demo.test + clone.test over HTTPS (Apache :{https_port})");
+    Ok(())
+}
+
+async fn run_apache_wordpress_smoke(
+    ctx: &DevStackCtx,
+    skip_mariadb: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Apache WordPress pretty-permalinks smoke ===");
+    ensure_stack(ctx, skip_mariadb).await?;
+    ensure_apache(ctx).await?;
+
+    {
+        let mut state = ctx.state.lock().await;
+        state.stack.apache_http_port = 8088;
+        state.stack.apache_https_port = 8444;
+        apply_stack(&ctx.paths, &mut state)?;
+    }
+
+    let progress = noop_job_progress();
+    let created = {
+        let mut state = ctx.state.lock().await;
+        let php_ver = state
+            .installed
+            .get("php")
+            .and_then(|v| v.first())
+            .map(|r| r.version.clone())
+            .unwrap_or_else(|| "8.3".into());
+        create_wordpress_site(
+            &ctx.paths,
+            &mut state,
+            CreateWordPressRequest {
+                name: "apache-wp".into(),
+                domain: Some("apache-wp.test".into()),
+                path: Some(
+                    ctx.paths
+                        .root
+                        .join("sites/apache-wp")
+                        .display()
+                        .to_string(),
+                ),
+                php_version: Some(php_ver),
+                database_engine: Some("mariadb".into()),
+                locale: Some("en_US".into()),
+                admin_user: Some("admin".into()),
+                site_title: Some("Apache Permalinks".into()),
+            },
+            &progress,
+            "apache-wp",
+        )
+        .await?
+    };
+
+    if created.site.web_server.as_deref() != Some("apache") {
+        return Err(format!(
+            "expected web_server=apache, got {:?}",
+            created.site.web_server
+        )
+        .into());
+    }
+
+    // Create a published post with a known slug for pretty-permalink probing.
+    {
+        let state = ctx.state.lock().await;
+        let php_ver = created
+            .site
+            .php_version
+            .clone()
+            .unwrap_or_else(|| "8.3".into());
+        let php = state
+            .installed
+            .get("php")
+            .and_then(|list| {
+                list.iter()
+                    .find(|r| r.version == php_ver || r.channel.as_deref() == Some(php_ver.as_str()))
+                    .or_else(|| list.first())
+            })
+            .ok_or("php not installed")?;
+        let php_bin = php.path.join("bin/php");
+        let php_bin = if php_bin.exists() {
+            php_bin
+        } else {
+            which::which("php")?
+        };
+        let wp_cli = ctx.paths.root.join("tools/wp-cli.phar");
+        let abs = created.site.path.clone();
+        let status = Command::new(&php_bin)
+            .args([
+                wp_cli.to_str().unwrap(),
+                "post",
+                "create",
+                "--post_title=Pretty Permalink Probe",
+                "--post_name=pretty-permalink-probe",
+                "--post_status=publish",
+                "--porcelain",
+            ])
+            .current_dir(&abs)
+            .status()?;
+        if !status.success() {
+            return Err("wp post create failed".into());
+        }
+        let _ = Command::new(&php_bin)
+            .args([
+                wp_cli.to_str().unwrap(),
+                "rewrite",
+                "flush",
+                "--hard",
+            ])
+            .current_dir(&abs)
+            .status();
+    }
+
+    let _ = Command::new("sudo")
+        .args([
+            "-n",
+            &ctx.paths.helper.join("devstack-helper.sh").to_string_lossy(),
+            "hosts-sync",
+            "apache-wp.test",
+        ])
+        .status();
+
+    {
+        let mut state = ctx.state.lock().await;
+        apply_stack(&ctx.paths, &mut state)?;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let https_port = {
+        let state = ctx.state.lock().await;
+        state.stack.apache_https_port
+    };
+
+    http_expect("apache-wp.test", https_port, "Apache Permalinks")?;
+
+    // Pretty permalink must not 404 when AllowOverride + mod_rewrite are on.
+    let permalink = http_get_path("apache-wp.test", https_port, "/pretty-permalink-probe/")?;
+    if permalink.to_lowercase().contains("not found")
+        || permalink.to_lowercase().contains("404")
+            && !permalink.to_lowercase().contains("pretty permalink probe")
+    {
+        return Err(format!("pretty permalink 404: {permalink}").into());
+    }
+    if !permalink.to_lowercase().contains("pretty permalink probe")
+        && !permalink.to_lowercase().contains("wordpress")
+    {
+        return Err(format!("pretty permalink body unexpected: {permalink}").into());
+    }
+
+    // Confirm .htaccess exists (wp rewrite --hard)
+    let htaccess = std::path::PathBuf::from(&created.site.path).join(".htaccess");
+    if !htaccess.exists() {
+        eprintln!("warning: .htaccess missing at {}", htaccess.display());
+    } else {
+        println!(".htaccess present ({} bytes)", std::fs::metadata(&htaccess)?.len());
+    }
+
+    println!(
+        "SMOKE PASS: Apache WordPress pretty permalinks on https://apache-wp.test:{https_port}"
+    );
     Ok(())
 }
 
@@ -497,8 +749,24 @@ fn http_expect(host: &str, port: u16, needle: &str) -> Result<(), Box<dyn std::e
 }
 
 fn http_get(host: &str, port: u16) -> Result<String, Box<dyn std::error::Error>> {
-    let url = format!("https://{host}:{port}/");
-    let out = format!("/tmp/devstack-smoke-{host}.html");
+    http_get_path(host, port, "/")
+}
+
+fn http_get_path(
+    host: &str,
+    port: u16,
+    path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let url = format!("https://{host}:{port}{path}");
+    let slug = path.trim_matches('/').replace('/', "-");
+    let out = format!(
+        "/tmp/devstack-smoke-{host}{}.html",
+        if slug.is_empty() {
+            String::new()
+        } else {
+            format!("-{slug}")
+        }
+    );
     let status = Command::new("curl")
         .args([
             "-k",
@@ -515,9 +783,9 @@ fn http_get(host: &str, port: u16) -> Result<String, Box<dyn std::error::Error>>
         .output()?;
     let code = String::from_utf8_lossy(&status.stdout).trim().to_string();
     let body = std::fs::read_to_string(&out).unwrap_or_default();
-    println!("HTTP {code} for {host}");
+    println!("HTTP {code} for {url}");
     if code != "200" {
-        return Err(format!("HTTP {code} for {host}: {body}").into());
+        return Err(format!("HTTP {code} for {url}: {body}").into());
     }
     Ok(body)
 }

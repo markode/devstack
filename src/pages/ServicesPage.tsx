@@ -6,6 +6,7 @@ import type { ManagedServiceStatus, PackageInfo } from "../types";
 
 const SERVICE_IDS = [
   "nginx",
+  "apache",
   "phpmyadmin",
   "mysql",
   "mariadb",

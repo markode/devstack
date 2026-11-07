@@ -46,11 +46,14 @@ export interface ProgressEvent {
 
 export interface StackStatus {
   nginx: boolean;
+  apache: boolean;
   dns: boolean;
   database: boolean;
   databaseEngine?: string | null;
   httpPort: number;
   httpsPort: number;
+  apacheHttpPort: number;
+  apacheHttpsPort: number;
   phpVersions: string[];
 }
 
@@ -72,6 +75,8 @@ export interface SiteRecord {
   phpVersion?: string | null;
   nodeVersion?: string | null;
   https: boolean;
+  /** `"nginx"` | `"apache"` — which front-end serves this site. */
+  webServer?: string | null;
   framework?: string | null;
   databaseEngine?: string | null;
   databaseName?: string | null;

@@ -1,4 +1,4 @@
-//! Orchestrate DNS + TLS + database + PHP + Nginx for the whole stack.
+//! Orchestrate DNS + TLS + database + PHP + Nginx/Apache for the whole stack.
 
 use serde::Serialize;
 
@@ -6,6 +6,7 @@ use crate::config::{save_state, AppState, Paths};
 use crate::error::Result;
 use crate::services::database::{configure_phpmyadmin, start_database, stop_database};
 use crate::services::dns::{start_dns, stop_dns, sync_hosts};
+use crate::services::httpd::{reload_apache, start_apache, stop_apache};
 use crate::services::nginx::{reload_nginx, start_nginx, stop_nginx};
 use crate::services::php_runtime::register_system_php;
 use crate::services::process::is_running;
@@ -16,11 +17,14 @@ use crate::services::tls::{ensure_root_ca, trust_ca_via_helper};
 #[serde(rename_all = "camelCase")]
 pub struct StackStatus {
     pub nginx: bool,
+    pub apache: bool,
     pub dns: bool,
     pub database: bool,
     pub database_engine: Option<String>,
     pub http_port: u16,
     pub https_port: u16,
+    pub apache_http_port: u16,
+    pub apache_https_port: u16,
     pub php_versions: Vec<String>,
 }
 
@@ -29,6 +33,11 @@ pub fn stack_status(state: &AppState) -> StackStatus {
         nginx: state
             .runtime
             .nginx_pid
+            .map(is_running)
+            .unwrap_or(false),
+        apache: state
+            .runtime
+            .apache_pid
             .map(is_running)
             .unwrap_or(false),
         dns: state.runtime.dns_pid.map(is_running).unwrap_or(false),
@@ -40,6 +49,8 @@ pub fn stack_status(state: &AppState) -> StackStatus {
         database_engine: state.runtime.database_engine.clone(),
         http_port: state.stack.http_port,
         https_port: state.stack.https_port,
+        apache_http_port: state.stack.apache_http_port,
+        apache_https_port: state.stack.apache_https_port,
         php_versions: state.runtime.php_pids.keys().cloned().collect(),
     }
 }
@@ -50,37 +61,29 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     let _ = trust_ca_via_helper(paths);
     let _ = sync_hosts(paths, state);
 
-    // Prefer high ports when unprivileged bind likely fails
-    if state.stack.http_port == 80 {
-        // keep 80/443; start_nginx will fail loudly — smoke can set 8080/8443
-    }
-
-    // DNS on 5353 (macOS resolver) — hosts file covers Linux/Windows
     let _ = start_dns(paths, state, 5353);
 
-    let engine = state
-        .active_database
-        .clone()
-        .or_else(|| {
-            if state.installed.contains_key("mariadb") {
-                Some("mariadb".into())
-            } else if state.installed.contains_key("mysql") {
-                Some("mysql".into())
-            } else {
-                None
-            }
-        });
+    let engine = state.active_database.clone().or_else(|| {
+        if state.installed.contains_key("mariadb") {
+            Some("mariadb".into())
+        } else if state.installed.contains_key("mysql") {
+            Some("mysql".into())
+        } else {
+            None
+        }
+    });
     if let Some(engine) = engine {
         start_database(paths, state, &engine)?;
         let _ = configure_phpmyadmin(paths, state);
     }
 
-    // Ensure at least system PHP is registered on Linux smoke hosts
     if !state.installed.contains_key("php") {
         let _ = register_system_php(state, paths);
     }
 
-    start_nginx(paths, state)?;
+    // Both front-ends can run together on different ports (see docs/apache.md).
+    let _ = start_nginx(paths, state);
+    let _ = start_apache(paths, state);
     save_state(&paths.state_file, state)?;
     Ok(stack_status(state))
 }
@@ -91,6 +94,7 @@ pub fn start_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
 
 pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     let _ = stop_nginx(paths, state);
+    let _ = stop_apache(paths, state);
     let _ = stop_database(paths, state);
     let _ = stop_dns(paths, state);
     for version in state.runtime.php_pids.keys().cloned().collect::<Vec<_>>() {
@@ -103,7 +107,8 @@ pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
 pub fn reload_sites(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     refresh_site_metadata(state);
     let _ = sync_hosts(paths, state);
-    reload_nginx(paths, state)?;
+    let _ = reload_nginx(paths, state);
+    let _ = reload_apache(paths, state);
     save_state(&paths.state_file, state)?;
     Ok(stack_status(state))
 }

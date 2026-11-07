@@ -83,6 +83,7 @@ export async function updateSiteEnvironment(
     phpVersion?: string | null;
     nodeVersion?: string | null;
     https?: boolean;
+    webServer?: string | null;
   },
 ): Promise<SiteRecord> {
   if (useMock()) {
@@ -90,6 +91,7 @@ export async function updateSiteEnvironment(
       phpVersion: patch.phpVersion,
       nodeVersion: patch.nodeVersion,
       https: patch.https,
+      webServer: patch.webServer,
     });
   }
   return api.updateSiteEnvironment(siteId, patch);
@@ -114,12 +116,24 @@ export async function getStackStatus(): Promise<StackStatus> {
 }
 
 export async function startDevStack(): Promise<StackStatus> {
-  if (useMock()) return { ...mock.mockStackStatus, nginx: true, database: true };
+  if (useMock())
+    return {
+      ...mock.mockStackStatus,
+      nginx: true,
+      apache: true,
+      database: true,
+    };
   return api.startDevStack();
 }
 
 export async function stopDevStack(): Promise<StackStatus> {
-  if (useMock()) return { ...mock.mockStackStatus, nginx: false, database: false };
+  if (useMock())
+    return {
+      ...mock.mockStackStatus,
+      nginx: false,
+      apache: false,
+      database: false,
+    };
   return api.stopDevStack();
 }
 

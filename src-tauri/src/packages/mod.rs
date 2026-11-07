@@ -1,5 +1,6 @@
 //! Generic package providers (PHP, Node, databases, phpMyAdmin, …).
 
+mod apache;
 mod mailpit;
 mod mariadb;
 mod mongodb;
@@ -21,6 +22,7 @@ use crate::config::{AppState, InstalledRecord, Paths};
 use crate::downloads::{http_client, ProgressFn};
 use crate::error::{DevStackError, Result};
 
+pub use apache::ApacheProvider;
 pub use mailpit::MailpitProvider;
 pub use mariadb::MariaDbProvider;
 pub use mongodb::MongoDbProvider;
@@ -104,6 +106,7 @@ impl PackageRegistry {
             Arc::new(PhpProvider::new(client.clone())),
             Arc::new(NodeProvider::new(client.clone())),
             Arc::new(NginxProvider::new(client.clone())),
+            Arc::new(ApacheProvider::new(client.clone())),
             Arc::new(PhpMyAdminProvider::new(client.clone())),
             Arc::new(MySqlProvider::new(client.clone())),
             Arc::new(MariaDbProvider::new(client.clone())),

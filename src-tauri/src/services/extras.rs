@@ -38,6 +38,7 @@ pub fn default_ports(id: &str) -> Vec<u16> {
         "mailpit" => vec![1025, 8025],
         "mariadb" | "mysql" => vec![3306],
         "nginx" => vec![80, 443],
+        "apache" => vec![8088, 8444],
         _ => vec![],
     }
 }
@@ -93,13 +94,22 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
             vec![state.stack.http_port, state.stack.https_port],
             None,
         ),
+        "apache" => (
+            "Apache",
+            state.runtime.apache_pid,
+            vec![
+                state.stack.apache_http_port,
+                state.stack.apache_https_port,
+            ],
+            None,
+        ),
         other => (other, None, default_ports(other), None),
     };
 
     let running = pid.map(is_running).unwrap_or(false)
         || ports.iter().any(|p| port_open(*p));
     let installed = state.installed.contains_key(id)
-        || matches!(id, "nginx" | "mariadb" | "mysql");
+        || matches!(id, "nginx" | "apache" | "mariadb" | "mysql");
     let version = latest_installed(state, id).map(|r| r.version.clone());
     let log_path = Some(paths.logs.join(format!("{id}.err")).display().to_string());
 
@@ -115,6 +125,13 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
         notes: match id {
             "mailpit" => Some("SMTP :1025 · UI :8025 / mailpit.test".into()),
             "redis" => Some("Use as PHP session / cache backend".into()),
+            "apache" => Some(format!(
+                "HTTP :{} · HTTPS :{} (alongside Nginx :{}/:{})",
+                state.stack.apache_http_port,
+                state.stack.apache_https_port,
+                state.stack.http_port,
+                state.stack.https_port
+            )),
             _ => None,
         },
     }
@@ -123,6 +140,7 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
 pub fn list_managed_services(paths: &Paths, state: &AppState) -> Vec<ManagedServiceStatus> {
     [
         "nginx",
+        "apache",
         "mariadb",
         "mysql",
         "mongodb",
@@ -163,6 +181,9 @@ pub fn start_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Ma
         "mysql" => crate::services::database::start_database(paths, state, "mysql")?,
         "nginx" => {
             crate::services::nginx::start_nginx(paths, state)?;
+        }
+        "apache" => {
+            crate::services::httpd::start_apache(paths, state)?;
         }
         _ => {
             return Err(DevStackError::Message(format!(
@@ -215,6 +236,7 @@ pub fn stop_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Man
         }
         "mariadb" | "mysql" => crate::services::database::stop_database(paths, state)?,
         "nginx" => crate::services::nginx::stop_nginx(paths, state)?,
+        "apache" => crate::services::httpd::stop_apache(paths, state)?,
         _ => {
             return Err(DevStackError::Message(format!(
                 "stop not supported for {id}"

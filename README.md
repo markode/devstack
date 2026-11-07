@@ -41,6 +41,9 @@ cd src-tauri && DEVSTACK_DATA_DIR=/tmp/devstack-smoke cargo run --bin devstack_s
 # Milestone 3: one-click WP → template → duplicate over HTTPS
 cd src-tauri && DEVSTACK_RESET_SITES=1 DEVSTACK_DATA_DIR=/tmp/devstack-smoke \
   cargo run --bin devstack_smoke -- --wordpress
+# Apache: WordPress pretty permalinks on :8444
+cd src-tauri && DEVSTACK_RESET_SITES=1 DEVSTACK_DATA_DIR=/tmp/devstack-apache \
+  cargo run --bin devstack_smoke -- --apache
 # Milestone 4: Postgres + MongoDB + Redis + Mailpit
 cd src-tauri && DEVSTACK_DATA_DIR=/tmp/devstack-smoke \
   cargo run --bin devstack_smoke -- --services
@@ -55,6 +58,7 @@ Every runtime/service implements `PackageProvider` (list → download → SHA256
 | `php` | Windows NTS x64 JSON; macOS/Linux pluggable static manifest | Yes |
 | `node` | nodejs.org `index.json` + `SHASUMS256.txt` | Yes |
 | `nginx` | Windows zip / Linux noble `.deb` from nginx.org; macOS via `DEVSTACK_NGINX_MANIFEST_URL` | Yes |
+| `apache` | Windows Apache Lounge VS17 + SHA256; macOS/Linux via `DEVSTACK_APACHE_MANIFEST_URL` | Yes |
 | `phpmyadmin` | phpmyadmin.net + `.sha256` | Yes |
 | `mysql` | Community archives (CDN) | Yes |
 | `mariadb` | downloads.mariadb.org REST + binary tarball/zip | Yes |
@@ -65,7 +69,9 @@ Every runtime/service implements `PackageProvider` (list → download → SHA256
 
 ### Stack runtime (milestone 2)
 
-- **One Nginx** serves all sites: `client_max_body_size 0`, long FastCGI timeouts
+- **Nginx** serves Nginx-backed sites: `client_max_body_size 0`, long FastCGI timeouts
+- **Apache httpd** (optional second front-end) on **:8088 / :8444** — full `.htaccess` / `mod_rewrite`, PHP via `proxy_fcgi`, `LimitRequestBody 0`; see `docs/apache.md`
+- Per-site **Apache or Nginx** choice (WordPress defaults to Apache)
 - **PHP-FPM** pool per PHP version (macOS/Linux); **php-cgi** workers on Windows
 - **`.test` domains** via privileged helper (`hosts-sync` / macOS `/etc/resolver`) + tiny DNS daemon
 - **Local CA** + per-site certs; HTTPS toggle per site
@@ -90,14 +96,15 @@ Every runtime/service implements `PackageProvider` (list → download → SHA256
 
 Privileged operations are isolated in `helper/devstack-helper.sh` (sudo/pkexec only for hosts/resolver/CA trust).
 
-### PHP / Nginx manifests (macOS)
+### PHP / Nginx / Apache manifests (macOS)
 
 ```bash
 export DEVSTACK_PHP_MANIFEST_URL="https://example.com/php-manifest.json"
 export DEVSTACK_NGINX_MANIFEST_URL="https://example.com/nginx-manifest.json"
+export DEVSTACK_APACHE_MANIFEST_URL="https://example.com/apache-manifest.json"
 ```
 
-See `resources/php-manifest.example.json`.
+See `resources/php-manifest.example.json` and `resources/apache-manifest.example.json`. Windows Apache installs from Apache Lounge without a manifest.
 
 ### Generated `php.ini`
 

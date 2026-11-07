@@ -91,6 +91,7 @@ export async function updateSiteEnvironment(
     phpVersion?: string | null;
     nodeVersion?: string | null;
     https?: boolean;
+    webServer?: string | null;
   },
 ): Promise<SiteRecord> {
   return invoke<SiteRecord>("update_site_environment", {
@@ -98,6 +99,7 @@ export async function updateSiteEnvironment(
     phpVersion: patch.phpVersion ?? null,
     nodeVersion: patch.nodeVersion ?? null,
     https: patch.https ?? null,
+    webServer: patch.webServer ?? null,
   });
 }
 

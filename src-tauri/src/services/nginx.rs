@@ -59,6 +59,9 @@ pub fn render_stack(
     let https_port = state.stack.https_port;
 
     for site in &state.sites {
+        if crate::services::httpd::site_uses_apache(site) {
+            continue;
+        }
         write_site_conf(
             paths,
             state,

@@ -77,17 +77,20 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       phpVersion?: string | null;
       nodeVersion?: string | null;
       https?: boolean;
+      webServer?: string | null;
     },
   ) => {
     await client.updateSiteEnvironment(siteId, update);
     await refresh();
   };
 
+  const stackRunning = Boolean(stack?.nginx || stack?.apache);
+
   const toggleStack = async () => {
     setBusy(true);
     setError(null);
     try {
-      if (stack?.nginx) {
+      if (stackRunning) {
         setStack(await client.stopDevStack());
       } else {
         setStack(await client.startDevStack());
@@ -191,7 +194,9 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
         </div>
         <div className="sites-toolbar-actions">
           <span className="muted" style={{ fontSize: 12 }}>
-            {stack?.nginx ? "Stack running" : "Stack stopped"}
+            {stackRunning ? "Stack running" : "Stack stopped"}
+            {stack?.nginx ? " · Nginx" : ""}
+            {stack?.apache ? " · Apache" : ""}
             {stack?.databaseEngine ? ` · ${stack.databaseEngine}` : ""}
           </span>
           <button
@@ -216,7 +221,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
             disabled={busy}
             onClick={() => void toggleStack()}
           >
-            {stack?.nginx ? "Stop stack" : "Start stack"}
+            {stackRunning ? "Stop stack" : "Start stack"}
           </button>
         </div>
       </div>
@@ -252,6 +257,9 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
             <div className="site-tile-domain">{d.site.domain}</div>
             <div className="site-tile-meta">
               <span>PHP {d.site.phpVersion ?? "—"}</span>
+              <span className="muted">
+                {(d.site.webServer ?? "nginx").toUpperCase()}
+              </span>
               <span className="muted">{d.framework}</span>
             </div>
           </button>
@@ -655,6 +663,7 @@ function SiteDetail({
     phpVersion?: string | null;
     nodeVersion?: string | null;
     https?: boolean;
+    webServer?: string | null;
   }) => void;
   onMarkTemplate: () => void;
   onDuplicate: () => void;
@@ -663,6 +672,7 @@ function SiteDetail({
 }) {
   const site = details.site;
   const [restorePath, setRestorePath] = useState("");
+  const webServer = (site.webServer ?? "nginx").toLowerCase();
 
   return (
     <div className="site-detail">
@@ -682,7 +692,7 @@ function SiteDetail({
               ) : null}
             </strong>
             <div className="muted" style={{ fontSize: 12 }}>
-              {site.domain}
+              {site.domain} · {webServer === "apache" ? "Apache" : "Nginx"}
             </div>
           </div>
         </div>
@@ -702,6 +712,17 @@ function SiteDetail({
         <div className="panel-card settings-list">
           <div className="settings-row" style={{ background: "#fafafa" }}>
             <label>Environment</label>
+          </div>
+          <div className="settings-row">
+            <label>Web server</label>
+            <select
+              className="native"
+              value={webServer === "apache" ? "apache" : "nginx"}
+              onChange={(e) => onPatch({ webServer: e.target.value })}
+            >
+              <option value="apache">Apache (full .htaccess)</option>
+              <option value="nginx">Nginx</option>
+            </select>
           </div>
           <div className="settings-row">
             <label>PHP</label>

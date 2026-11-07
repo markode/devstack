@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "version": "2.4.66",
+      "channel": "2.4",
+      "os": "macos",
+      "arch": "aarch64",
+      "url": "https://example.invalid/httpd-2.4.66-macos-aarch64.tar.gz",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "notes": "Example static/prebuilt httpd — replace with a real artifact URL"
+    },
+    {
+      "version": "2.4.66",
+      "channel": "2.4",
+      "os": "macos",
+      "arch": "x86_64",
+      "url": "https://example.invalid/httpd-2.4.66-macos-x86_64.tar.gz",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "notes": "Example static/prebuilt httpd — replace with a real artifact URL"
+    },
+    {
+      "version": "2.4.66",
+      "channel": "2.4",
+      "os": "linux",
+      "arch": "x86_64",
+      "url": "https://example.invalid/httpd-2.4.66-linux-x86_64.tar.gz",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "notes": "Example entry for Linux CI / local testing"
+    }
+  ]
+}
