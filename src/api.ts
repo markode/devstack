@@ -99,11 +99,19 @@ export async function createSite(
   name: string,
   path: string,
   phpVersion?: string | null,
+  opts?: {
+    webServer?: string | null;
+    https?: boolean | null;
+    documentRoot?: string | null;
+  },
 ): Promise<SiteRecord> {
   return invoke<SiteRecord>("create_site_cmd", {
     name,
     path,
     phpVersion: phpVersion ?? null,
+    webServer: opts?.webServer ?? null,
+    https: opts?.https ?? null,
+    documentRoot: opts?.documentRoot ?? null,
   });
 }
 

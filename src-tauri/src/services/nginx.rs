@@ -115,12 +115,12 @@ http {{
   include {sites}/*.conf;
 }}
 "#,
-        error_log = paths.logs.join("nginx/error.log").display(),
-        pid = paths.pid_file("nginx").display(),
-        access_log = paths.logs.join("nginx/access.log").display(),
-        sites = sites_dir.display(),
-        mime = conf_dir.join("mime.types").display(),
-        temp = temp.display(),
+        error_log = crate::paths_util::conf_path(&paths.logs.join("nginx/error.log")),
+        pid = crate::paths_util::conf_path(&paths.pid_file("nginx")),
+        access_log = crate::paths_util::conf_path(&paths.logs.join("nginx/access.log")),
+        sites = crate::paths_util::conf_path(&sites_dir),
+        mime = crate::paths_util::conf_path(&conf_dir.join("mime.types")),
+        temp = crate::paths_util::conf_path(&temp),
     );
     fs::write(&conf, body)?;
 
@@ -186,9 +186,11 @@ fn write_site_conf(
 }}
 "#,
         domain = site.domain,
-        root = root.display(),
+        root = crate::paths_util::quoted_conf_path(&root),
         fastcgi = fastcgi_pass_value(&fastcgi),
-        fcgi = paths.nginx_conf_dir().join("fastcgi_params").display(),
+        fcgi = crate::paths_util::quoted_conf_path(
+            &paths.nginx_conf_dir().join("fastcgi_params"),
+        ),
     );
 
     if site.https {
@@ -217,11 +219,13 @@ server {{
 }}
 "#,
             domain = site.domain,
-            root = root.display(),
-            cert = certs.site_cert.display(),
-            key = certs.site_key.display(),
+            root = crate::paths_util::quoted_conf_path(&root),
+            cert = crate::paths_util::quoted_conf_path(&certs.site_cert),
+            key = crate::paths_util::quoted_conf_path(&certs.site_key),
             fastcgi = fastcgi_pass_value(&fastcgi),
-            fcgi = paths.nginx_conf_dir().join("fastcgi_params").display(),
+            fcgi = crate::paths_util::quoted_conf_path(
+                &paths.nginx_conf_dir().join("fastcgi_params"),
+            ),
         ));
     }
 
@@ -243,7 +247,7 @@ fn write_phpmyadmin_conf(
     let Some((_, runtime)) = runtimes.first() else {
         return Ok(());
     };
-    let root = pma.path.display().to_string();
+    let root = crate::paths_util::quoted_conf_path(&pma.path);
     let fastcgi = nginx_fastcgi_pass(runtime);
     let certs = ensure_site_cert(paths, "phpmyadmin.test")?;
     let body = format!(
@@ -267,10 +271,13 @@ fn write_phpmyadmin_conf(
   }}
 }}
 "#,
-        cert = certs.site_cert.display(),
-        key = certs.site_key.display(),
+        root = root,
+        cert = crate::paths_util::quoted_conf_path(&certs.site_cert),
+        key = crate::paths_util::quoted_conf_path(&certs.site_key),
         fastcgi = fastcgi_pass_value(&fastcgi),
-        fcgi = paths.nginx_conf_dir().join("fastcgi_params").display(),
+        fcgi = crate::paths_util::quoted_conf_path(
+            &paths.nginx_conf_dir().join("fastcgi_params"),
+        ),
     );
     fs::write(sites_dir.join("phpmyadmin.conf"), body)?;
     Ok(())
@@ -311,13 +318,7 @@ fastcgi_param  SERVER_NAME        $server_name;
 }
 
 pub fn expand_home(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    path.to_path_buf()
+    crate::paths_util::expand_home(path)
 }
 
 fn collect_php_versions(state: &AppState) -> Vec<String> {

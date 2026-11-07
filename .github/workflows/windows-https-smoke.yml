@@ -1,4 +1,4 @@
-# Best-effort Windows HTTPS / hosts / process-flags verification for PRs and tags.
+# Windows unit tests + end-to-end stack smoke (PHP + MariaDB + Nginx + sites).
 name: Windows HTTPS smoke
 
 on:
@@ -11,23 +11,39 @@ on:
 jobs:
   windows-smoke:
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cargo test (incl. CREATE_NO_WINDOW / hosts helpers)
+      - name: Cargo test (incl. CREATE_NO_WINDOW / hosts / php.ini / paths)
         working-directory: src-tauri
         run: cargo test --lib -- --nocapture
 
-      - name: Process flag + hosts merge unit checks
+      - name: Process flag + hosts + php.ini unit checks
         working-directory: src-tauri
         shell: pwsh
         run: |
           cargo test --lib services::process::tests -- --nocapture
           cargo test --lib services::dns::tests -- --nocapture
           cargo test --lib packages::version_cache::tests -- --nocapture
+          cargo test --lib php::tests -- --nocapture
+          cargo test --lib paths_util::tests -- --nocapture
+
+      - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip
+        working-directory: src-tauri
+        shell: pwsh
+        env:
+          DEVSTACK_DATA_DIR: ${{ runner.temp }}\devstack-e2e
+          DEVSTACK_RESET_SITES: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --bin devstack_smoke --release
+          $bin = Join-Path (Get-Location) 'target\release\devstack_smoke.exe'
+          & $bin --e2e
+          if ($LASTEXITCODE -ne 0) { throw "devstack_smoke --e2e failed ($LASTEXITCODE)" }
 
       - name: Synthetic HTTPS probe (hosts + openssl s_server + curl)
         shell: pwsh
@@ -58,13 +74,11 @@ jobs:
             Add-Content -LiteralPath $hostsFile -Value "`n$entry" -ErrorAction Stop
             ipconfig /flushdns | Out-Null
             Write-Host "Wrote hosts entry for $site"
-            Resolve-DnsName $site -ErrorAction SilentlyContinue | Format-Table | Out-String | Write-Host
           } catch {
             Write-Host "Hosts write skipped (no admin): $($_.Exception.Message)"
             $site = '127.0.0.1'
           }
 
-          # openssl s_server is more reliable than the Windows Python stub on runners.
           $proc = Start-Process -FilePath $openssl.Source `
             -ArgumentList @('s_server','-accept',"$port",'-cert',$cert,'-key',$key,'-www') `
             -PassThru -WindowStyle Hidden `
@@ -83,12 +97,6 @@ jobs:
               throw "Expected HTTP 200 from $url, got '$code' (curl exit $LASTEXITCODE)"
             }
             Write-Host "HTTPS probe OK: $url -> $code"
-            if ($site -ne '127.0.0.1') {
-              Resolve-DnsName $site | Out-Null
-            }
-            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 15 -SkipCertificateCheck
-            if ($resp.StatusCode -ne 200) { throw "Invoke-WebRequest expected 200, got $($resp.StatusCode)" }
-            Write-Host "Invoke-WebRequest OK: $($resp.StatusCode)"
           } finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
           }

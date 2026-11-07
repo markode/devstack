@@ -24,7 +24,7 @@ use crate::services::backup::{
     backup_database, restore_database, CompressKind,
 };
 use crate::services::database::{
-    client_bin_for, engine_install_dir, socket_path,
+    client_bin_for, engine_install_dir, mysql_root_args,
 };
 use crate::services::process::find_bin;
 use crate::services::progress::{emit, JobProgressFn};
@@ -206,15 +206,10 @@ pub fn list_engine_databases(paths: &Paths, state: &AppState, engine: &str) -> R
 fn list_mysql_databases(paths: &Paths, state: &AppState, engine: &str) -> Result<Vec<String>> {
     let root = engine_install_dir(state, engine)?;
     let client = client_bin_for(&root)?;
-    let sock = socket_path(paths, engine);
+    let mut args = mysql_root_args(paths, state, engine);
+    args.extend(["-N".into(), "-e".into(), "SHOW DATABASES".into()]);
     let out = crate::services::process::command(&client)
-        .args([
-            format!("--socket={}", sock.display()),
-            "-uroot".into(),
-            "-N".into(),
-            "-e".into(),
-            "SHOW DATABASES".into(),
-        ])
+        .args(&args)
         .output()
         .map_err(|e| DevStackError::Message(format!("SHOW DATABASES: {e}")))?;
     if !out.status.success() {
@@ -977,7 +972,7 @@ fn mysql_simple_replace(
 ) -> Result<()> {
     let root = engine_install_dir(state, engine)?;
     let client = client_bin_for(&root)?;
-    let sock = socket_path(paths, engine);
+    let connect = mysql_root_args(paths, state, engine);
     // Escape single quotes
     let from_e = from.replace('\'', "''");
     let to_e = to.replace('\'', "''");
@@ -987,26 +982,18 @@ fn mysql_simple_replace(
          FROM information_schema.columns
          WHERE table_schema='{db}' AND data_type IN ('varchar','text','mediumtext','longtext','char');"
     );
+    let mut args = connect.clone();
+    args.extend(["-N".into(), "-e".into(), sql]);
     let out = crate::services::process::command(&client)
-        .args([
-            format!("--socket={}", sock.display()),
-            "-uroot".into(),
-            "-N".into(),
-            "-e".into(),
-            sql,
-        ])
+        .args(&args)
         .output()?;
     let stmts = String::from_utf8_lossy(&out.stdout);
     for line in stmts.lines().filter(|l| !l.trim().is_empty()) {
-        let _ = crate::services::process::command(&client)
-            .args([
-                format!("--socket={}", sock.display()),
-                "-uroot".into(),
-                format!("--database={db}"),
-                "-e".into(),
-                line.to_string(),
-            ])
-            .status();
+        let mut run = connect.clone();
+        run.push(format!("--database={db}"));
+        run.push("-e".into());
+        run.push(line.to_string());
+        let _ = crate::services::process::command(&client).args(&run).status();
     }
     Ok(())
 }

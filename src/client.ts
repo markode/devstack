@@ -180,6 +180,31 @@ export async function onJobProgress(
   return api.onJobProgress(handler);
 }
 
+export async function createSite(
+  name: string,
+  path: string,
+  phpVersion?: string | null,
+  opts?: {
+    webServer?: string | null;
+    https?: boolean | null;
+    documentRoot?: string | null;
+  },
+) {
+  if (useMock()) {
+    return {
+      id: name.toLowerCase().replace(/\s+/g, "-"),
+      name,
+      path,
+      domain: `${name.toLowerCase().replace(/\s+/g, "-")}.test`,
+      phpVersion: phpVersion ?? "8.3",
+      https: opts?.https ?? true,
+      webServer: opts?.webServer ?? "nginx",
+      status: "stopped",
+    };
+  }
+  return api.createSite(name, path, phpVersion, opts);
+}
+
 export async function createWordpress(
   request: CreateWordPressRequest,
 ): Promise<CreateWordPressResult> {

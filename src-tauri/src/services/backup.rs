@@ -8,7 +8,9 @@ use std::thread;
 
 use crate::config::{AppState, Paths};
 use crate::error::{DevStackError, Result};
-use crate::services::database::{client_bin_for, dump_bin_for, engine_install_dir, socket_path};
+use crate::services::database::{
+    client_bin_for, dump_bin_for, engine_install_dir, mysql_root_args,
+};
 use crate::services::progress::{emit, JobProgressFn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +60,7 @@ pub fn backup_database(
 ) -> Result<u64> {
     let root = engine_install_dir(state, engine)?;
     let dump = dump_bin_for(&root)?;
-    let sock = socket_path(paths, engine);
+    let connect = mysql_root_args(paths, state, engine);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -93,18 +95,18 @@ pub fn backup_database(
         None,
     );
 
+    let mut dump_args = connect;
+    dump_args.extend([
+        "--single-transaction".into(),
+        "--quick".into(),
+        "--routines".into(),
+        "--triggers".into(),
+        "--hex-blob".into(),
+        "--max_allowed_packet=1G".into(),
+        db_name.to_string(),
+    ]);
     let mut child = crate::services::process::command(&dump)
-        .args([
-            format!("--socket={}", sock.display()),
-            "-uroot".into(),
-            "--single-transaction".into(),
-            "--quick".into(),
-            "--routines".into(),
-            "--triggers".into(),
-            "--hex-blob".into(),
-            "--max_allowed_packet=1G".into(),
-            db_name.to_string(),
-        ])
+        .args(&dump_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -149,7 +151,9 @@ pub fn restore_database(
 ) -> Result<()> {
     let root = engine_install_dir(state, engine)?;
     let client = client_bin_for(&root)?;
-    let sock = socket_path(paths, engine);
+    let mut connect = mysql_root_args(paths, state, engine);
+    connect.push(format!("--database={db_name}"));
+    connect.push("--max_allowed_packet=1G".into());
     let kind = CompressKind::detect(archive);
     let total = fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
 
@@ -163,12 +167,7 @@ pub fn restore_database(
     );
 
     let mut child = crate::services::process::command(&client)
-        .args([
-            format!("--socket={}", sock.display()),
-            "-uroot".into(),
-            format!("--database={db_name}"),
-            "--max_allowed_packet=1G".into(),
-        ])
+        .args(&connect)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -493,7 +492,7 @@ pub fn seed_large_demo_table(
 ) -> Result<()> {
     let root = engine_install_dir(state, engine)?;
     let client = client_bin_for(&root)?;
-    let sock = socket_path(paths, engine);
+    let connect = mysql_root_args(paths, state, engine);
     let sql = format!(
         "USE `{db_name}`;
 CREATE TABLE IF NOT EXISTS devstack_big (
@@ -502,13 +501,11 @@ CREATE TABLE IF NOT EXISTS devstack_big (
 ) ENGINE=InnoDB;
 "
     );
+    let mut create_args = connect.clone();
+    create_args.push("-e".into());
+    create_args.push(sql);
     let _ = crate::services::process::command(&client)
-        .args([
-            format!("--socket={}", sock.display()),
-            "-uroot".into(),
-            "-e".into(),
-            sql,
-        ])
+        .args(&create_args)
         .status();
 
     // Insert via temp SQL files to avoid ARG_MAX limits on huge -e strings.
@@ -531,12 +528,10 @@ CREATE TABLE IF NOT EXISTS devstack_big (
         }
         sql.push(';');
         fs::write(&tmp, &sql)?;
+        let mut insert_args = connect.clone();
+        insert_args.push(format!("--database={db_name}"));
         let status = crate::services::process::command(&client)
-            .args([
-                format!("--socket={}", sock.display()),
-                "-uroot".into(),
-                format!("--database={db_name}"),
-            ])
+            .args(&insert_args)
             .stdin(Stdio::from(File::open(&tmp)?))
             .status()
             .map_err(|e| DevStackError::Message(e.to_string()))?;

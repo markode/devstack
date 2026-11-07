@@ -245,11 +245,11 @@ SSLSessionCacheTimeout 300
 
 IncludeOptional "{sites}/*.conf"
 "#,
-        pid = paths.pid_file("apache").display(),
-        error_log = paths.logs.join("apache/error.log").display(),
-        sites = sites_dir.display(),
-        mime = mime.display(),
-        cache = paths.apache.join("run/ssl_scache").display(),
+        pid = crate::paths_util::conf_path(&paths.pid_file("apache")),
+        error_log = crate::paths_util::conf_path(&paths.logs.join("apache/error.log")),
+        sites = crate::paths_util::conf_path(&sites_dir),
+        mime = crate::paths_util::conf_path(&mime),
+        cache = crate::paths_util::conf_path(&paths.apache.join("run/ssl_scache")),
     );
     fs::write(&conf, body)?;
     Ok(conf)
@@ -310,10 +310,14 @@ fn write_vhost(
 </VirtualHost>
 "#,
         domain = site.domain,
-        root = docroot.display(),
+        root = crate::paths_util::conf_path(&docroot),
         fcgi = fcgi,
-        err = paths.logs.join(format!("apache/{}-error.log", site.id)).display(),
-        access = paths.logs.join(format!("apache/{}-access.log", site.id)).display(),
+        err = crate::paths_util::conf_path(
+            &paths.logs.join(format!("apache/{}-error.log", site.id)),
+        ),
+        access = crate::paths_util::conf_path(
+            &paths.logs.join(format!("apache/{}-access.log", site.id)),
+        ),
     );
 
     if site.https {
@@ -343,15 +347,16 @@ fn write_vhost(
 </VirtualHost>
 "#,
             domain = site.domain,
-            root = docroot.display(),
-            cert = certs.site_cert.display(),
-            key = certs.site_key.display(),
+            root = crate::paths_util::conf_path(&docroot),
+            cert = crate::paths_util::conf_path(&certs.site_cert),
+            key = crate::paths_util::conf_path(&certs.site_key),
             fcgi = fcgi,
-            err = paths.logs.join(format!("apache/{}-ssl-error.log", site.id)).display(),
-            access = paths
-                .logs
-                .join(format!("apache/{}-ssl-access.log", site.id))
-                .display(),
+            err = crate::paths_util::conf_path(
+                &paths.logs.join(format!("apache/{}-ssl-error.log", site.id)),
+            ),
+            access = crate::paths_util::conf_path(
+                &paths.logs.join(format!("apache/{}-ssl-access.log", site.id)),
+            ),
         ));
     }
 

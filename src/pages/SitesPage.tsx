@@ -1,16 +1,20 @@
 import { useEffect, useState } from "react";
 import * as client from "../client";
+import { PortConflictDialog } from "../components/PortConflictDialog";
 import {
   browseDatabaseDump,
+  browseFolder,
   openInBrowser,
   openInEditor,
   openInFileManager,
 } from "../open";
+import { humanizeError, parsePortBusy } from "../portBusy";
 import type {
   CreateWordPressResult,
   HostsStatus,
   InstalledPackage,
   JobProgress,
+  PortCheckResult,
   SiteDetails,
   StackStatus,
   TemplateRecord,
@@ -30,7 +34,11 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<JobProgress | null>(null);
   const [showNewWp, setShowNewWp] = useState(false);
+  const [showAddSite, setShowAddSite] = useState(false);
   const [showDuplicate, setShowDuplicate] = useState(false);
+  const [portConflict, setPortConflict] = useState<PortCheckResult | null>(
+    null,
+  );
   const [credentials, setCredentials] =
     useState<CreateWordPressResult | null>(null);
   const [lastBackup, setLastBackup] = useState<string | null>(null);
@@ -138,15 +146,57 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   const toggleStack = async () => {
     setBusy(true);
     setError(null);
+    setPortConflict(null);
     try {
       if (stackRunning) {
         setStack(await client.stopDevStack());
       } else {
+        // Preflight nginx ports so the dialog can offer suggested/coexistence.
+        const check = await client.checkServicePorts("nginx");
+        if (!check.ok) {
+          setPortConflict(check);
+          setError(check.message ?? "Ports are in use");
+          return;
+        }
         setStack(await client.startDevStack());
       }
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      const busyPorts = parsePortBusy(msg);
+      if (busyPorts) {
+        setPortConflict(busyPorts);
+        setError(busyPorts.message ?? humanizeError(msg));
+      } else {
+        setError(humanizeError(msg));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolvePortConflict = async (mode: "suggested" | "coexistence") => {
+    if (!portConflict) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (mode === "coexistence") {
+        await client.setCoexistenceMode(true);
+      } else if (portConflict.serviceId) {
+        await client.applyNextFreePorts(portConflict.serviceId);
+      }
+      setPortConflict(null);
+      setStack(await client.startDevStack());
+      await refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const busyPorts = parsePortBusy(msg);
+      if (busyPorts) {
+        setPortConflict(busyPorts);
+        setError(busyPorts.message ?? humanizeError(msg));
+      } else {
+        setError(humanizeError(msg));
+      }
     } finally {
       setBusy(false);
     }
@@ -167,7 +217,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       await fn();
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(humanizeError(e instanceof Error ? e.message : String(e)));
     } finally {
       setBusy(false);
       setProgress(null);
@@ -275,6 +325,15 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
             type="button"
             className="btn btn-install"
             disabled={busy}
+            title="Create an empty site or link an existing folder"
+            onClick={() => setShowAddSite(true)}
+          >
+            Add site
+          </button>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={busy}
             onClick={() => setShowDuplicate(true)}
           >
             Duplicate
@@ -291,6 +350,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
             type="button"
             className="btn btn-install"
             disabled={busy}
+            title={stackRunning ? "Stop Nginx/Apache/database" : "Start the local stack"}
             onClick={() => void toggleStack()}
           >
             {stackRunning ? "Stop stack" : "Start stack"}
@@ -318,44 +378,105 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       ) : null}
       {error ? <div className="error-banner">{error}</div> : null}
       {progress ? <ProgressToast progress={progress} /> : null}
-      <div className="sites-grid">
-        {details.map((d) => (
-          <button
-            key={d.site.id}
-            type="button"
-            className="site-tile"
-            onClick={() => openSite(d.site.id)}
-          >
-            <div className="site-tile-top">
-              <span
-                className={`fw-icon fw-${d.framework}`}
-                title={d.framework}
-              >
-                {d.frameworkIcon}
-              </span>
-              <span
-                className={`status-dot ${
-                  d.site.status === "running" ? "on" : ""
-                }`}
-              />
-            </div>
-            <div className="site-tile-name">
-              {d.site.name}
-              {d.site.isTemplate ? (
-                <span className="tpl-badge">template</span>
-              ) : null}
-            </div>
-            <div className="site-tile-domain">{d.site.domain}</div>
-            <div className="site-tile-meta">
-              <span>PHP {d.site.phpVersion ?? "—"}</span>
-              <span className="muted">
-                {(d.site.webServer ?? "nginx").toUpperCase()}
-              </span>
-              <span className="muted">{d.framework}</span>
-            </div>
-          </button>
-        ))}
-      </div>
+      {details.length === 0 ? (
+        <div className="empty-state" style={{ padding: "48px 24px", textAlign: "center" }}>
+          <h3 style={{ marginTop: 0 }}>No sites yet</h3>
+          <p className="muted">
+            Add an empty PHP site, link an existing folder, or create WordPress
+            in one click.
+          </p>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={busy}
+              onClick={() => setShowAddSite(true)}
+            >
+              Add site
+            </button>
+            <button
+              type="button"
+              className="btn btn-install"
+              disabled={busy}
+              onClick={() => setShowNewWp(true)}
+            >
+              New WordPress
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="sites-grid">
+          {details.map((d) => (
+            <button
+              key={d.site.id}
+              type="button"
+              className="site-tile"
+              onClick={() => openSite(d.site.id)}
+            >
+              <div className="site-tile-top">
+                <span
+                  className={`fw-icon fw-${d.framework}`}
+                  title={d.framework}
+                >
+                  {d.frameworkIcon}
+                </span>
+                <span
+                  className={`status-dot ${
+                    d.site.status === "running" ? "on" : ""
+                  }`}
+                />
+              </div>
+              <div className="site-tile-name">
+                {d.site.name}
+                {d.site.isTemplate ? (
+                  <span className="tpl-badge">template</span>
+                ) : null}
+              </div>
+              <div className="site-tile-domain">{d.site.domain}</div>
+              <div className="site-tile-meta">
+                <span>PHP {d.site.phpVersion ?? "—"}</span>
+                <span className="muted">
+                  {(d.site.webServer ?? "nginx").toUpperCase()}
+                </span>
+                <span className="muted">{d.framework}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {portConflict && !portConflict.ok ? (
+        <PortConflictDialog
+          conflict={portConflict}
+          busy={busy}
+          onCancel={() => setPortConflict(null)}
+          onUseSuggested={() => void resolvePortConflict("suggested")}
+          onCoexistence={() => void resolvePortConflict("coexistence")}
+        />
+      ) : null}
+
+      {showAddSite ? (
+        <AddSiteModal
+          phpInstalled={phpInstalled}
+          busy={busy}
+          onClose={() => setShowAddSite(false)}
+          onSubmit={(req) =>
+            void runJob(async () => {
+              const site = await client.createSite(
+                req.name,
+                req.path,
+                req.phpVersion,
+                {
+                  webServer: req.webServer,
+                  https: req.https,
+                },
+              );
+              setShowAddSite(false);
+              openSite(site.id);
+            })
+          }
+        />
+      ) : null}
 
       {showNewWp ? (
         <NewWordpressModal
@@ -432,6 +553,183 @@ function ProgressToast({ progress }: { progress: JobProgress }) {
 
 function runtimeValue(pkg: InstalledPackage): string {
   return pkg.channel || pkg.version;
+}
+
+function AddSiteModal({
+  phpInstalled,
+  busy,
+  onClose,
+  onSubmit,
+}: {
+  phpInstalled: InstalledPackage[];
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (req: {
+    name: string;
+    path: string;
+    phpVersion?: string;
+    webServer: string;
+    https: boolean;
+  }) => void;
+}) {
+  const [mode, setMode] = useState<"empty" | "link">("empty");
+  const [name, setName] = useState("my-site");
+  const [path, setPath] = useState("~/Sites/my-site");
+  const [php, setPhp] = useState(
+    phpInstalled[0] ? runtimeValue(phpInstalled[0]) : "",
+  );
+  const [webServer, setWebServer] = useState("nginx");
+  const [https, setHttps] = useState(true);
+  const [pickError, setPickError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (mode !== "empty") return;
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    setPath(`~/Sites/${slug || "site"}`);
+  }, [name, mode]);
+
+  const pickFolder = async () => {
+    setPickError(null);
+    try {
+      const folder = await browseFolder({ title: "Link existing site folder" });
+      if (folder) {
+        setPath(folder);
+        setMode("link");
+        if (!name || name === "my-site") {
+          const base = folder.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+          if (base) setName(base);
+        }
+      }
+    } catch (e) {
+      setPickError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="dialog">
+      <div className="modal-card">
+        <h3>Add site</h3>
+        <p className="muted">
+          Create an empty PHP site or link a folder you already have.
+        </p>
+        <div className="field-row" style={{ gap: 8 }}>
+          <button
+            type="button"
+            className={`btn ${mode === "empty" ? "btn-primary" : "btn-install"}`}
+            disabled={busy}
+            onClick={() => setMode("empty")}
+          >
+            Empty site
+          </button>
+          <button
+            type="button"
+            className={`btn ${mode === "link" ? "btn-primary" : "btn-install"}`}
+            disabled={busy}
+            onClick={() => void pickFolder()}
+          >
+            Link folder…
+          </button>
+        </div>
+        {pickError ? <div className="error-banner">{pickError}</div> : null}
+        <label className="field">
+          Name
+          <input value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="field">
+          Directory
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              style={{ flex: 1 }}
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+            />
+            <button
+              type="button"
+              className="btn btn-install"
+              disabled={busy}
+              title="Browse for a folder"
+              onClick={() => void pickFolder()}
+            >
+              Browse
+            </button>
+          </div>
+        </label>
+        <div className="field-row">
+          <label className="field">
+            PHP
+            {phpInstalled.length === 0 ? (
+              <span className="hint">
+                No PHP installed —{" "}
+                <a href="#/php" onClick={onClose}>
+                  install one
+                </a>
+              </span>
+            ) : (
+              <select
+                className="native"
+                value={php}
+                onChange={(e) => setPhp(e.target.value)}
+              >
+                {phpInstalled.map((v) => (
+                  <option key={v.version} value={runtimeValue(v)}>
+                    {runtimeValue(v)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </label>
+          <label className="field">
+            Web server
+            <select
+              className="native"
+              value={webServer}
+              onChange={(e) => setWebServer(e.target.value)}
+            >
+              <option value="nginx">Nginx</option>
+              <option value="apache">Apache</option>
+            </select>
+          </label>
+        </div>
+        <label className="field" style={{ flexDirection: "row", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={https}
+            onChange={(e) => setHttps(e.target.checked)}
+          />
+          HTTPS (.test certificate)
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="btn" disabled={busy} onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={busy || !name.trim() || !path.trim()}
+            title={
+              !name.trim() || !path.trim()
+                ? "Name and directory are required"
+                : "Create site and sync hosts"
+            }
+            onClick={() =>
+              onSubmit({
+                name: name.trim(),
+                path: path.trim(),
+                phpVersion: php || undefined,
+                webServer,
+                https,
+              })
+            }
+          >
+            {mode === "link" ? "Link site" : "Create site"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function NewWordpressModal({

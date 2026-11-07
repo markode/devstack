@@ -273,15 +273,47 @@ pub async fn create_site_cmd(
     name: String,
     path: String,
     php_version: Option<String>,
+    web_server: Option<String>,
+    https: Option<bool>,
+    document_root: Option<String>,
 ) -> Result<SiteRecord> {
     let mut state = ctx.state.lock().await;
-    let site = create_site(
+    let mut site = create_site(
         &mut state,
         &ctx.paths,
         &name,
-        PathBuf::from(path),
+        crate::paths_util::expand_home(&PathBuf::from(path)),
         php_version,
     )?;
+    if let Some(ws) = web_server {
+        let normalized = match ws.to_ascii_lowercase().as_str() {
+            "apache" | "httpd" => "apache".to_string(),
+            _ => "nginx".to_string(),
+        };
+        if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+            s.web_server = Some(normalized.clone());
+            site.web_server = Some(normalized);
+        }
+    }
+    if let Some(h) = https {
+        if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+            s.https = h;
+            site.https = h;
+        }
+    }
+    if let Some(sub) = document_root {
+        let sub = sub.trim().trim_matches(['/', '\\']);
+        if !sub.is_empty() {
+            if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+                let base = crate::paths_util::expand_home(&s.path);
+                let joined = base.join(sub);
+                s.path = joined.clone();
+                site.path = joined;
+            }
+        }
+    }
+    save_state(&ctx.paths.state_file, &state)?;
+    sync_hosts_after_change(&ctx.paths, &mut state)?;
     save_state(&ctx.paths.state_file, &state)?;
     Ok(site)
 }
@@ -320,8 +352,10 @@ pub async fn update_site_environment(
     }
     let out = site.clone();
     save_state(&ctx.paths.state_file, &state)?;
-    // Best-effort reload if stack is up
+    // Propagate hosts/CA errors so the UI can toast the real message.
+    sync_hosts_after_change(&ctx.paths, &mut state)?;
     let _ = reload_sites(&ctx.paths, &mut state);
+    save_state(&ctx.paths.state_file, &state)?;
     Ok(out)
 }
 
@@ -402,6 +436,8 @@ pub async fn create_wordpress(
     let result =
         create_wordpress_site(&ctx.paths, &mut state, request, &progress, "wordpress").await?;
     save_state(&ctx.paths.state_file, &state)?;
+    sync_hosts_after_change(&ctx.paths, &mut state)?;
+    save_state(&ctx.paths.state_file, &state)?;
     Ok(result)
 }
 
@@ -435,6 +471,8 @@ pub async fn duplicate_site(
     let mut state = ctx.state.lock().await;
     let result =
         duplicate_from_source(&ctx.paths, &mut state, request, &progress, "duplicate").await?;
+    save_state(&ctx.paths.state_file, &state)?;
+    sync_hosts_after_change(&ctx.paths, &mut state)?;
     save_state(&ctx.paths.state_file, &state)?;
     Ok(result)
 }
@@ -917,6 +955,7 @@ pub fn bootstrap_ctx(data_root: std::path::PathBuf) -> Result<AppCtx> {
     let mut state = load_state(&paths.state_file)?;
     ensure_welcome_site(&paths, &mut state);
     let _ = crate::services::db_files::databases_folder(&paths, &state.db_files);
+    let _ = crate::php::regenerate_all_php_ini(&paths, &state);
     save_state(&paths.state_file, &state)?;
     let ctx = AppCtx {
         paths,
@@ -945,7 +984,7 @@ pub fn prefetch_version_lists(ctx: Arc<AppCtx>) {
 #[tauri::command]
 pub async fn get_hosts_status(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus> {
     let state = ctx.state.lock().await;
-    Ok(dns::check_hosts_status(&state))
+    Ok(dns::check_hosts_status(&ctx.paths, &state))
 }
 
 #[tauri::command]
@@ -955,5 +994,39 @@ pub async fn repair_hosts(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus> {
     let _ = crate::services::tls::ensure_root_ca(&ctx.paths);
     dns::sync_hosts_and_trust_ca(&ctx.paths, &state)?;
     save_state(&ctx.paths.state_file, &state)?;
-    Ok(dns::check_hosts_status(&state))
+    Ok(dns::check_hosts_status(&ctx.paths, &state))
+}
+
+#[tauri::command]
+pub async fn open_path_cmd(path: String) -> Result<()> {
+    let p = PathBuf::from(&path);
+    let abs = crate::paths_util::expand_home(&p);
+    if abs.is_dir() || abs.extension().is_none() {
+        // Site folders: create if missing (empty site path).
+        if !abs.exists() {
+            crate::paths_util::ensure_dir(&abs)?;
+        }
+    }
+    crate::paths_util::open_path_os(&abs)
+}
+
+#[tauri::command]
+pub async fn reveal_path_cmd(path: String) -> Result<()> {
+    let abs = crate::paths_util::expand_home(&PathBuf::from(&path));
+    if !abs.exists() {
+        return Err(crate::error::DevStackError::Message(format!(
+            "path doesn't exist: {}",
+            abs.display()
+        )));
+    }
+    crate::paths_util::reveal_path_os(&abs)
+}
+
+/// Sync hosts+CA after site mutations and reload web servers (errors propagate).
+pub fn sync_hosts_after_change(paths: &Paths, state: &mut AppState) -> Result<HostsStatus> {
+    let _ = crate::services::tls::ensure_root_ca(paths);
+    dns::sync_hosts_and_trust_ca(paths, state)?;
+    let _ = crate::services::nginx::reload_nginx(paths, state);
+    let _ = crate::services::httpd::reload_apache(paths, state);
+    Ok(dns::check_hosts_status(paths, state))
 }

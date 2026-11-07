@@ -99,6 +99,18 @@ pub fn spawn_logged(
     log_out: &Path,
     log_err: &Path,
 ) -> Result<Child> {
+    spawn_logged_env(program, args, cwd, log_out, log_err, &[])
+}
+
+/// Like [`spawn_logged`], with extra environment variables (e.g. `PHPRC` for php-cgi).
+pub fn spawn_logged_env(
+    program: &Path,
+    args: &[&str],
+    cwd: Option<&Path>,
+    log_out: &Path,
+    log_err: &Path,
+    envs: &[(&str, &OsStr)],
+) -> Result<Child> {
     if let Some(parent) = log_out.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -110,6 +122,9 @@ pub fn spawn_logged(
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }

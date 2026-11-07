@@ -225,7 +225,22 @@ pub fn run_wp_cli(
     cwd: &Path,
     args: &[&str],
 ) -> Result<String> {
+    run_wp_cli_with_ini(php, wp_cli, cwd, args, None)
+}
+
+pub fn run_wp_cli_with_ini(
+    php: &Path,
+    wp_cli: &Path,
+    cwd: &Path,
+    args: &[&str],
+    php_install_dir: Option<&Path>,
+) -> Result<String> {
     let mut cmd = crate::services::process::command(php);
+    if let Some(dir) = php_install_dir {
+        crate::php::apply_php_ini_to_command(&mut cmd, dir);
+    } else if let Some(parent) = php.parent() {
+        crate::php::apply_php_ini_to_command(&mut cmd, parent);
+    }
     cmd.arg(wp_cli).args(args).current_dir(cwd);
     let out = cmd
         .output()
@@ -296,10 +311,13 @@ pub async fn create_wordpress_site(
         progress,
         job_id,
         "database",
-        &format!("Creating database `{db_name}`…"),
+        &format!("Starting {engine} and creating `{db_name}`…"),
         0,
         None,
     );
+    // WP-CLI needs a live server + mysqli — start DB and regenerate php.ini first.
+    let _ = crate::php::write_dev_php_ini(&php_rt.root, &crate::php::PhpIniOptions::default());
+    crate::services::database::start_database(paths, state, &engine)?;
     ensure_database(paths, state, &engine, &db_name, &db_user, &db_pass)?;
 
     // WordPress defaults to Apache — use Apache HTTPS port in siteurl.
@@ -312,7 +330,7 @@ pub async fn create_wordpress_site(
 
     emit(progress, job_id, "config", "Writing wp-config.php…", 0, None);
     // Use TCP 127.0.0.1[:port] — custom sockets confuse WP's host:port parsing
-    run_wp_cli(
+    run_wp_cli_with_ini(
         &php_rt.php_bin,
         &wp_cli,
         &abs,
@@ -327,6 +345,7 @@ pub async fn create_wordpress_site(
             "--skip-check",
             "--force",
         ],
+        Some(&php_rt.root),
     )?;
 
     let admin_user = req
@@ -362,14 +381,21 @@ pub async fn create_wordpress_site(
         install_args.push(format!("--locale={locale}"));
     }
     let arg_refs: Vec<&str> = install_args.iter().map(|s| s.as_str()).collect();
-    run_wp_cli(&php_rt.php_bin, &wp_cli, &abs, &arg_refs)?;
+    run_wp_cli_with_ini(
+        &php_rt.php_bin,
+        &wp_cli,
+        &abs,
+        &arg_refs,
+        Some(&php_rt.root),
+    )?;
 
     // Pretty permalinks need Apache AllowOverride + mod_rewrite (.htaccess).
-    let _ = run_wp_cli(
+    let _ = run_wp_cli_with_ini(
         &php_rt.php_bin,
         &wp_cli,
         &abs,
         &["rewrite", "structure", "/%postname%/", "--hard"],
+        Some(&php_rt.root),
     );
     ensure_wordpress_htaccess(&abs)?;
 

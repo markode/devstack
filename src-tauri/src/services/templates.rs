@@ -10,13 +10,15 @@ use crate::error::{DevStackError, Result};
 use crate::services::backup::{
     archive_directory, backup_database, extract_directory_archive, restore_database, CompressKind,
 };
-use crate::services::database::{ensure_database, socket_path};
+use crate::services::database::{ensure_database, start_database};
 use crate::services::nginx::expand_home;
 use crate::services::php_runtime::resolve_php;
 use crate::services::progress::{emit, JobProgressFn};
 use crate::services::sites::{detect_site, parse_wp_config};
 use crate::services::stack::reload_sites;
-use crate::services::wordpress::{run_wp_cli, update_wp_config_credentials, ensure_wp_cli};
+use crate::services::wordpress::{
+    ensure_wp_cli, run_wp_cli_with_ini, update_wp_config_credentials,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -273,16 +275,16 @@ pub async fn duplicate_from_source(
     let db_name = safe_db_ident(&format!("wp_{id}"));
     let db_user = safe_db_ident(&format!("u_{id}"));
     let db_pass = random_password(24);
-    let sock = socket_path(paths, &engine);
 
     emit(
         progress,
         job_id,
         "database",
-        &format!("Creating database `{db_name}`…"),
+        &format!("Starting {engine} and creating `{db_name}`…"),
         0,
         None,
     );
+    start_database(paths, state, &engine)?;
     ensure_database(paths, state, &engine, &db_name, &db_user, &db_pass)?;
 
     if let Some(db_arch) = db_archive {
@@ -297,6 +299,7 @@ pub async fn duplicate_from_source(
     let db_host = crate::services::ports::mysql_db_host(
         crate::services::ports::engine_db_port(&state.stack, &engine),
     );
+    let sock = paths.databases.join(format!("{engine}.sock"));
     update_wp_config_credentials(&dest, &db_name, &db_user, &db_pass, &db_host, &sock)?;
 
     let new_url =
@@ -328,7 +331,7 @@ pub async fn duplicate_from_source(
             if from == to || from.is_empty() {
                 continue;
             }
-            let _ = run_wp_cli(
+            let _ = run_wp_cli_with_ini(
                 &php_rt.php_bin,
                 &wp_cli,
                 &dest,
@@ -342,6 +345,7 @@ pub async fn duplicate_from_source(
                     "--skip-columns=guid",
                     "--report-changed-only",
                 ],
+                Some(&php_rt.root),
             );
         }
     }

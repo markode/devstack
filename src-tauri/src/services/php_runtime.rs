@@ -271,19 +271,42 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
         .as_ref()
         .ok_or_else(|| DevStackError::Message("php-cgi binary not found".into()))?;
     let listen = runtime.listen.clone();
-    // spawn a few workers behind a simple TCP accept loop is complex; use php-cgi -b
+    // Ensure managed php.ini exists (absolute extension_dir on Windows).
+    let _ = crate::php::write_dev_php_ini(&runtime.root, &crate::php::PhpIniOptions::default());
+    let ini = crate::packages::php::php_ini_path(&runtime.root);
     let log_out = paths.logs.join(format!("php-cgi-{}-stdout.log", runtime.version));
     let log_err = paths.logs.join(format!("php-cgi-{}-stderr.log", runtime.version));
-    let child = spawn_logged(
+    // Stop stale worker for this version first.
+    let pid_file = paths.pid_file(&format!("php-cgi-{}", runtime.version));
+    if let Some(pid) = read_pid(&pid_file) {
+        let _ = stop_pid(pid);
+    }
+    let ini_s = ini.to_string_lossy().to_string();
+    let args: Vec<&str> = if ini.exists() {
+        vec!["-c", ini_s.as_str(), "-b", listen.as_str()]
+    } else {
+        vec!["-b", listen.as_str()]
+    };
+    let phprc = ini
+        .parent()
+        .map(|p| p.as_os_str())
+        .unwrap_or_else(|| std::ffi::OsStr::new(""));
+    let envs: Vec<(&str, &std::ffi::OsStr)> = if ini.exists() {
+        vec![("PHPRC", phprc)]
+    } else {
+        vec![]
+    };
+    let child = crate::services::process::spawn_logged_env(
         cgi,
-        &["-b", &listen],
-        None,
+        &args,
+        Some(&runtime.root),
         &log_out,
         &log_err,
+        &envs,
     )?;
     let pid = child.id();
     std::mem::forget(child);
-    write_pid(&paths.pid_file(&format!("php-cgi-{}", runtime.version)), pid)?;
+    write_pid(&pid_file, pid)?;
     state.runtime.php_pids.insert(runtime.version.clone(), pid);
     Ok(())
 }

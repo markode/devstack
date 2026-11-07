@@ -209,10 +209,15 @@ pub fn create_site(
     site.framework = Some(details.framework);
     site.database_name = details.database_name;
     site.database_user = details.database_user;
+    // Normalize mixed separators / ~ before persisting.
+    site.path = crate::paths_util::expand_home(&site.path);
     state.sites.retain(|s| s.id != site.id);
     state.sites.push(site.clone());
-    let abs = expand_home(&site.path);
-    fs::create_dir_all(&abs)?;
+    let abs = crate::paths_util::ensure_dir(&site.path)?;
+    site.path = abs.clone();
+    if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+        s.path = abs.clone();
+    }
     if !abs.join("index.php").exists() && !abs.join("index.html").exists() {
         fs::write(abs.join("index.php"), "<?php phpinfo();")?;
     }

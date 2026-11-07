@@ -137,6 +137,83 @@ pub fn windows_hosts_path() -> PathBuf {
         .join("hosts")
 }
 
+/// Platform hosts file path (`System32\...\hosts` on Windows, `/etc/hosts` elsewhere).
+pub fn system_hosts_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        windows_hosts_path()
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/etc/hosts")
+    }
+}
+
+/// Extract the DevStack-managed block from hosts file contents (inclusive markers).
+pub fn extract_devstack_block(contents: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut in_block = false;
+    let mut found = false;
+    for line in contents.lines() {
+        let t = line.trim();
+        if t == MARKER_BEGIN {
+            in_block = true;
+            found = true;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if t == MARKER_END {
+            if in_block {
+                out.push_str(line);
+                out.push('\n');
+            }
+            in_block = false;
+            continue;
+        }
+        if in_block {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    found.then_some(out)
+}
+
+/// Domains that are missing a `127.0.0.1` entry inside the DevStack hosts block.
+pub fn domains_missing_from_hosts(contents: &str, domains: &[String]) -> Vec<String> {
+    let block = extract_devstack_block(contents).unwrap_or_default();
+    let lower = block.to_ascii_lowercase();
+    domains
+        .iter()
+        .filter(|d| {
+            let needle = format!("127.0.0.1 {}", d.trim().to_ascii_lowercase());
+            !lower.lines().any(|l| l.split_whitespace().collect::<Vec<_>>().join(" ") == needle
+                || l.contains(&needle))
+        })
+        .cloned()
+        .collect()
+}
+
+/// True when every domain has both IPv4 and IPv6 lines in the DevStack block.
+pub fn hosts_block_complete(contents: &str, domains: &[String]) -> bool {
+    let Some(block) = extract_devstack_block(contents) else {
+        return domains.is_empty();
+    };
+    let lower = block.to_ascii_lowercase();
+    domains.iter().all(|d| {
+        let d = d.trim().to_ascii_lowercase();
+        if d.is_empty() {
+            return true;
+        }
+        let v4 = format!("127.0.0.1 {d}");
+        let v6 = format!("::1 {d}");
+        lower.lines().any(|l| l.split_whitespace().collect::<Vec<_>>().join(" ") == v4)
+            && lower
+                .lines()
+                .any(|l| l.split_whitespace().collect::<Vec<_>>().join(" ") == v6)
+    })
+}
+
 pub fn ensure_helper_script(paths: &Paths) -> Result<PathBuf> {
     let path = paths.helper.join("devstack-helper.sh");
     fs::write(&path, HELPER_SCRIPT)?;
@@ -277,23 +354,46 @@ fn try_trust_ca_direct(ca: &Path) -> bool {
 }
 
 #[cfg(windows)]
+fn windows_hosts_copy_ps(tmp: &Path, hosts_path: &Path) -> String {
+    format!(
+        r#"
+$hostsPath = {hosts}
+$tmpPath = {tmp}
+if (Test-Path -LiteralPath $hostsPath) {{
+  attrib -r $hostsPath 2>$null | Out-Null
+}}
+try {{
+  Copy-Item -LiteralPath $tmpPath -Destination $hostsPath -Force
+}} catch {{
+  throw ("Hosts write blocked (read-only attribute, antivirus HostsFileHijack, or ACL). " + $_.Exception.Message)
+}}
+$after = Get-Content -LiteralPath $hostsPath -Raw -ErrorAction Stop
+if ($after -notmatch '# BEGIN DevStack') {{
+  throw 'Hosts write appeared to succeed but the DevStack block is missing — antivirus may have blocked the change (HostsFileHijack).'
+}}
+ipconfig /flushdns | Out-Null
+Write-DevStackLog 'hosts written and DNS flushed'
+"#,
+        hosts = ps_quote(&hosts_path.display().to_string()),
+        tmp = ps_quote(&tmp.display().to_string()),
+    )
+}
+
+#[cfg(windows)]
 fn sync_hosts_windows(paths: &Paths, domains: &[String]) -> Result<()> {
     let hosts_path = windows_hosts_path();
     let existing = fs::read_to_string(&hosts_path).unwrap_or_default();
     let merged = merge_hosts_contents(&existing, domains);
     if try_write_hosts_direct(&hosts_path, &merged)? {
+        verify_hosts_contain(&hosts_path, domains)?;
         return Ok(());
     }
     let tmp = paths.helper.join("hosts.devstack.tmp");
     fs::create_dir_all(&paths.helper)?;
     fs::write(&tmp, &merged)?;
-    let ps = format!(
-        "Copy-Item -LiteralPath {} -Destination {} -Force; ipconfig /flushdns",
-        ps_quote(&tmp.display().to_string()),
-        ps_quote(&hosts_path.display().to_string())
-    );
-    run_elevated_powershell(paths, &ps)?;
+    run_elevated_powershell(paths, &windows_hosts_copy_ps(&tmp, &hosts_path))?;
     let _ = fs::remove_file(&tmp);
+    verify_hosts_contain(&hosts_path, domains)?;
     Ok(())
 }
 
@@ -309,7 +409,7 @@ fn trust_ca_windows(paths: &Paths, ca: &Path) -> Result<()> {
         return Ok(());
     }
     let ps = format!(
-        "certutil -addstore -f Root {}",
+        "certutil -addstore -f Root {}\nWrite-DevStackLog 'CA trusted'\n",
         ps_quote(&ca.display().to_string())
     );
     run_elevated_powershell(paths, &ps)
@@ -334,29 +434,42 @@ pub fn sync_hosts_and_trust_ca_windows(
     let hosts_ok = try_write_hosts_direct(&hosts_path, &merged)?;
     let ca_ok = try_trust_ca_direct(ca);
     if hosts_ok && ca_ok {
+        verify_hosts_contain(&hosts_path, domains)?;
         return Ok(());
     }
 
     let tmp = paths.helper.join("hosts.devstack.tmp");
     fs::create_dir_all(&paths.helper)?;
     fs::write(&tmp, &merged)?;
-    let mut parts = Vec::new();
+    let mut parts = String::new();
     if !hosts_ok {
-        parts.push(format!(
-            "Copy-Item -LiteralPath {} -Destination {} -Force; ipconfig /flushdns",
-            ps_quote(&tmp.display().to_string()),
-            ps_quote(&hosts_path.display().to_string())
-        ));
+        parts.push_str(&windows_hosts_copy_ps(&tmp, &hosts_path));
     }
     if !ca_ok {
-        parts.push(format!(
-            "certutil -addstore -f Root {}",
+        parts.push_str(&format!(
+            "certutil -addstore -f Root {}\nWrite-DevStackLog 'CA trusted'\n",
             ps_quote(&ca.display().to_string())
         ));
     }
-    run_elevated_powershell(paths, &parts.join("\n"))?;
+    run_elevated_powershell(paths, &parts)?;
     let _ = fs::remove_file(&tmp);
+    if !hosts_ok {
+        verify_hosts_contain(&hosts_path, domains)?;
+    }
     Ok(())
+}
+
+#[cfg(windows)]
+fn verify_hosts_contain(hosts_path: &Path, domains: &[String]) -> Result<()> {
+    let contents = fs::read_to_string(hosts_path).unwrap_or_default();
+    let missing = domains_missing_from_hosts(&contents, domains);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(DevStackError::Message(format!(
+        "Hosts file still missing DevStack entries for: {}. The elevated write may have been blocked.",
+        missing.join(", ")
+    )))
 }
 
 #[cfg(windows)]
@@ -368,9 +481,35 @@ fn ps_quote(s: &str) -> String {
 fn run_elevated_powershell(paths: &Paths, command: &str) -> Result<()> {
     fs::create_dir_all(&paths.helper)?;
     let script = paths.helper.join("elevate.ps1");
-    // Write a small script so quoting stays reliable under -Verb RunAs.
-    // Hidden window — CREATE_NO_WINDOW on the outer process + WindowStyle on RunAs.
-    let body = format!("$ErrorActionPreference = 'Stop'\n{command}\n");
+    let log_path = paths.helper.join("elevate.log");
+    let exit_path = paths.helper.join("elevate.exit");
+    let _ = fs::remove_file(&log_path);
+    let _ = fs::remove_file(&exit_path);
+
+    let body = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$log = {log}
+$exitFile = {exit}
+function Write-DevStackLog([string]$Message) {{
+  $line = '[{{0}}] {{1}}' -f (Get-Date -Format o), $Message
+  Add-Content -LiteralPath $log -Value $line -ErrorAction SilentlyContinue
+}}
+try {{
+  Write-DevStackLog 'start'
+{command}
+  Write-DevStackLog 'ok'
+  Set-Content -LiteralPath $exitFile -Value '0' -Encoding ascii
+  exit 0
+}} catch {{
+  Write-DevStackLog ('error: ' + $_.Exception.Message)
+  Set-Content -LiteralPath $exitFile -Value '1' -Encoding ascii
+  exit 1
+}}
+"#,
+        log = ps_quote(&log_path.display().to_string()),
+        exit = ps_quote(&exit_path.display().to_string()),
+        command = command,
+    );
     fs::write(&script, body)?;
     let script_disp = script.display().to_string();
     let status = crate::services::process::command("powershell")
@@ -382,8 +521,8 @@ fn run_elevated_powershell(paths: &Paths, command: &str) -> Result<()> {
             "Bypass",
             "-Command",
             &format!(
-                "Start-Process -FilePath powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',{}",
-                ps_quote(&script_disp)
+                "try {{ Start-Process -FilePath powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',{script} }} catch {{ Write-Error $_.Exception.Message; exit 2 }}",
+                script = ps_quote(&script_disp)
             ),
         ])
         .stdin(Stdio::null())
@@ -391,15 +530,42 @@ fn run_elevated_powershell(paths: &Paths, command: &str) -> Result<()> {
         .stderr(Stdio::piped())
         .output()
         .map_err(|e| DevStackError::Message(format!("UAC elevation failed: {e}")))?;
-    if status.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        let stdout = String::from_utf8_lossy(&status.stdout);
-        Err(DevStackError::Message(format!(
-            "Elevated hosts/CA update failed (UAC cancelled or error). {stdout}{stderr}"
-        )))
+
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    let combined = format!("{stdout}{stderr}");
+    if combined.to_ascii_lowercase().contains("canceled by the user")
+        || combined.to_ascii_lowercase().contains("cancelled by the user")
+    {
+        return Err(DevStackError::Message("UAC cancelled".into()));
     }
+
+    let log = fs::read_to_string(&log_path).unwrap_or_default();
+    let exit_code = fs::read_to_string(&exit_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+
+    if status.status.success() && exit_code == Some(0) {
+        return Ok(());
+    }
+    if exit_code == Some(0) && !status.status.success() {
+        // Outer process quirks — trust elevate.exit when present.
+        return Ok(());
+    }
+
+    let detail = if log.trim().is_empty() {
+        combined
+    } else {
+        log
+    };
+    if detail.to_ascii_lowercase().contains("canceled by the user")
+        || detail.to_ascii_lowercase().contains("cancelled by the user")
+    {
+        return Err(DevStackError::Message("UAC cancelled".into()));
+    }
+    Err(DevStackError::Message(format!(
+        "Elevated hosts/CA update failed. {detail}"
+    )))
 }
 
 pub fn sync_hosts(paths: &Paths, state: &AppState) -> Result<()> {
@@ -453,8 +619,31 @@ pub fn domain_resolves_locally(domain: &str) -> bool {
     false
 }
 
-pub fn check_hosts_status(state: &AppState) -> HostsStatus {
+/// Prefer parsing the hosts file (avoids DNS-cache false negatives), then fall back to resolution.
+pub fn check_hosts_status(paths: &Paths, state: &AppState) -> HostsStatus {
     let domains = site_domains(&state.sites);
+    let hosts_path = system_hosts_path();
+    if let Ok(contents) = fs::read_to_string(&hosts_path) {
+        let missing = domains_missing_from_hosts(&contents, &domains);
+        if missing.is_empty() {
+            return HostsStatus {
+                ok: true,
+                missing,
+                message: None,
+            };
+        }
+        return HostsStatus {
+            ok: false,
+            message: Some(format!(
+                "Hosts file is missing DevStack entries for: {}. .test domains will not open until repaired.",
+                missing.join(", ")
+            )),
+            missing,
+        };
+    }
+
+    // Unreadable hosts file — fall back to DNS resolution.
+    let _ = paths;
     let mut missing = Vec::new();
     for d in &domains {
         if !domain_resolves_locally(d) {
@@ -471,7 +660,8 @@ pub fn check_hosts_status(state: &AppState) -> HostsStatus {
         HostsStatus {
             ok: false,
             message: Some(format!(
-                "Hosts file is missing DevStack entries for: {}. .test domains will not open until repaired.",
+                "Could not read {} and these .test domains do not resolve locally: {}.",
+                hosts_path.display(),
                 missing.join(", ")
             )),
             missing,
@@ -479,14 +669,14 @@ pub fn check_hosts_status(state: &AppState) -> HostsStatus {
     }
 }
 
-/// Sync hosts if any configured domain does not resolve locally.
+/// Sync hosts + CA when the DevStack block is incomplete.
 pub fn ensure_hosts_if_needed(paths: &Paths, state: &AppState) -> Result<HostsStatus> {
-    let status = check_hosts_status(state);
+    let status = check_hosts_status(paths, state);
     if status.ok {
         return Ok(status);
     }
-    sync_hosts(paths, state)?;
-    Ok(check_hosts_status(state))
+    sync_hosts_and_trust_ca(paths, state)?;
+    Ok(check_hosts_status(paths, state))
 }
 
 /// Start a tiny UDP DNS that answers `*.test` / `*.test.` with 127.0.0.1.

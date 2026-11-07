@@ -1,6 +1,6 @@
 [package]
 name = "devstack"
-version = "0.2.3"
+version = "0.2.4"
 description = "DevStack — local PHP/Node development environment"
 authors = ["DevStack"]
 edition = "2021"
@@ -44,6 +44,7 @@ sysinfo = "0.33"
 ar = "0.9"
 notify = { version = "6", features = ["macos_fsevent"] }
 tauri-plugin-dialog = "2.8.4"
+dunce = "1"
 
 [profile.release]
 codegen-units = 1
