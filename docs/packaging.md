@@ -9,6 +9,8 @@ DevStack ships macOS and Windows installers via GitHub Actions (`/.github/workfl
 | `macos-latest` + `universal-apple-darwin` | Universal `.dmg` / `.app` (arm64 + x64) |
 | `windows-latest` | NSIS `.exe` and/or `.msi` |
 
+Nginx installs from nginx.org Windows `.zip` builds; on macOS DevStack compiles the official source tarball (Xcode CLT). Optional `DEVSTACK_NGINX_MANIFEST_URL` overrides both.
+
 Triggers: push of a `v*` tag (or manual `workflow_dispatch`). Artifacts upload to a **draft** GitHub Release.
 
 **Unsigned builds are intentional.** The workflow succeeds without any signing secrets.

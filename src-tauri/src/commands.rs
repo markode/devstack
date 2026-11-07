@@ -68,6 +68,13 @@ pub async fn get_app_info(ctx: State<'_, Arc<AppCtx>>) -> Result<AppInfo> {
     })
 }
 
+/// Ensure the backups directory exists and return its absolute path.
+#[tauri::command]
+pub async fn get_backups_dir(ctx: State<'_, Arc<AppCtx>>) -> Result<String> {
+    std::fs::create_dir_all(&ctx.paths.backups)?;
+    Ok(ctx.paths.backups.display().to_string())
+}
+
 #[tauri::command]
 pub async fn list_packages(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<PackageInfo>> {
     Ok(ctx.registry.list_packages())

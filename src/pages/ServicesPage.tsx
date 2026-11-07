@@ -3,6 +3,7 @@ import { Hero, VersionTable } from "../components/VersionTable";
 import { usePackageVersions } from "../hooks/usePackageVersions";
 import * as client from "../client";
 import type { ManagedServiceStatus, PackageInfo } from "../types";
+import { openInBrowser } from "../open";
 
 const SERVICE_IDS = [
   "nginx",
@@ -24,15 +25,29 @@ export function ServicesPage() {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = async () => {
-    try {
-      const [pkgs, svc] = await Promise.all([
-        client.listPackages(),
-        client.listManagedServices(),
-      ]);
-      setPackages(pkgs);
-      setServices(svc);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    // Load independently so a services-status failure cannot leave Install
+    // buttons stuck disabled (meta.installReady was defaulting to false).
+    const results = await Promise.allSettled([
+      client.listPackages(),
+      client.listManagedServices(),
+    ]);
+    if (results[0].status === "fulfilled") {
+      setPackages(results[0].value);
+    } else {
+      setError(
+        results[0].reason instanceof Error
+          ? results[0].reason.message
+          : String(results[0].reason),
+      );
+    }
+    if (results[1].status === "fulfilled") {
+      setServices(results[1].value);
+    } else if (results[0].status === "fulfilled") {
+      setError(
+        results[1].reason instanceof Error
+          ? results[1].reason.message
+          : String(results[1].reason),
+      );
     }
   };
 
@@ -117,14 +132,17 @@ export function ServicesPage() {
                 Logs
               </button>
               {svc.uiUrl ? (
-                <a
+                <button
+                  type="button"
                   className="btn btn-install"
-                  href={svc.uiUrl}
-                  target="_blank"
-                  rel="noreferrer"
+                  onClick={() => {
+                    void openInBrowser(svc.uiUrl!).catch((e) =>
+                      setError(e instanceof Error ? e.message : String(e)),
+                    );
+                  }}
                 >
                   Open
-                </a>
+                </button>
               ) : null}
             </div>
           </div>
@@ -166,18 +184,23 @@ function ServiceBlock({
   meta?: PackageInfo;
 }) {
   const pkg = usePackageVersions(id);
+  const [localError, setLocalError] = useState<string | null>(null);
+  // Default true so a missing/slow package-meta fetch does not grey out Install.
+  const installReady = meta?.installReady ?? true;
   return (
     <div style={{ marginBottom: 22 }}>
       <div className="section-head">
         <h2>
           {meta?.name ?? id}
-          {!meta?.installReady ? (
+          {meta && !meta.installReady ? (
             <span className="badge">list only</span>
           ) : null}
         </h2>
         <p>{meta?.description ?? "Service package"}</p>
       </div>
-      {pkg.error ? <div className="error-banner">{pkg.error}</div> : null}
+      {pkg.error || localError ? (
+        <div className="error-banner">{pkg.error ?? localError}</div>
+      ) : null}
       {pkg.loading ? (
         <div className="loading">Loading versions…</div>
       ) : (
@@ -186,9 +209,13 @@ function ServiceBlock({
           installed={pkg.installed}
           busyKey={pkg.busyKey}
           progress={pkg.progress}
-          installReady={meta?.installReady ?? false}
-          onInstall={pkg.install}
+          installReady={installReady}
+          onInstall={(version) => {
+            setLocalError(null);
+            void pkg.install(version);
+          }}
           onUninstall={pkg.uninstall}
+          onUnavailable={(message) => setLocalError(message)}
         />
       )}
     </div>

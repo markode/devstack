@@ -27,6 +27,11 @@ export async function getAppInfo(): Promise<AppInfo> {
   return api.getAppInfo();
 }
 
+export async function getBackupsDir(): Promise<string> {
+  if (useMock()) return "/tmp/DevStack/backups";
+  return api.getBackupsDir();
+}
+
 export async function listPackages(): Promise<PackageInfo[]> {
   if (useMock()) return mock.mockPackages;
   return api.listPackages();

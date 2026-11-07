@@ -1,9 +1,15 @@
 import { useEffect, useState } from "react";
 import * as client from "../client";
+import {
+  browseDatabaseDump,
+  openInBrowser,
+  openInEditor,
+  openInFileManager,
+} from "../open";
 import type {
   CreateWordPressResult,
+  InstalledPackage,
   JobProgress,
-  PackageVersion,
   SiteDetails,
   StackStatus,
   TemplateRecord,
@@ -15,8 +21,8 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   const [selectedId, setSelectedId] = useState<string | null>(
     initialSiteId ?? null,
   );
-  const [phpVersions, setPhpVersions] = useState<PackageVersion[]>([]);
-  const [nodeVersions, setNodeVersions] = useState<PackageVersion[]>([]);
+  const [phpInstalled, setPhpInstalled] = useState<InstalledPackage[]>([]);
+  const [nodeInstalled, setNodeInstalled] = useState<InstalledPackage[]>([]);
   const [stack, setStack] = useState<StackStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -31,14 +37,14 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
     try {
       const [d, php, node, st, tpl] = await Promise.all([
         client.listSiteDetails(),
-        client.listPackageVersions("php"),
-        client.listPackageVersions("node"),
+        client.listInstalled("php"),
+        client.listInstalled("node"),
         client.getStackStatus(),
         client.getTemplates(),
       ]);
       setDetails(d);
-      setPhpVersions(php);
-      setNodeVersions(node);
+      setPhpInstalled(php);
+      setNodeInstalled(node);
       setStack(st);
       setTemplates(tpl);
     } catch (e) {
@@ -52,7 +58,17 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
     void client.onJobProgress((ev) => setProgress(ev)).then((u) => {
       unlisten = u;
     });
-    return () => unlisten?.();
+    // Re-fetch installed runtimes when returning from PHP/JS install pages.
+    const onFocus = () => {
+      void refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      unlisten?.();
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
   }, []);
 
   useEffect(() => {
@@ -127,8 +143,8 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       <>
         <SiteDetail
           details={selected}
-          phpVersions={phpVersions}
-          nodeVersions={nodeVersions}
+          phpInstalled={phpInstalled}
+          nodeInstalled={nodeInstalled}
           busy={busy}
           lastBackup={lastBackup}
           onBack={backToGrid}
@@ -150,6 +166,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
               await client.restoreSiteDatabase(selected.site.id, path);
             })
           }
+          onToast={setError}
         />
         {showDuplicate ? (
           <DuplicateModal
@@ -164,7 +181,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
               })),
             ]}
             defaultSource={selected.site.id}
-            phpVersions={phpVersions}
+            phpInstalled={phpInstalled}
             busy={busy}
             onClose={() => setShowDuplicate(false)}
             onSubmit={(req) =>
@@ -260,7 +277,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
 
       {showNewWp ? (
         <NewWordpressModal
-          phpVersions={phpVersions}
+          phpInstalled={phpInstalled}
           busy={busy}
           onClose={() => setShowNewWp(false)}
           onSubmit={(req) =>
@@ -286,7 +303,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
               label: `Site · ${d.site.name} (${d.site.domain})`,
             })),
           ]}
-          phpVersions={phpVersions}
+          phpInstalled={phpInstalled}
           busy={busy}
           onClose={() => setShowDuplicate(false)}
           onSubmit={(req) =>
@@ -331,13 +348,17 @@ function ProgressToast({ progress }: { progress: JobProgress }) {
   );
 }
 
+function runtimeValue(pkg: InstalledPackage): string {
+  return pkg.channel || pkg.version;
+}
+
 function NewWordpressModal({
-  phpVersions,
+  phpInstalled,
   busy,
   onClose,
   onSubmit,
 }: {
-  phpVersions: PackageVersion[];
+  phpInstalled: InstalledPackage[];
   busy: boolean;
   onClose: () => void;
   onSubmit: (req: {
@@ -352,7 +373,9 @@ function NewWordpressModal({
   const [name, setName] = useState("my-site");
   const [domain, setDomain] = useState("my-site.test");
   const [path, setPath] = useState("~/Sites/my-site");
-  const [php, setPhp] = useState(phpVersions[0]?.channel ?? "8.3");
+  const [php, setPhp] = useState(
+    phpInstalled[0] ? runtimeValue(phpInstalled[0]) : "",
+  );
   const [engine, setEngine] = useState("mariadb");
   const [locale, setLocale] = useState("en_US");
 
@@ -388,17 +411,26 @@ function NewWordpressModal({
         <div className="field-row">
           <label className="field">
             PHP
-            <select
-              className="native"
-              value={php}
-              onChange={(e) => setPhp(e.target.value)}
-            >
-              {phpVersions.map((v) => (
-                <option key={v.version} value={v.channel}>
-                  {v.channel}
-                </option>
-              ))}
-            </select>
+            {phpInstalled.length === 0 ? (
+              <span className="hint">
+                No PHP installed —{" "}
+                <a href="#/php" onClick={onClose}>
+                  install one
+                </a>
+              </span>
+            ) : (
+              <select
+                className="native"
+                value={php}
+                onChange={(e) => setPhp(e.target.value)}
+              >
+                {phpInstalled.map((v) => (
+                  <option key={v.version} value={runtimeValue(v)}>
+                    {runtimeValue(v)}
+                  </option>
+                ))}
+              </select>
+            )}
           </label>
           <label className="field">
             Database
@@ -430,7 +462,7 @@ function NewWordpressModal({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={busy || !name.trim()}
+            disabled={busy || !name.trim() || !php}
             onClick={() =>
               onSubmit({
                 name: name.trim(),
@@ -453,14 +485,14 @@ function NewWordpressModal({
 function DuplicateModal({
   sources,
   defaultSource,
-  phpVersions,
+  phpInstalled,
   busy,
   onClose,
   onSubmit,
 }: {
   sources: { id: string; label: string }[];
   defaultSource?: string;
-  phpVersions: PackageVersion[];
+  phpInstalled: InstalledPackage[];
   busy: boolean;
   onClose: () => void;
   onSubmit: (req: {
@@ -478,7 +510,9 @@ function DuplicateModal({
   const [name, setName] = useState("copy-site");
   const [domain, setDomain] = useState("copy-site.test");
   const [path, setPath] = useState("~/Sites/copy-site");
-  const [php, setPhp] = useState(phpVersions[0]?.channel ?? "8.3");
+  const [php, setPhp] = useState(
+    phpInstalled[0] ? runtimeValue(phpInstalled[0]) : "",
+  );
   const [engine, setEngine] = useState("mariadb");
 
   useEffect(() => {
@@ -527,17 +561,26 @@ function DuplicateModal({
         <div className="field-row">
           <label className="field">
             PHP
-            <select
-              className="native"
-              value={php}
-              onChange={(e) => setPhp(e.target.value)}
-            >
-              {phpVersions.map((v) => (
-                <option key={v.version} value={v.channel}>
-                  {v.channel}
-                </option>
-              ))}
-            </select>
+            {phpInstalled.length === 0 ? (
+              <span className="hint">
+                No PHP installed —{" "}
+                <a href="#/php" onClick={onClose}>
+                  install one
+                </a>
+              </span>
+            ) : (
+              <select
+                className="native"
+                value={php}
+                onChange={(e) => setPhp(e.target.value)}
+              >
+                {phpInstalled.map((v) => (
+                  <option key={v.version} value={runtimeValue(v)}>
+                    {runtimeValue(v)}
+                  </option>
+                ))}
+              </select>
+            )}
           </label>
           <label className="field">
             Database
@@ -558,7 +601,9 @@ function DuplicateModal({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={busy || !sourceId || !name.trim() || !path.trim()}
+            disabled={
+              busy || !sourceId || !name.trim() || !path.trim() || !php
+            }
             onClick={() =>
               onSubmit({
                 sourceId,
@@ -615,14 +660,17 @@ function CredentialsModal({
           </div>
         </div>
         <div className="modal-actions">
-          <a
+          <button
+            type="button"
             className="btn btn-install"
-            href={result.url}
-            target="_blank"
-            rel="noreferrer"
+            onClick={() => {
+              void openInBrowser(result.url).catch((e) =>
+                console.error(e instanceof Error ? e.message : String(e)),
+              );
+            }}
           >
             Open in browser
-          </a>
+          </button>
           <button type="button" className="btn btn-primary" onClick={onClose}>
             Done
           </button>
@@ -634,8 +682,8 @@ function CredentialsModal({
 
 function SiteDetail({
   details,
-  phpVersions,
-  nodeVersions,
+  phpInstalled,
+  nodeInstalled,
   busy,
   lastBackup,
   onBack,
@@ -644,10 +692,11 @@ function SiteDetail({
   onDuplicate,
   onBackup,
   onRestore,
+  onToast,
 }: {
   details: SiteDetails;
-  phpVersions: PackageVersion[];
-  nodeVersions: PackageVersion[];
+  phpInstalled: InstalledPackage[];
+  nodeInstalled: InstalledPackage[];
   busy: boolean;
   lastBackup: string | null;
   onBack: () => void;
@@ -660,9 +709,36 @@ function SiteDetail({
   onDuplicate: () => void;
   onBackup: () => void;
   onRestore: (path: string) => void;
+  onToast: (message: string | null) => void;
 }) {
   const site = details.site;
   const [restorePath, setRestorePath] = useState("");
+  const [backupsDir, setBackupsDir] = useState<string | null>(null);
+
+  useEffect(() => {
+    void client
+      .getBackupsDir()
+      .then(setBackupsDir)
+      .catch((e) =>
+        onToast(e instanceof Error ? e.message : String(e)),
+      );
+  }, [onToast]);
+
+  const runOpen = (fn: () => Promise<void>) => {
+    void fn().catch((e) =>
+      onToast(e instanceof Error ? e.message : String(e)),
+    );
+  };
+
+  const phpOptions = phpInstalled.map((p) => runtimeValue(p));
+  const nodeOptions = nodeInstalled.map((p) => runtimeValue(p));
+  // Keep current selection visible even if no longer installed.
+  if (site.phpVersion && !phpOptions.includes(site.phpVersion)) {
+    phpOptions.unshift(site.phpVersion);
+  }
+  if (site.nodeVersion && !nodeOptions.includes(site.nodeVersion)) {
+    nodeOptions.unshift(site.nodeVersion);
+  }
 
   return (
     <div className="site-detail">
@@ -687,14 +763,17 @@ function SiteDetail({
           </div>
         </div>
         <div className="row-actions">
-          <a
+          <button
+            type="button"
             className="btn btn-primary"
-            href={site.https ? details.httpsUrl : details.url}
-            target="_blank"
-            rel="noreferrer"
+            onClick={() =>
+              runOpen(() =>
+                openInBrowser(site.https ? details.httpsUrl : details.url),
+              )
+            }
           >
             Open in browser
-          </a>
+          </button>
         </div>
       </div>
 
@@ -704,34 +783,72 @@ function SiteDetail({
             <label>Environment</label>
           </div>
           <div className="settings-row">
-            <label>PHP</label>
-            <select
-              className="native"
-              value={site.phpVersion ?? ""}
-              onChange={(e) => onPatch({ phpVersion: e.target.value || null })}
-            >
-              <option value="">System</option>
-              {phpVersions.map((v) => (
-                <option key={v.version} value={v.channel}>
-                  {v.channel}
-                </option>
-              ))}
-            </select>
+            <label>
+              PHP
+              {phpInstalled.length === 0 ? (
+                <span className="hint">No versions installed yet</span>
+              ) : null}
+            </label>
+            {phpInstalled.length === 0 ? (
+              <button
+                type="button"
+                className="btn btn-install"
+                onClick={() => {
+                  window.location.hash = "#/php";
+                }}
+              >
+                Install PHP
+              </button>
+            ) : (
+              <select
+                className="native"
+                value={site.phpVersion ?? ""}
+                onChange={(e) =>
+                  onPatch({ phpVersion: e.target.value || null })
+                }
+              >
+                <option value="">System</option>
+                {phpOptions.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           <div className="settings-row">
-            <label>Node</label>
-            <select
-              className="native"
-              value={site.nodeVersion ?? ""}
-              onChange={(e) => onPatch({ nodeVersion: e.target.value || null })}
-            >
-              <option value="">System</option>
-              {nodeVersions.map((v) => (
-                <option key={v.version} value={v.channel}>
-                  {v.channel}
-                </option>
-              ))}
-            </select>
+            <label>
+              Node
+              {nodeInstalled.length === 0 ? (
+                <span className="hint">No versions installed yet</span>
+              ) : null}
+            </label>
+            {nodeInstalled.length === 0 ? (
+              <button
+                type="button"
+                className="btn btn-install"
+                onClick={() => {
+                  window.location.hash = "#/javascript";
+                }}
+              >
+                Install Node
+              </button>
+            ) : (
+              <select
+                className="native"
+                value={site.nodeVersion ?? ""}
+                onChange={(e) =>
+                  onPatch({ nodeVersion: e.target.value || null })
+                }
+              >
+                <option value="">System</option>
+                {nodeOptions.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           <div className="settings-row">
             <label>HTTPS</label>
@@ -755,9 +872,9 @@ function SiteDetail({
             <button
               type="button"
               className="btn btn-install"
-              onClick={() => {
-                void navigator.clipboard?.writeText(details.absolutePath);
-              }}
+              onClick={() =>
+                runOpen(() => openInFileManager(details.absolutePath))
+              }
             >
               Open folder
             </button>
@@ -765,14 +882,12 @@ function SiteDetail({
           <div className="settings-row">
             <label>
               Editor
-              <span className="hint">Reveal path for your IDE</span>
+              <span className="hint">Open path with the default app</span>
             </label>
             <button
               type="button"
               className="btn btn-install"
-              onClick={() => {
-                void navigator.clipboard?.writeText(details.absolutePath);
-              }}
+              onClick={() => runOpen(() => openInEditor(details.absolutePath))}
             >
               Open in editor
             </button>
@@ -789,14 +904,15 @@ function SiteDetail({
               </span>
             </label>
             {details.phpmyadminUrl ? (
-              <a
+              <button
+                type="button"
                 className="btn btn-primary"
-                href={details.phpmyadminUrl}
-                target="_blank"
-                rel="noreferrer"
+                onClick={() =>
+                  runOpen(() => openInBrowser(details.phpmyadminUrl!))
+                }
               >
                 Open database
-              </a>
+              </button>
             ) : (
               <span className="muted" style={{ fontSize: 12 }}>
                 {details.framework === "wordpress"
@@ -859,7 +975,10 @@ function SiteDetail({
         <div className="settings-row">
           <label>
             Restore
-            <span className="hint">Path to .sql.gz / .sql.zst</span>
+            <span className="hint">
+              .sql / .sql.gz / .sql.zst
+              {backupsDir ? ` · ${backupsDir}` : ""}
+            </span>
           </label>
           <div className="restore-row">
             <input
@@ -867,6 +986,36 @@ function SiteDetail({
               placeholder="/path/to/backup.sql.gz"
               onChange={(e) => setRestorePath(e.target.value)}
             />
+            <button
+              type="button"
+              className="btn btn-install"
+              disabled={busy || !backupsDir}
+              title="Open backups folder"
+              onClick={() => {
+                if (!backupsDir) return;
+                runOpen(() => openInFileManager(backupsDir));
+              }}
+            >
+              Open folder
+            </button>
+            <button
+              type="button"
+              className="btn btn-install"
+              disabled={busy}
+              onClick={() => {
+                void browseDatabaseDump({
+                  defaultPath: backupsDir ?? undefined,
+                })
+                  .then((picked) => {
+                    if (picked) setRestorePath(picked);
+                  })
+                  .catch((e) =>
+                    onToast(e instanceof Error ? e.message : String(e)),
+                  );
+              }}
+            >
+              Browse
+            </button>
             <button
               type="button"
               className="btn btn-install"
