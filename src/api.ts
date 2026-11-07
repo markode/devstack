@@ -208,3 +208,60 @@ export async function updatePackage(
 ): Promise<InstalledPackage> {
   return invoke<InstalledPackage>("update_package", { packageId });
 }
+
+export async function getDbFilesSettings(): Promise<
+  import("./types").DatabaseFilesSettings
+> {
+  return invoke("get_db_files_settings");
+}
+
+export async function getDatabasesFolder(): Promise<string> {
+  return invoke<string>("get_databases_folder");
+}
+
+export async function updateDbFilesSettings(patch: {
+  folder?: string | null;
+  autoExportIntervalSecs?: number;
+  autoExportOnStop?: boolean;
+  importMode?: string;
+}): Promise<import("./types").DatabaseFilesSettings> {
+  return invoke("update_db_files_settings", {
+    folder: patch.folder ?? null,
+    autoExportIntervalSecs: patch.autoExportIntervalSecs ?? null,
+    autoExportOnStop: patch.autoExportOnStop ?? null,
+    importMode: patch.importMode ?? null,
+  });
+}
+
+export async function listDatabaseFiles(): Promise<
+  import("./types").DbFileEntry[]
+> {
+  return invoke("list_database_files");
+}
+
+export async function exportAllDatabasesToFolder(): Promise<
+  import("./types").DbFileEntry[]
+> {
+  return invoke("export_all_databases_to_folder");
+}
+
+export async function downloadSiteDatabase(
+  siteId: string,
+  destPath: string,
+): Promise<BackupResult> {
+  return invoke<BackupResult>("download_site_database", { siteId, destPath });
+}
+
+export async function importSiteDatabaseFile(
+  siteId: string,
+  archivePath: string,
+  search?: string | null,
+  replace?: string | null,
+): Promise<void> {
+  return invoke("import_site_database_file", {
+    siteId,
+    archivePath,
+    search: search ?? null,
+    replace: replace ?? null,
+  });
+}

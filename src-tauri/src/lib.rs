@@ -10,14 +10,21 @@ use std::sync::Arc;
 
 use commands::{
     apply_dev_stack, backup_site_database, bootstrap_ctx, create_site_cmd, create_wordpress,
-    duplicate_site, get_app_info, get_service_log, get_site_details, get_sites, get_stack_status,
-    get_templates, install_package, list_installed, list_managed_services_cmd,
-    list_package_versions, list_packages, list_php_extension_settings, list_site_details,
-    mark_template, register_system_php_cmd, restore_site_database, seed_site_large_table,
-    set_php_manifest_url, set_php_xdebug, start_dev_stack, start_managed_service, stop_dev_stack,
-    stop_managed_service, uninstall_package, update_package, update_site_environment,
+    download_site_database, duplicate_site, export_all_databases_to_folder,
+    export_database_to_folder, get_app_info, get_databases_folder, get_db_files_settings,
+    get_service_log, get_site_details, get_sites, get_stack_status, get_templates,
+    import_database_from_folder, import_site_database_file, install_package, list_database_files,
+    list_installed, list_managed_services_cmd, list_package_versions, list_packages,
+    list_php_extension_settings, list_site_details, mark_template, register_system_php_cmd,
+    restore_site_database, seed_site_large_table, set_php_manifest_url, set_php_xdebug,
+    start_dev_stack, start_managed_service, stop_dev_stack, stop_managed_service, uninstall_package,
+    update_db_files_settings, update_package, update_site_environment,
 };
 use config::default_data_root;
+use services::db_files::{
+    databases_folder, export_all_running, new_suppress_set, spawn_folder_watcher,
+};
+use services::progress::noop_job_progress;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -35,8 +42,86 @@ pub fn run() {
     let ctx = bootstrap_ctx(default_data_root()).expect("failed to init DevStack data dir");
     let ctx = Arc::new(ctx);
 
+    // Folder watcher + scheduled auto-export for Databases/
+    {
+        let watch_ctx = ctx.clone();
+        let suppress = new_suppress_set();
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok();
+        let folder = rt.as_ref().and_then(|rt| {
+            rt.block_on(async {
+                let state = watch_ctx.state.lock().await;
+                databases_folder(&watch_ctx.paths, &state.db_files).ok()
+            })
+        });
+        if let Some(root) = folder {
+            let emit_ctx = watch_ctx.clone();
+            let _ = spawn_folder_watcher(root, suppress, running.clone(), move |mut ev| {
+                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                rt.block_on(async {
+                    let mode = emit_ctx.state.lock().await.db_files.import_mode.clone();
+                    ev.import_mode = mode.clone();
+                    if mode == "auto" {
+                        let progress = noop_job_progress();
+                        let state = emit_ctx.state.lock().await;
+                        let _ = crate::services::db_files::import_database_file(
+                            &emit_ctx.paths,
+                            &state,
+                            &ev.engine,
+                            &ev.database,
+                            std::path::Path::new(&ev.path),
+                            &progress,
+                            "watch-import",
+                        );
+                    }
+                    let _ = ev;
+                });
+            });
+        }
+
+        // Interval auto-export
+        let export_ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            loop {
+                let secs = rt.block_on(async {
+                    export_ctx.state.lock().await.db_files.auto_export_interval_secs
+                });
+                if secs == 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(secs.max(30)));
+                let progress = noop_job_progress();
+                rt.block_on(async {
+                    let state = export_ctx.state.lock().await;
+                    let _ = export_all_running(
+                        &export_ctx.paths,
+                        &state,
+                        &progress,
+                        "auto-export",
+                    );
+                });
+            }
+        });
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(ctx)
         .invoke_handler(tauri::generate_handler![
             get_app_info,
@@ -70,6 +155,15 @@ pub fn run() {
             stop_managed_service,
             get_service_log,
             update_package,
+            get_db_files_settings,
+            get_databases_folder,
+            update_db_files_settings,
+            list_database_files,
+            export_database_to_folder,
+            export_all_databases_to_folder,
+            import_database_from_folder,
+            download_site_database,
+            import_site_database_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");

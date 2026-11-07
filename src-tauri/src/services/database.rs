@@ -236,6 +236,15 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
 }
 
 pub fn stop_database(paths: &Paths, state: &mut AppState) -> Result<()> {
+    if state.db_files.auto_export_on_stop {
+        let progress = crate::services::progress::noop_job_progress();
+        let _ = crate::services::db_files::export_all_running(
+            paths,
+            state,
+            &progress,
+            "export-on-stop",
+        );
+    }
     if let Some(pid) = state.runtime.database_pid.take() {
         stop_pid(pid)?;
     }

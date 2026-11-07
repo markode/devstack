@@ -663,6 +663,9 @@ function SiteDetail({
 }) {
   const site = details.site;
   const [restorePath, setRestorePath] = useState("");
+  const [importPath, setImportPath] = useState("");
+  const [srFrom, setSrFrom] = useState("");
+  const [srTo, setSrTo] = useState("");
 
   return (
     <div className="site-detail">
@@ -856,6 +859,94 @@ function SiteDetail({
             Backup database
           </button>
         </div>
+        <div className="settings-row">
+          <label>
+            Download database
+            <span className="hint">Save a streamed dump to any path</span>
+          </label>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={busy || !details.databaseName}
+            onClick={() => {
+              const dest = window.prompt(
+                "Save dump as (.sql.gz):",
+                `~/Downloads/${site.id}.sql.gz`,
+              );
+              if (!dest?.trim()) return;
+              void (async () => {
+                try {
+                  const r = await client.downloadSiteDatabase(
+                    site.id,
+                    dest.trim(),
+                  );
+                  window.alert(`Saved ${formatBytes(r.bytes)} → ${r.path}`);
+                } catch (e) {
+                  window.alert(e instanceof Error ? e.message : String(e));
+                }
+              })();
+            }}
+          >
+            Download…
+          </button>
+        </div>
+        <div className="settings-row">
+          <label>
+            Import database
+            <span className="hint">
+              .sql / .sql.gz / .zst / .zip — WordPress auto search-replace
+            </span>
+          </label>
+          <div className="restore-row">
+            <input
+              value={importPath}
+              placeholder="/path/to/dump.sql.gz"
+              onChange={(e) => setImportPath(e.target.value)}
+            />
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={busy || !importPath.trim() || !details.databaseName}
+              onClick={() => {
+                void (async () => {
+                  try {
+                    await client.importSiteDatabaseFile(
+                      site.id,
+                      importPath.trim(),
+                      srFrom.trim() || null,
+                      srTo.trim() || null,
+                    );
+                    window.alert("Import complete (URL rewrite applied when WP)");
+                  } catch (e) {
+                    window.alert(e instanceof Error ? e.message : String(e));
+                  }
+                })();
+              }}
+            >
+              Import
+            </button>
+          </div>
+        </div>
+        {details.framework !== "wordpress" ? (
+          <div className="settings-row">
+            <label>
+              Optional search → replace
+              <span className="hint">Non-WordPress URL rewrite</span>
+            </label>
+            <div className="restore-row">
+              <input
+                value={srFrom}
+                placeholder="old URL"
+                onChange={(e) => setSrFrom(e.target.value)}
+              />
+              <input
+                value={srTo}
+                placeholder="new URL"
+                onChange={(e) => setSrTo(e.target.value)}
+              />
+            </div>
+          </div>
+        ) : null}
         <div className="settings-row">
           <label>
             Restore

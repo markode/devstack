@@ -64,6 +64,21 @@ export interface AppInfo {
   stack?: StackStatus;
 }
 
+export interface DatabaseFilesSettings {
+  folder?: string | null;
+  autoExportIntervalSecs: number;
+  autoExportOnStop: boolean;
+  importMode: string;
+}
+
+export interface DbFileEntry {
+  engine: string;
+  database: string;
+  path: string;
+  bytes: number;
+  modifiedAt?: string | null;
+}
+
 export interface SiteRecord {
   id: string;
   name: string;

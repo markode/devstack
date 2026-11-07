@@ -35,14 +35,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stack = args.iter().any(|a| a == "--stack");
     let services = args.iter().any(|a| a == "--services");
     let wordpress = args.iter().any(|a| a == "--wordpress");
+    let db_files = args.iter().any(|a| a == "--db-files");
     let skip_mariadb = args.iter().any(|a| a == "--skip-mariadb");
     // Default: services smoke when no mode flag given
     let services = services
-        || (!install_node && !stack && !wordpress && !args.iter().any(|a| a == "--help"));
+        || (!install_node
+            && !stack
+            && !wordpress
+            && !db_files
+            && !args.iter().any(|a| a == "--help"));
 
     if args.iter().any(|a| a == "--help") {
         eprintln!(
-            "devstack_smoke [--stack] [--wordpress] [--services] [--skip-mariadb] [--install-node]"
+            "devstack_smoke [--stack] [--wordpress] [--db-files] [--services] [--skip-mariadb] [--install-node]"
         );
         return Ok(());
     }
@@ -89,6 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if wordpress {
         run_wordpress_smoke(&ctx, skip_mariadb).await?;
+    }
+
+    if db_files {
+        run_db_files_smoke(&ctx, skip_mariadb).await?;
     }
 
     if services {
@@ -336,6 +345,105 @@ async fn run_wordpress_smoke(
     }
     // homeurl option check via wp-cli if possible
     println!("SMOKE PASS: WordPress demo.test + clone.test over HTTPS");
+    Ok(())
+}
+
+async fn run_db_files_smoke(
+    ctx: &DevStackCtx,
+    skip_mariadb: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::db_files::{
+        databases_folder, export_database_file, import_database_file, list_db_files,
+        post_import_url_rewrite,
+    };
+    use devstack_lib::services::progress::noop_job_progress;
+
+    println!("=== Databases folder smoke ===");
+    ensure_stack(ctx, skip_mariadb).await?;
+    let progress = noop_job_progress();
+
+    let created = {
+        let mut state = ctx.state.lock().await;
+        let php_ver = state
+            .installed
+            .get("php")
+            .and_then(|v| v.first())
+            .map(|r| r.version.clone())
+            .unwrap_or_else(|| "8.3".into());
+        create_wordpress_site(
+            &ctx.paths,
+            &mut state,
+            CreateWordPressRequest {
+                name: "dbfiles".into(),
+                domain: Some("dbfiles.test".into()),
+                path: Some(ctx.paths.root.join("sites/dbfiles").display().to_string()),
+                php_version: Some(php_ver),
+                database_engine: Some("mariadb".into()),
+                locale: Some("en_US".into()),
+                admin_user: Some("admin".into()),
+                site_title: Some("DB Files Blog".into()),
+            },
+            &progress,
+            "dbfiles-wp",
+        )
+        .await?
+    };
+
+    let engine = created
+        .site
+        .database_engine
+        .clone()
+        .unwrap_or_else(|| "mariadb".into());
+    let db = created
+        .site
+        .database_name
+        .clone()
+        .ok_or("missing db name")?;
+
+    {
+        let state = ctx.state.lock().await;
+        let entry = export_database_file(
+            &ctx.paths,
+            &state,
+            &engine,
+            &db,
+            &progress,
+            "dbfiles-export",
+        )?;
+        println!("exported {} ({} bytes)", entry.path, entry.bytes);
+        let listed = list_db_files(&ctx.paths, &state)?;
+        if !listed.iter().any(|e| e.database == db) {
+            return Err("export missing from Databases folder listing".into());
+        }
+        let folder = databases_folder(&ctx.paths, &state.db_files)?;
+        let dump = std::path::PathBuf::from(&entry.path);
+        // Re-import same dump (safety backup + restore) then WP URL rewrite no-op
+        import_database_file(
+            &ctx.paths,
+            &state,
+            &engine,
+            &db,
+            &dump,
+            &progress,
+            "dbfiles-import",
+        )?;
+        println!("re-imported from {}", dump.display());
+        let _ = folder;
+    }
+    {
+        let state = ctx.state.lock().await;
+        post_import_url_rewrite(
+            &ctx.paths,
+            &state,
+            &created.site,
+            None,
+            &progress,
+            "dbfiles-sr",
+        )
+        .await?;
+    }
+
+    println!("SMOKE PASS: Databases folder export + import + WP rewrite hook");
     Ok(())
 }
 
