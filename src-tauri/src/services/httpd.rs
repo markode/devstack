@@ -252,20 +252,58 @@ IncludeOptional "{sites}/*.conf"
 fn nix_geteuid() -> u32 {
     #[cfg(unix)]
     {
-        // Avoid a libc dependency — parse from /proc when available, else assume non-root.
-        std::fs::read_to_string("/proc/self/status")
+        // Linux: /proc. macOS/BSD: `id -u` (no /proc).
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            if let Some(uid) = s
+                .lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+            {
+                return uid;
+            }
+        }
+        crate::services::process::command("id")
+            .arg("-u")
+            .output()
             .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("Uid:"))
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .and_then(|v| v.parse().ok())
-            })
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
             .unwrap_or(1000)
     }
     #[cfg(not(unix))]
     {
         0
+    }
+}
+
+/// PHP proxy directives for a vhost.
+///
+/// Windows uses php-cgi + `ProxyPassMatch` with an absolute docroot inside the
+/// worker URL so SCRIPT_FILENAME is a real filesystem path (SetHandler with a
+/// trailing slash yields "No input file specified"; without it, Windows drive
+/// letters glue onto the host → `127.0.0.1:9000d`).
+///
+/// Unix uses php-fpm via SetHandler.
+fn php_proxy_block(runtime: &PhpRuntime, docroot_conf: &str) -> String {
+    let pass = nginx_fastcgi_pass(runtime);
+    if cfg!(windows) {
+        let host = pass.trim_start_matches("unix:");
+        // docroot_conf is already forward-slash form (D:/…).
+        format!(
+            r#"  ProxyFCGIBackendType GENERIC
+  ProxyPassMatch "^/(.*\.php(/.*)?)$" "fcgi://{host}/{docroot_conf}/$1"
+  ProxyTimeout 3600
+"#
+        )
+    } else {
+        let fcgi = fcgi_target(runtime);
+        format!(
+            r#"  <FilesMatch "\.php$">
+    SetHandler "proxy:{fcgi}"
+  </FilesMatch>
+  ProxyTimeout 3600
+"#
+        )
     }
 }
 
@@ -282,7 +320,8 @@ fn write_vhost(
     let Some(runtime) = php_for_site(site, runtimes, state) else {
         return Ok(());
     };
-    let fcgi = fcgi_target(runtime);
+    let root = crate::paths_util::conf_path(&docroot);
+    let php = php_proxy_block(runtime, &root);
     let mut conf = format!(
         r#"<VirtualHost *:{http_port}>
   ServerName {domain}
@@ -295,17 +334,13 @@ fn write_vhost(
   DirectoryIndex index.php index.html
   LimitRequestBody 0
   Timeout 3600
-  <FilesMatch "\.php$">
-    SetHandler "proxy:{fcgi}"
-  </FilesMatch>
-  ProxyTimeout 3600
-  ErrorLog "{err}"
+{php}  ErrorLog "{err}"
   CustomLog "{access}" common
 </VirtualHost>
 "#,
         domain = site.domain,
-        root = crate::paths_util::conf_path(&docroot),
-        fcgi = fcgi,
+        root = root,
+        php = php,
         err = crate::paths_util::conf_path(
             &paths.logs.join(format!("apache/{}-error.log", site.id)),
         ),
@@ -332,19 +367,15 @@ fn write_vhost(
   DirectoryIndex index.php index.html
   LimitRequestBody 0
   Timeout 3600
-  <FilesMatch "\.php$">
-    SetHandler "proxy:{fcgi}"
-  </FilesMatch>
-  ProxyTimeout 3600
-  ErrorLog "{err}"
+{php}  ErrorLog "{err}"
   CustomLog "{access}" common
 </VirtualHost>
 "#,
             domain = site.domain,
-            root = crate::paths_util::conf_path(&docroot),
+            root = root,
             cert = crate::paths_util::conf_path(&certs.site_cert),
             key = crate::paths_util::conf_path(&certs.site_key),
-            fcgi = fcgi,
+            php = php,
             err = crate::paths_util::conf_path(
                 &paths.logs.join(format!("apache/{}-ssl-error.log", site.id)),
             ),
@@ -422,6 +453,21 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     }
 
     let conf_s = conf.display().to_string();
+    // Configtest first so we surface syntax/module errors instead of a silent exit.
+    let test = crate::services::process::command(&bin)
+        .args(["-f", &conf_s, "-t"])
+        .current_dir(&root)
+        .output();
+    if let Ok(out) = &test {
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return Err(DevStackError::Message(format!(
+                "Apache configtest failed: {stderr}{stdout}"
+            )));
+        }
+    }
+
     let child = spawn_logged(
         &bin,
         &["-f", &conf_s, "-D", "FOREGROUND"],
@@ -432,6 +478,32 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     let pid = child.id();
     std::mem::forget(child);
     write_pid(&paths.pid_file("apache"), pid)?;
+
+    // Wait until the process is still alive and the HTTPS port is bound.
+    let https_port = state.stack.apache_https_port;
+    let mut ready = false;
+    for _ in 0..40 {
+        if !is_running(pid) {
+            let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
+            let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
+            return Err(DevStackError::Message(format!(
+                "Apache exited immediately after start.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
+            )));
+        }
+        if std::net::TcpListener::bind(("127.0.0.1", https_port)).is_err() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !ready {
+        let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
+        let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "Apache started (pid {pid}) but port {https_port} never became ready.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
+        )));
+    }
+
     state.runtime.apache_pid = Some(pid);
     for site in state.sites.iter_mut().filter(|s| site_uses_apache(s)) {
         site.status = "running".into();
@@ -455,6 +527,8 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
         if cfg!(windows) {
             let _ = stop_pid(pid);
             state.runtime.apache_pid = None;
+            // Let the FOREGROUND listener release the ports before rebinding.
+            std::thread::sleep(std::time::Duration::from_millis(400));
             return start_apache(paths, state);
         }
         let _ = crate::services::process::command(&bin)

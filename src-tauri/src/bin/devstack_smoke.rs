@@ -534,10 +534,20 @@ async fn run_wordpress_smoke(
     };
 
     // WordPress home should mention the site title / WordPress
-    http_expect("demo.test", https_port, "Demo Blog")?;
+    if let Err(e) = http_expect("demo.test", https_port, "Demo Blog") {
+        dump_apache_logs(ctx);
+        return Err(e);
+    }
     // After search-replace, clone should not still advertise the old domain as canonical
-    let clone_body = http_get("clone.test", https_port)?;
+    let clone_body = match http_get("clone.test", https_port) {
+        Ok(b) => b,
+        Err(e) => {
+            dump_apache_logs(ctx);
+            return Err(e);
+        }
+    };
     if !clone_body.contains("clone.test") && !clone_body.to_lowercase().contains("wordpress") {
+        dump_apache_logs(ctx);
         return Err(format!("clone body unexpected: {clone_body}").into());
     }
     if clone_body.contains("https://demo.test") {
@@ -1112,6 +1122,33 @@ async fn pick_version(
         .or_else(|| versions.iter().find(|v| v.download_url.is_some()))
         .ok_or_else(|| format!("no installable versions for {id}"))?;
     Ok(chosen.version.clone())
+}
+
+fn dump_apache_logs(ctx: &DevStackCtx) {
+    for name in [
+        "apache.err",
+        "apache.out",
+        "apache/error.log",
+        "apache/demo-error.log",
+        "apache/demo-ssl-error.log",
+        "apache/clone-error.log",
+        "apache/clone-ssl-error.log",
+    ] {
+        let p = ctx.paths.logs.join(name);
+        if p.exists() {
+            let body = std::fs::read_to_string(&p).unwrap_or_default();
+            let tail = body
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            eprintln!("--- {} (tail) ---\n{tail}", p.display());
+        }
+    }
 }
 
 fn http_expect(host: &str, port: u16, needle: &str) -> Result<(), Box<dyn std::error::Error>> {
