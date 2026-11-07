@@ -68,10 +68,11 @@ fn php_for_site<'a>(
 fn fcgi_target(runtime: &PhpRuntime) -> String {
     let pass = nginx_fastcgi_pass(runtime);
     if let Some(path) = pass.strip_prefix("unix:") {
-        // Apache proxy_fcgi Unix socket form
-        format!("unix:{path}|fcgi://localhost")
+        // Trailing slash required — without it Apache glues SCRIPT_FILENAME onto the
+        // authority (on Windows: `127.0.0.1:9000` + `D:\…` → DNS host `127.0.0.1:9000d`).
+        format!("unix:{path}|fcgi://localhost/")
     } else {
-        format!("fcgi://{pass}")
+        format!("fcgi://{pass}/")
     }
 }
 
@@ -449,6 +450,13 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     let root = apache_root(paths, state)?;
     let bin = apache_bin(&root)?;
     if let Some(pid) = state.runtime.apache_pid.filter(|p| is_running(*p)) {
+        // Windows Lounge builds started with -D FOREGROUND are not a Windows service;
+        // `-k graceful` looks for "Apache2.4" and no-ops. Restart the process instead.
+        if cfg!(windows) {
+            let _ = stop_pid(pid);
+            state.runtime.apache_pid = None;
+            return start_apache(paths, state);
+        }
         let _ = crate::services::process::command(&bin)
             .args([
                 "-f",
@@ -487,4 +495,39 @@ pub fn apache_site_url(state: &AppState, site: &SiteRecord) -> String {
     };
     let scheme = if https { "https" } else { "http" };
     crate::services::ports::format_url(scheme, &site.domain, port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::php_runtime::PhpRuntime;
+    use std::path::PathBuf;
+
+    #[test]
+    fn fcgi_target_tcp_has_trailing_slash() {
+        let rt = PhpRuntime {
+            version: "8.3".into(),
+            root: PathBuf::from("."),
+            php_bin: PathBuf::from("php"),
+            fpm_bin: None,
+            cgi_bin: None,
+            listen: "127.0.0.1:9085".into(),
+            is_system: false,
+        };
+        assert_eq!(fcgi_target(&rt), "fcgi://127.0.0.1:9085/");
+    }
+
+    #[test]
+    fn fcgi_target_unix_has_trailing_slash() {
+        let rt = PhpRuntime {
+            version: "8.3".into(),
+            root: PathBuf::from("."),
+            php_bin: PathBuf::from("php"),
+            fpm_bin: None,
+            cgi_bin: None,
+            listen: "unix:/tmp/php.sock".into(),
+            is_system: false,
+        };
+        assert_eq!(fcgi_target(&rt), "unix:/tmp/php.sock|fcgi://localhost/");
+    }
 }

@@ -22,14 +22,16 @@ jobs:
         working-directory: src-tauri
         run: cargo test --lib -- --nocapture
 
-      - name: Brew PHP + MariaDB (managed PHP/MariaDB packages are Windows-first)
+      - name: Brew PHP + MariaDB + httpd (managed packages are Windows-first)
         run: |
           set -euo pipefail
           brew update
-          brew install php mariadb || brew upgrade php mariadb || true
+          brew install php mariadb httpd || brew upgrade php mariadb httpd || true
           php -v
           php -m | grep -i mysqli
           brew --prefix mariadb
+          brew --prefix httpd
+          brew services stop httpd || true
 
       - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip
         working-directory: src-tauri

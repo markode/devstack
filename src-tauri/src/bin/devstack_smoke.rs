@@ -204,7 +204,10 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
     }
 
     let _ = install_pkg(ctx, "phpmyadmin", "5.2.3").await;
-    let _ = ensure_apache(ctx).await;
+    // WordPress sites default to Apache — fail early if it cannot be installed.
+    if let Err(e) = ensure_apache(ctx).await {
+        println!("[apache] install deferred: {e}");
+    }
 
     {
         let mut state = ctx.state.lock().await;
@@ -242,7 +245,7 @@ async fn ensure_apache(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Erro
                 return Ok(());
             }
         }
-        Err(e) => println!("[apache] package list unavailable ({e}) — trying system httpd"),
+        Err(e) => println!("[apache] package list unavailable ({e}) — trying system/brew httpd"),
     }
 
     if cfg!(target_os = "linux") {
@@ -250,7 +253,50 @@ async fn ensure_apache(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
+    if cfg!(target_os = "macos") {
+        return register_brew_apache(ctx).await;
+    }
+
     Err("Apache is required but not installable on this OS (set DEVSTACK_APACHE_MANIFEST_URL)".into())
+}
+
+async fn register_brew_apache(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    println!("[apache] brew install httpd…");
+    let status = smoke_command("brew").args(["install", "httpd"]).status()?;
+    if !status.success() {
+        // Already installed is fine — brew exits 0; treat failure as soft and retry prefix.
+        println!("[apache] brew install httpd returned {status} — checking prefix");
+    }
+    let prefix = smoke_command("brew")
+        .args(["--prefix", "httpd"])
+        .output()?;
+    let root = String::from_utf8_lossy(&prefix.stdout).trim().to_string();
+    if root.is_empty() {
+        return Err("brew --prefix httpd returned empty".into());
+    }
+    let bin = PathBuf::from(&root).join("bin/httpd");
+    if !bin.exists() {
+        return Err(format!("httpd binary missing at {}", bin.display()).into());
+    }
+    // Stop brew's launchd so DevStack owns the ports/config.
+    let _ = smoke_command("brew").args(["services", "stop", "httpd"]).status();
+    let mut state = ctx.state.lock().await;
+    let record = devstack_lib::config::InstalledRecord {
+        version: "brew".into(),
+        channel: Some("brew".into()),
+        path: PathBuf::from(&root),
+        installed_at: devstack_lib::packages::now_iso(),
+    };
+    devstack_lib::config::mark_installed(&mut state, "apache", record)?;
+    state.stack.apache_version = Some("brew".into());
+    state.stack.apache_http_port = 8088;
+    state.stack.apache_https_port = 8444;
+    devstack_lib::config::save_state(&ctx.paths.state_file, &state)?;
+    println!(
+        "[apache] registered brew prefix {root} (bin {})",
+        bin.display()
+    );
+    Ok(())
 }
 
 async fn register_system_apache(
@@ -363,6 +409,7 @@ async fn run_wordpress_smoke(
     skip_mariadb: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     ensure_stack(ctx, skip_mariadb).await?;
+    ensure_apache(ctx).await?;
     let progress = noop_job_progress();
 
     println!("Creating WordPress site demo.test…");
@@ -469,6 +516,13 @@ async fn run_wordpress_smoke(
     {
         let mut state = ctx.state.lock().await;
         apply_stack(&ctx.paths, &mut state)?;
+        if state.runtime.apache_pid.is_none() {
+            return Err("WordPress smoke requires Apache running after apply_stack".into());
+        }
+        println!(
+            "wordpress stack — apache_pid={:?} nginx_pid={:?}",
+            state.runtime.apache_pid, state.runtime.nginx_pid
+        );
     }
 
     tokio::time::sleep(Duration::from_secs(2)).await;
