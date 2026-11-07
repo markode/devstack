@@ -130,7 +130,9 @@ export function VersionTable({
           {versions.length === 0 ? (
             <tr>
               <td colSpan={2} className="muted">
-                No versions available.
+                No versions available. If this persists, check your network
+                connection and try refreshing — a fetch failure should show an
+                error above instead of an empty list.
               </td>
             </tr>
           ) : null}

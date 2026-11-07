@@ -126,35 +126,30 @@ impl PackageProvider for MongoDbProvider {
             .client
             .get(CURRENT_JSON)
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .map_err(|e| {
+                DevStackError::Message(format!("Failed to fetch MongoDB versions: {e}"))
+            })?
+            .error_for_status()
+            .map_err(|e| {
+                DevStackError::Message(format!("Failed to fetch MongoDB versions: {e}"))
+            })?
             .json()
-            .await?;
+            .await
+            .map_err(|e| {
+                DevStackError::Message(format!("Failed to parse MongoDB version list: {e}"))
+            })?;
 
-        let mut out = Vec::new();
-        for v in data.versions.into_iter().take(30) {
-            if v.development_release && !v.production_release {
-                continue;
-            }
-            let channel = v
-                .version
-                .split('.')
-                .take(2)
-                .collect::<Vec<_>>()
-                .join(".");
-            let (download_url, sha256, note) = Self::prefer_download(&v.downloads)
-                .map(|(u, s, n)| (Some(u), s, Some(n)))
-                .unwrap_or((None, None, None));
-
-            out.push(PackageVersion {
-                label: v.version.clone(),
-                version: v.version,
-                channel,
-                lts: v.production_release,
-                download_url,
-                sha256,
-                notes: note,
-            });
+        let out = versions_from_current(
+            &data.versions,
+            30,
+            |downloads| Self::prefer_download(downloads),
+        );
+        if out.is_empty() {
+            return Err(DevStackError::Message(
+                "No MongoDB versions available for this platform (downloads.mongodb.org/current.json)"
+                    .into(),
+            ));
         }
         Ok(out)
     }
@@ -236,5 +231,106 @@ impl PackageProvider for MongoDbProvider {
         state: &mut AppState,
     ) -> Result<()> {
         default_uninstall("mongodb", version, paths, state).await
+    }
+}
+
+/// Convert `current.json` version entries into UI rows, skipping pure development builds.
+fn versions_from_current(
+    versions: &[MongoVersion],
+    limit: usize,
+    prefer: impl Fn(&[Value]) -> Option<(String, Option<String>, String)>,
+) -> Vec<PackageVersion> {
+    let mut out = Vec::new();
+    for v in versions.iter().take(limit) {
+        if v.development_release && !v.production_release {
+            continue;
+        }
+        let channel = v
+            .version
+            .split('.')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(".");
+        let (download_url, sha256, note) = prefer(&v.downloads)
+            .map(|(u, s, n)| (Some(u), s, Some(n)))
+            .unwrap_or((None, None, None));
+
+        out.push(PackageVersion {
+            label: v.version.clone(),
+            version: v.version.clone(),
+            channel,
+            lts: v.production_release,
+            download_url,
+            sha256,
+            notes: note,
+        });
+    }
+    out
+}
+
+/// True when a MongoDB `current.json` entry should be shown in the UI.
+fn is_listable_mongo_version(v: &MongoVersion) -> bool {
+    !(v.development_release && !v.production_release)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ver(
+        version: &str,
+        production: bool,
+        development: bool,
+        downloads: Vec<Value>,
+    ) -> MongoVersion {
+        MongoVersion {
+            version: version.into(),
+            production_release: production,
+            development_release: development,
+            downloads,
+        }
+    }
+
+    #[test]
+    fn skips_development_only_builds() {
+        let versions = vec![
+            ver("8.0.4", true, false, vec![]),
+            ver("8.1.0-rc0", false, true, vec![]),
+            ver("7.0.16", true, false, vec![]),
+        ];
+        assert!(is_listable_mongo_version(&versions[0]));
+        assert!(!is_listable_mongo_version(&versions[1]));
+        let out = versions_from_current(&versions, 30, |_| None);
+        assert_eq!(
+            out.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(),
+            vec!["8.0.4", "7.0.16"]
+        );
+        assert!(out.iter().all(|v| v.channel.len() >= 3));
+    }
+
+    #[test]
+    fn prefer_callback_sets_download_url() {
+        let versions = vec![ver(
+            "8.0.4",
+            true,
+            false,
+            vec![json!({"edition": "base"})],
+        )];
+        let out = versions_from_current(&versions, 10, |_| {
+            Some((
+                "https://example/mongodb.tgz".into(),
+                Some("deadbeef".into()),
+                "ubuntu2404".into(),
+            ))
+        });
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].download_url.as_deref(),
+            Some("https://example/mongodb.tgz")
+        );
+        assert_eq!(out[0].sha256.as_deref(), Some("deadbeef"));
+        assert_eq!(out[0].notes.as_deref(), Some("ubuntu2404"));
+        assert!(out[0].lts);
     }
 }
