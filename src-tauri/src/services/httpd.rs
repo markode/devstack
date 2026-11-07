@@ -294,13 +294,13 @@ fn nix_geteuid() -> u32 {
 fn php_proxy_block(runtime: &PhpRuntime, _docroot_conf: &str) -> String {
     let fcgi = fcgi_target(runtime);
     if cfg!(windows) {
+        // ProxyPassMatch embeds the absolute docroot so php-cgi gets a real path.
+        // (SetHandler±slash either glues D: onto the host or leaves a URL path.)
+        let host = nginx_fastcgi_pass(runtime);
+        let docroot = _docroot_conf.trim_end_matches('/');
         format!(
             r#"  ProxyFCGIBackendType GENERIC
-  <FilesMatch "\.php$">
-    SetHandler "proxy:{fcgi}"
-  </FilesMatch>
-  # Rebuild SCRIPT_FILENAME as DOCUMENT_ROOT + SCRIPT_NAME (Windows drive-safe).
-  ProxyFCGISetEnvIf "true" SCRIPT_FILENAME "%{{DOCUMENT_ROOT}}%{{SCRIPT_NAME}}"
+  ProxyPassMatch "^/(.*\.php(/.*)?)$" "fcgi://{host}/{docroot}/$1"
   ProxyTimeout 3600
 "#
         )

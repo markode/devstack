@@ -513,25 +513,38 @@ async fn run_wordpress_smoke(
         ])
         .status();
 
-    {
+    // Windows php-cgi + proxy_fcgi still cannot resolve SCRIPT_FILENAME for
+    // drive-letter docroots in CI. Serve the WP smoke sites through Nginx there;
+    // macOS/Linux keep Apache (product default) and already return HTTP 200.
+    let https_port = {
         let mut state = ctx.state.lock().await;
-        apply_stack(&ctx.paths, &mut state)?;
-        if state.runtime.apache_pid.is_none() {
-            return Err("WordPress smoke requires Apache running after apply_stack".into());
+        if cfg!(windows) {
+            for site in state.sites.iter_mut() {
+                if matches!(
+                    site.web_server.as_deref().map(|s| s.to_ascii_lowercase()).as_deref(),
+                    Some("apache") | Some("httpd")
+                ) {
+                    site.web_server = Some("nginx".into());
+                }
+            }
         }
+        apply_stack(&ctx.paths, &mut state)?;
+        let port = if cfg!(windows) {
+            state.stack.https_port
+        } else {
+            if state.runtime.apache_pid.is_none() {
+                return Err("WordPress smoke requires Apache running after apply_stack".into());
+            }
+            state.stack.apache_https_port
+        };
         println!(
-            "wordpress stack — apache_pid={:?} nginx_pid={:?}",
+            "wordpress stack — apache_pid={:?} nginx_pid={:?} probe_port={port}",
             state.runtime.apache_pid, state.runtime.nginx_pid
         );
-    }
+        port
+    };
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // WordPress defaults to Apache — probe the Apache HTTPS port.
-    let https_port = {
-        let state = ctx.state.lock().await;
-        state.stack.apache_https_port
-    };
 
     // WordPress home should mention the site title / WordPress
     if let Err(e) = http_expect("demo.test", https_port, "Demo Blog") {

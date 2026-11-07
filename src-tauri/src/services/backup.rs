@@ -65,16 +65,23 @@ pub fn backup_database(
         fs::create_dir_all(parent)?;
     }
 
-    let kind = if dest
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e == "zst" || e == "zstd")
-        .unwrap_or(false)
-        || dest
-            .to_string_lossy()
-            .ends_with(".sql.zst")
+    // Honor the destination extension — never write zstd bytes into a `.sql.gz`
+    // path just because `zstd` is on PATH (broke restore with "invalid gzip header").
+    let dest_name = dest.to_string_lossy().to_lowercase();
+    let kind = if dest_name.ends_with(".sql.zst")
+        || dest_name.ends_with(".zst")
+        || dest_name.ends_with(".zstd")
     {
         CompressKind::Zstd
+    } else if dest_name.ends_with(".sql.gz")
+        || dest_name.ends_with(".gz")
+        || dest
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gz"))
+            .unwrap_or(false)
+    {
+        CompressKind::Gzip
     } else {
         CompressKind::preferred()
     };
