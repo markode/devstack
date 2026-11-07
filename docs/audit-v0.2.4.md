@@ -63,6 +63,25 @@ release unless marked *verified OK*.
 | Windows smoke was HTTPS-probe only | Extended to `devstack_smoke --e2e` (install PHP+MariaDB+Nginx, plain + WP sites, http/https curl, DB export/import, stop). |
 | No macOS smoke workflow | Added `.github/workflows/macos-smoke.yml` with the same `--e2e` path. |
 
+## Follow-up (second pass from audit agents)
+
+| Bug | Fix |
+| --- | --- |
+| Apache `LoadModule` invented paths for missing `unixd` on Windows Lounge | `module_line` skips missing files + skips `unixd` on Windows; paths use `conf_path`. |
+| Apache vhosts used `CustomLog … common` without `LogFormat` | Added `LogFormat` `common` / `combined` to generated `httpd.conf`. |
+| Mongo `dbPath: C:\Users\…` YAML escape failure | Quoted forward-slash `dbPath`. |
+| MariaDB Windows init used Unix auth flag + MySQL-only `--initialize-insecure` on mariadbd | Prefer `mysql_install_db.exe` without auth flag; `--initialize-insecure` only for `mysqld.exe`. |
+| `my.cnf` `socket=` on Windows | Omitted on Windows (TCP only). |
+| php-cgi regenerated default ini (lost xdebug) | Reads `state.php_extensions` before write. |
+| php-cgi port offset differed for `8.3` vs `8.3.12` | Offset from major.minor only. |
+| OpenSSL `-subj /CN=…` treated as path on Windows | Use `//CN=…` on Windows. |
+| Mailpit nginx cert paths | `quoted_conf_path`. |
+| `reveal_path_os` fragile with spaces | `explorer` `raw_arg(/select,…)`. |
+| Template duplicate used Nginx HTTPS port for WP | Uses `apache_https_port` for WordPress. |
+| `apply_stack` / `reload_sites` swallowed nginx/apache errors | Propagate first start/reload error. |
+| WP credentials modal never shown (navigated to detail first) | Modal mounted on detail + grid; create no longer auto-opens site. |
+| Site env `patch` had no try/catch | Surfaces humanized errors. |
+
 ## Verified OK (no code change)
 
 - Version list SWR cache + `welcome.test` seed (v0.2.3).

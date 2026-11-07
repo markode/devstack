@@ -23,6 +23,12 @@ pub fn ensure_root_ca(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
     }
 
     if which::which("openssl").is_ok() {
+        // Windows OpenSSL treats a leading `/` in -subj as a path; use `//CN=…`.
+        let subj = if cfg!(windows) {
+            "//CN=DevStack Local CA\\O=DevStack"
+        } else {
+            "/CN=DevStack Local CA/O=DevStack"
+        };
         run_openssl(&[
             "req",
             "-x509",
@@ -37,7 +43,7 @@ pub fn ensure_root_ca(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
             "-out",
             &ca_cert.to_string_lossy(),
             "-subj",
-            "/CN=DevStack Local CA/O=DevStack",
+            subj,
         ])?;
         return Ok((ca_cert, ca_key));
     }
@@ -71,6 +77,11 @@ pub fn ensure_site_cert(paths: &Paths, domain: &str) -> Result<CertPaths> {
                 "basicConstraints=CA:FALSE\nsubjectAltName=DNS:{domain},DNS:localhost\n"
             ),
         )?;
+        let site_subj = if cfg!(windows) {
+            format!("//CN={domain}")
+        } else {
+            format!("/CN={domain}")
+        };
         run_openssl(&[
             "req",
             "-newkey",
@@ -81,7 +92,7 @@ pub fn ensure_site_cert(paths: &Paths, domain: &str) -> Result<CertPaths> {
             "-out",
             &csr.to_string_lossy(),
             "-subj",
-            &format!("/CN={domain}"),
+            &site_subj,
         ])?;
         let leaf = site_dir.join("leaf.crt");
         run_openssl(&[

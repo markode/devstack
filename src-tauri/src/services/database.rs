@@ -40,13 +40,23 @@ pub fn write_db_config(
     let conf = conf_dir.join("my.cnf");
     let sock = paths.databases.join(format!("{engine}.sock"));
     // Forward slashes + quotes — Windows paths with spaces break unquoted datadir=.
+    // Omit socket= on Windows (named-pipe confusion); TCP only.
+    let socket_mysqld = if cfg!(windows) {
+        String::new()
+    } else {
+        format!("socket={}\n", quoted_conf_path(&sock))
+    };
+    let socket_client = if cfg!(windows) {
+        String::new()
+    } else {
+        format!("socket={}\n", quoted_conf_path(&sock))
+    };
     let body = format!(
         r#"[mysqld]
 port={port}
 bind-address=127.0.0.1
 datadir={datadir}
-socket={sock}
-max_allowed_packet=1G
+{socket_mysqld}max_allowed_packet=1G
 innodb_buffer_pool_size=512M
 innodb_log_file_size=256M
 innodb_log_buffer_size=64M
@@ -63,11 +73,11 @@ collation-server=utf8mb4_unicode_ci
 [client]
 port={port}
 host=127.0.0.1
-socket={sock}
-default-character-set=utf8mb4
+{socket_client}default-character-set=utf8mb4
 "#,
         datadir = quoted_conf_path(datadir),
-        sock = quoted_conf_path(&sock),
+        socket_mysqld = socket_mysqld,
+        socket_client = socket_client,
     );
     fs::write(&conf, body)?;
     Ok(conf)
@@ -144,18 +154,22 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
     if let Some(install) = find_bin(
         root,
         &[
-            "mariadb-install-db",
-            "mariadb-install-db.exe",
-            "mysql_install_db",
             "mysql_install_db.exe",
+            "mariadb-install-db.exe",
+            "mariadb-install-db",
+            "mysql_install_db",
         ],
     ) {
+        // Windows install-db rejects Unix-only auth flags — keep args minimal.
+        let mut args = vec![
+            format!("--datadir={}", datadir.display()),
+            format!("--basedir={}", root.display()),
+        ];
+        if !cfg!(windows) {
+            args.push("--auth-root-authentication-method=normal".into());
+        }
         let out = crate::services::process::command(&install)
-            .args([
-                format!("--datadir={}", datadir.display()),
-                format!("--basedir={}", root.display()),
-                "--auth-root-authentication-method=normal".into(),
-            ])
+            .args(&args)
             .current_dir(root)
             .output();
         if let Ok(o) = &out {
@@ -169,38 +183,43 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
         if datadir.join("mysql").exists() {
             return Ok(());
         }
+        // Retry without basedir if first attempt failed (some Windows zips).
+        if cfg!(windows) && !datadir.join("mysql").exists() {
+            let _ = crate::services::process::command(&install)
+                .args([format!("--datadir={}", datadir.display())])
+                .current_dir(root)
+                .status();
+            if datadir.join("mysql").exists() {
+                return Ok(());
+            }
+        }
     }
-    // MySQL / MariaDB Windows: mysqld --initialize-insecure (empty root password).
+    // MySQL-only: mysqld --initialize-insecure (MariaDB rejects this flag).
     let mysqld = server_bin(root)?;
     let name = mysqld
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if name == "mysqld" || name == "mysqld.exe" || name == "mariadbd" || name == "mariadbd.exe" {
-        let status = crate::services::process::command(&mysqld)
+    if name == "mysqld" || name == "mysqld.exe" {
+        let out = crate::services::process::command(&mysqld)
             .args([
                 format!("--defaults-file={}", conf.display()),
                 "--initialize-insecure".into(),
             ])
             .current_dir(root)
-            .status()
+            .output()
             .map_err(|e| DevStackError::Message(format!("initialize-insecure failed: {e}")))?;
-        if !status.success() && !datadir.join("mysql").exists() {
-            // MariaDB may reject --initialize-insecure; try datadir-only form.
-            let _ = crate::services::process::command(&mysqld)
-                .args([
-                    format!("--datadir={}", datadir.display()),
-                    format!("--basedir={}", root.display()),
-                    "--initialize-insecure".into(),
-                ])
-                .current_dir(root)
-                .status();
+        if !out.status.success() && !datadir.join("mysql").exists() {
+            return Err(DevStackError::Message(format!(
+                "mysqld --initialize-insecure failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )));
         }
     }
     if !datadir.join("mysql").exists() {
         return Err(DevStackError::Message(
-            "failed to initialize database datadir".into(),
+            "failed to initialize database datadir (install-db / initialize-insecure)".into(),
         ));
     }
     Ok(())

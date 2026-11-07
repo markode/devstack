@@ -131,8 +131,11 @@ pub fn fpm_listen_addr_with_base(paths: &Paths, version: &str, base: u16) -> Str
 }
 
 fn version_port_offset(version: &str) -> u16 {
-    let digits: String = version.chars().filter(|c| c.is_ascii_digit()).collect();
-    digits.parse::<u16>().unwrap_or(83) % 100
+    // Use major.minor only so "8.3" and "8.3.12" share the same php-cgi port.
+    let parts: Vec<&str> = version.split('.').collect();
+    let major = parts.first().and_then(|s| s.parse::<u16>().ok()).unwrap_or(8);
+    let minor = parts.get(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(3);
+    ((major * 10) + minor) % 100
 }
 
 pub fn ensure_fpm_pool(paths: &Paths, runtime: &PhpRuntime) -> Result<PathBuf> {
@@ -271,8 +274,12 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
         .as_ref()
         .ok_or_else(|| DevStackError::Message("php-cgi binary not found".into()))?;
     let listen = runtime.listen.clone();
-    // Ensure managed php.ini exists (absolute extension_dir on Windows).
-    let _ = crate::php::write_dev_php_ini(&runtime.root, &crate::php::PhpIniOptions::default());
+    // Ensure managed php.ini exists (absolute extension_dir on Windows; honor xdebug).
+    let mut opts = crate::php::PhpIniOptions::default();
+    if let Some(settings) = state.php_extensions.get(&runtime.version) {
+        opts.xdebug = settings.xdebug;
+    }
+    crate::php::write_dev_php_ini(&runtime.root, &opts)?;
     let ini = crate::packages::php::php_ini_path(&runtime.root);
     let log_out = paths.logs.join(format!("php-cgi-{}-stdout.log", runtime.version));
     let log_err = paths.logs.join(format!("php-cgi-{}-stderr.log", runtime.version));

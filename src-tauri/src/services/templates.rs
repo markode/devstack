@@ -302,8 +302,13 @@ pub async fn duplicate_from_source(
     let sock = paths.databases.join(format!("{engine}.sock"));
     update_wp_config_credentials(&dest, &db_name, &db_user, &db_pass, &db_host, &sock)?;
 
-    let new_url =
-        crate::services::ports::format_url("https", &domain, state.stack.https_port);
+    // WordPress defaults to Apache — match create_wordpress_site URL port.
+    let https_port = if framework == "wordpress" || dest.join("wp-config.php").exists() {
+        state.stack.apache_https_port
+    } else {
+        state.stack.https_port
+    };
+    let new_url = crate::services::ports::format_url("https", &domain, https_port);
     if framework == "wordpress" || dest.join("wp-config.php").exists() {
         emit(
             progress,

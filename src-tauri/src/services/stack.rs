@@ -94,9 +94,13 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     }
 
     // Both front-ends can run together on different ports (see docs/apache.md).
-    let _ = start_nginx(paths, state);
-    let _ = start_apache(paths, state);
+    // Surface the first hard failure so PortConflict / UI dialogs can react.
+    let nginx_err = start_nginx(paths, state).err();
+    let apache_err = start_apache(paths, state).err();
     save_state(&paths.state_file, state)?;
+    if let Some(e) = nginx_err.or(apache_err) {
+        return Err(e);
+    }
     Ok(stack_status(state))
 }
 
@@ -120,8 +124,11 @@ pub fn reload_sites(paths: &Paths, state: &mut AppState) -> Result<StackStatus> 
     refresh_site_metadata(state);
     let _ = ensure_root_ca(paths);
     let _ = sync_hosts_and_trust_ca(paths, state);
-    let _ = reload_nginx(paths, state);
-    let _ = reload_apache(paths, state);
+    let nginx_err = reload_nginx(paths, state).err();
+    let apache_err = reload_apache(paths, state).err();
     save_state(&paths.state_file, state)?;
+    if let Some(e) = nginx_err.or(apache_err) {
+        return Err(e);
+    }
     Ok(stack_status(state))
 }

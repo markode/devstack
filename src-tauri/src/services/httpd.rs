@@ -76,6 +76,10 @@ fn fcgi_target(runtime: &PhpRuntime) -> String {
 }
 
 fn module_line(root: &Path, name: &str) -> Option<String> {
+    // unixd is Unix-only; Windows Lounge builds do not ship it.
+    if name == "unixd" && cfg!(windows) {
+        return None;
+    }
     let candidates = [
         root.join("modules").join(format!("mod_{name}.so")),
         root.join("modules").join(format!("mod_{name}.dll")),
@@ -90,19 +94,11 @@ fn module_line(root: &Path, name: &str) -> Option<String> {
             // or a system prefix without a relative modules/ tree.
             return Some(format!(
                 "LoadModule {name}_module \"{}\"",
-                c.display()
+                crate::paths_util::conf_path(c)
             ));
         }
     }
-    // Apache Lounge / static package: relative modules/ only when that dir exists.
-    // Skip when missing — many distro builds compile log_config/unixd in.
-    let rel = root.join("modules").join(format!("mod_{name}.so"));
-    if root.join("modules").is_dir() {
-        return Some(format!(
-            "LoadModule {name}_module \"{}\"",
-            rel.display()
-        ));
-    }
+    // Never invent LoadModule lines for missing files (Lounge modules/ may omit unixd).
     None
 }
 
@@ -175,11 +171,6 @@ pub fn render_stack(
     }
     for m in modules {
         if let Some(line) = module_line(&root, m) {
-            // Skip modules that don't exist on this layout (e.g. unixd on Windows)
-            let path_hint = line.split('"').nth(1).unwrap_or("");
-            if !path_hint.is_empty() && !Path::new(path_hint).exists() && system_layout {
-                continue;
-            }
             load_modules.push_str(&line);
             load_modules.push('\n');
         }
@@ -191,7 +182,7 @@ pub fn render_stack(
         // but we load modules by absolute path so /usr is fine.
         "/etc/apache2".to_string()
     } else {
-        root.display().to_string()
+        crate::paths_util::conf_path(&root)
     };
     let runtime_dir = paths.apache.join("run");
     fs::create_dir_all(&runtime_dir)?;
@@ -215,7 +206,7 @@ pub fn render_stack(
     } else {
         format!(
             "DefaultRuntimeDir \"{}\"\nMutex default\n",
-            runtime_dir.display()
+            crate::paths_util::conf_path(&runtime_dir)
         )
     };
     let body = format!(
@@ -228,6 +219,8 @@ ServerAdmin admin@localhost
 PidFile "{pid}"
 ErrorLog "{error_log}"
 LogLevel warn
+LogFormat "%h %l %u %t \"%r\" %>s %b" common
+LogFormat "%h %l %u %t \"%r\" %>s %b \"%{{Referer}}i\" \"%{{User-Agent}}i\"" combined
 Timeout 3600
 KeepAlive On
 MaxKeepAliveRequests 100

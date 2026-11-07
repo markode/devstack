@@ -137,8 +137,13 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       webServer?: string | null;
     },
   ) => {
-    await client.updateSiteEnvironment(siteId, update);
-    await refresh();
+    setError(null);
+    try {
+      await client.updateSiteEnvironment(siteId, update);
+      await refresh();
+    } catch (e) {
+      setError(humanizeError(e instanceof Error ? e.message : String(e)));
+    }
   };
 
   const stackRunning = Boolean(stack?.nginx || stack?.apache);
@@ -303,6 +308,17 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
           </div>
         ) : null}
         {error ? <div className="error-banner">{error}</div> : null}
+        {credentials ? (
+          <CredentialsModal
+            result={credentials}
+            onOpenBrowser={(url) => void openWithHostsCheck(url)}
+            onClose={() => {
+              const id = credentials.site.id;
+              setCredentials(null);
+              openSite(id);
+            }}
+          />
+        ) : null}
       </>
     );
   }
@@ -486,9 +502,9 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
           onSubmit={(req) =>
             void runJob(async () => {
               const result = await client.createWordpress(req);
-              setCredentials(result);
               setShowNewWp(false);
-              openSite(result.site.id);
+              setCredentials(result);
+              // Keep credentials modal visible — do not navigate away yet.
             })
           }
         />
@@ -522,7 +538,12 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       {credentials ? (
         <CredentialsModal
           result={credentials}
-          onClose={() => setCredentials(null)}
+          onOpenBrowser={(url) => void openWithHostsCheck(url)}
+          onClose={() => {
+            const id = credentials.site.id;
+            setCredentials(null);
+            openSite(id);
+          }}
         />
       ) : null}
     </div>
@@ -1006,9 +1027,11 @@ function DuplicateModal({
 function CredentialsModal({
   result,
   onClose,
+  onOpenBrowser,
 }: {
   result: CreateWordPressResult;
   onClose: () => void;
+  onOpenBrowser: (url: string) => void;
 }) {
   return (
     <div className="modal-backdrop" role="dialog">
@@ -1043,11 +1066,7 @@ function CredentialsModal({
           <button
             type="button"
             className="btn btn-install"
-            onClick={() => {
-              void openInBrowser(result.url).catch((e) =>
-                console.error(e instanceof Error ? e.message : String(e)),
-              );
-            }}
+            onClick={() => onOpenBrowser(result.url)}
           >
             Open in browser
           </button>

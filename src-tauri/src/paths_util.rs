@@ -181,10 +181,12 @@ pub fn reveal_path_os(path: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        let arg = format!("/select,{}", abs.display());
-        let _ = crate::services::process::command("explorer.exe")
-            .arg(arg)
-            .status();
+        use std::os::windows::process::CommandExt;
+        // explorer /select,C:\path — raw_arg preserves commas/spaces correctly.
+        let mut cmd = crate::services::process::command("explorer.exe");
+        cmd.raw_arg(format!("/select,{}", abs.display()));
+        cmd.status()
+            .map_err(|e| DevStackError::Message(format!("could not reveal path: {e}")))?;
         Ok(())
     }
     #[cfg(target_os = "macos")]
