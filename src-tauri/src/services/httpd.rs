@@ -220,8 +220,8 @@ pub fn render_stack(
     };
     let body = format!(
         r#"ServerRoot "{server_root}"
-Listen {http_port}
-Listen {https_port}
+Listen 127.0.0.1:{http_port}
+Listen 127.0.0.1:{https_port}
 {load_modules}
 ServerName localhost
 ServerAdmin admin@localhost
@@ -505,7 +505,9 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     std::mem::forget(child);
     write_pid(&paths.pid_file("apache"), pid)?;
 
-    // Wait until the process is still alive and the HTTPS port is bound.
+    // Wait until the process is still alive and accepts TCP on the HTTPS port.
+    // Do NOT use bind()-fails-as-ready: Windows SO_REUSEADDR lets bind succeed
+    // while httpd is already listening, which false-negatived readiness.
     let https_port = state.stack.apache_https_port;
     let mut ready = false;
     for _ in 0..50 {
@@ -516,7 +518,7 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
                 "Apache exited immediately after start.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
             )));
         }
-        if std::net::TcpListener::bind(("127.0.0.1", https_port)).is_err() {
+        if std::net::TcpStream::connect(("127.0.0.1", https_port)).is_ok() {
             ready = true;
             break;
         }
