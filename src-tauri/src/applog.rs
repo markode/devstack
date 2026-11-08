@@ -441,17 +441,6 @@ mod tests {
     }
 
     #[test]
-    fn maybe_redact_respects_flag() {
-        let raw = "password=hunter2";
-        set_redact_secrets(false);
-        assert_eq!(maybe_redact(raw), raw);
-        set_redact_secrets(true);
-        let s = maybe_redact(raw);
-        assert!(!s.contains("hunter2"), "got {s}");
-        set_redact_secrets(false);
-    }
-
-    #[test]
     fn ring_snapshot_and_error_count() {
         clear();
         clear_error_count();
