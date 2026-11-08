@@ -23,7 +23,7 @@ use crate::services::backup::{
 };
 use crate::services::progress::{JobProgress, JobProgressFn};
 use crate::services::sites::{
-    apply_stack_ports, create_site, detect_site, refresh_site_metadata, SiteDetails,
+    apply_stack_ports, create_site, delete_site, detect_site, refresh_site_metadata, SiteDetails,
 };
 use crate::services::stack::{
     apply_stack, reload_sites, stack_status, start_stack, stop_stack, StackStatus,
@@ -1014,6 +1014,25 @@ pub async fn repair_hosts(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus> {
 }
 
 /// Mint a one-time phpMyAdmin sign-on URL (password never appears in the query string).
+#[tauri::command]
+pub async fn delete_site_cmd(
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+) -> Result<()> {
+    let mut state = ctx.state.lock().await;
+    delete_site(&ctx.paths, &mut state, &site_id)?;
+    save_state(&ctx.paths.state_file, &state)?;
+    // Rewrite hosts without the removed domain; reload front-ends so vhosts drop.
+    dns::sync_hosts_and_trust_ca(&ctx.paths, &state)?;
+    let _ = crate::services::nginx::reload_nginx(&ctx.paths, &mut state);
+    let _ = crate::services::httpd::reload_apache(&ctx.paths, &mut state);
+    if !state.sites.iter().any(crate::services::httpd::site_uses_apache) {
+        let _ = crate::services::httpd::stop_apache(&ctx.paths, &mut state);
+    }
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn mint_phpmyadmin_signon_url(
     ctx: State<'_, Arc<AppCtx>>,

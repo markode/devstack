@@ -31,6 +31,17 @@ jobs:
           cargo test --lib packages::version_cache::tests -- --nocapture
           cargo test --lib php::tests -- --nocapture
           cargo test --lib paths_util::tests -- --nocapture
+          cargo test --lib services::tls::tests -- --nocapture
+          cargo test --lib services::pma_signon::tests -- --nocapture
+          cargo test --lib services::httpd::tests -- --nocapture
+
+      - name: Frontend typecheck + vitest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci
+          npm run smoke:frontend
+          npm test
 
       - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip
         working-directory: src-tauri

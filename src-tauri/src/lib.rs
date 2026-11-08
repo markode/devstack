@@ -17,7 +17,7 @@ use commands::{
     get_service_log, get_site_details, get_sites, get_stack_status, get_templates,
     import_database_from_folder, import_site_database_file, install_package, list_database_files,
     list_installed, list_managed_services_cmd, list_package_versions, list_packages,
-    list_php_extension_settings, list_site_details, mark_template,
+    delete_site_cmd, list_php_extension_settings, list_site_details, mark_template,
     mint_phpmyadmin_signon_url, open_path_cmd, prefetch_version_lists,
     register_system_php_cmd, repair_hosts, restore_site_database, reveal_path_cmd,
     seed_site_large_table, set_coexistence_mode, set_php_manifest_url, set_php_xdebug,
@@ -200,6 +200,7 @@ pub fn run() {
             get_hosts_status,
             repair_hosts,
             mint_phpmyadmin_signon_url,
+            delete_site_cmd,
             open_path_cmd,
             reveal_path_cmd,
         ])
