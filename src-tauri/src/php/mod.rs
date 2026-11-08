@@ -166,6 +166,12 @@ upload_max_filesize = {upload_max_filesize}
 max_file_uploads = 100
 default_socket_timeout = 60
 date.timezone = UTC
+; Required for Apache/Nginx + php-cgi on Windows ("No input file specified").
+cgi.fix_pathinfo = 1
+; Never set doc_root / user_dir for local stacks — breaks SCRIPT_FILENAME.
+; doc_root =
+; user_dir =
+; open_basedir =
 {extensions}
 [opcache]
 opcache.enable = {opcache_enable}
@@ -364,6 +370,21 @@ mod tests {
         fs::create_dir_all(dir.join("ext")).unwrap();
         write_dev_php_ini(&dir, &PhpIniOptions::default()).unwrap();
         let raw = fs::read_to_string(dir.join("php.ini")).unwrap();
+        assert!(
+            raw.contains("cgi.fix_pathinfo = 1"),
+            "cgi.fix_pathinfo required for php-cgi SCRIPT_FILENAME"
+        );
+        assert!(
+            !raw.lines().any(|l| {
+                let t = l.trim();
+                !t.starts_with(';')
+                    && (t.starts_with("doc_root") || t.starts_with("user_dir"))
+                    && t.contains('=')
+                    && !t.ends_with('=')
+                    && !t.ends_with("= ")
+            }),
+            "doc_root/user_dir must stay unset:\n{raw}"
+        );
         if cfg!(windows) {
             assert!(raw.contains("extension=mysqli"));
             assert!(raw.contains("extension=pdo_mysql"));

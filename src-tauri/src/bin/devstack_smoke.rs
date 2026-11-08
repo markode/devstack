@@ -513,73 +513,40 @@ async fn run_wordpress_smoke(
         ])
         .status();
 
-    // Windows php-cgi + proxy_fcgi still cannot resolve SCRIPT_FILENAME for
-    // drive-letter docroots in CI. Serve the WP smoke sites through Nginx there;
-    // macOS/Linux keep Apache (product default) and already return HTTP 200.
-    let https_port = {
+    // WordPress defaults to Apache — keep it on both platforms and assert PHP-CGI works.
+    let (https_port, http_port) = {
         let mut state = ctx.state.lock().await;
-        let nginx_port = state.stack.https_port;
-        let apache_port = state.stack.apache_https_port;
-        if cfg!(windows) {
-            for site in state.sites.iter_mut() {
-                if matches!(
-                    site.web_server.as_deref().map(|s| s.to_ascii_lowercase()).as_deref(),
-                    Some("apache") | Some("httpd")
-                ) {
-                    site.web_server = Some("nginx".into());
-                }
-            }
-            // WP was installed with siteurl on the Apache port — rewrite to Nginx
-            // so we do not 301 off to a stopped :8444 listener.
-            let pairs = [
-                (
-                    created
-                        .site
-                        .database_engine
-                        .clone()
-                        .unwrap_or_else(|| "mariadb".into()),
-                    created.site.database_name.clone(),
-                    format!(":{apache_port}"),
-                    format!(":{nginx_port}"),
-                ),
-                (
-                    dup.site
-                        .database_engine
-                        .clone()
-                        .unwrap_or_else(|| "mariadb".into()),
-                    dup.site.database_name.clone(),
-                    format!(":{apache_port}"),
-                    format!(":{nginx_port}"),
-                ),
-            ];
-            for (engine, db, from, to) in pairs {
-                if let Some(db) = db {
-                    rewrite_wp_urls(&ctx.paths, &state, &engine, &db, &from, &to)?;
-                }
-            }
-        }
         apply_stack(&ctx.paths, &mut state)?;
-        let port = if cfg!(windows) {
-            nginx_port
-        } else {
-            if state.runtime.apache_pid.is_none() {
-                return Err("WordPress smoke requires Apache running after apply_stack".into());
-            }
-            apache_port
-        };
+        if state.runtime.apache_pid.is_none() {
+            return Err("WordPress smoke requires Apache running after apply_stack".into());
+        }
+        let https_port = state.stack.apache_https_port;
+        let http_port = state.stack.apache_http_port;
         println!(
-            "wordpress stack — apache_pid={:?} nginx_pid={:?} probe_port={port}",
+            "wordpress stack — apache_pid={:?} nginx_pid={:?} https={https_port} http={http_port}",
             state.runtime.apache_pid, state.runtime.nginx_pid
         );
-        port
+        (https_port, http_port)
     };
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
 
-    // WordPress home should mention the site title / WordPress
-    if let Err(e) = http_expect("demo.test", https_port, "Demo Blog") {
-        dump_apache_logs(ctx);
-        return Err(e);
+    // WordPress home should mention the site title / WordPress over HTTPS + HTTP.
+    for (scheme_port, label) in [(https_port, "https"), (http_port, "http")] {
+        if let Err(e) = http_expect("demo.test", scheme_port, "Demo Blog") {
+            dump_apache_logs(ctx);
+            return Err(format!("demo.test {label}: {e}").into());
+        }
+        let body = http_get_scheme(
+            "demo.test",
+            scheme_port,
+            "/",
+            if label == "http" { "http" } else { "https" },
+        )?;
+        if body.to_lowercase().contains("no input file specified") {
+            dump_apache_logs(ctx);
+            return Err(format!("demo.test {label}: No input file specified").into());
+        }
     }
     // After search-replace, clone should not still advertise the old domain as canonical
     let clone_body = match http_get("clone.test", https_port) {
@@ -596,6 +563,9 @@ async fn run_wordpress_smoke(
     if clone_body.contains("https://demo.test") {
         eprintln!("warning: clone HTML still references demo.test (may be in content)");
     }
+
+    // Fast site-setting toggles: HTTPS / server / PHP must apply in <3s on CI.
+    run_site_settings_perf(ctx, &created.site.id).await?;
 
     // Export → import round-trip with search-replace already covered by duplicate;
     // also restore the large dump into a fresh DB name via client.
@@ -1348,6 +1318,150 @@ async fn install_pkg(
         "\n[{id}] installed {} → {}",
         installed.version,
         installed.path.display()
+    );
+    Ok(())
+}
+
+/// Assert HTTPS / web-server / PHP toggles stay under 3s (typical <2s).
+async fn run_site_settings_perf(
+    ctx: &DevStackCtx,
+    site_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::stack::apply_site_environment_change;
+    use std::time::Instant;
+
+    let mut timings: Vec<(String, u128)> = Vec::new();
+
+    // Toggle HTTPS off then on.
+    for https in [false, true] {
+        let start = Instant::now();
+        {
+            let mut state = ctx.state.lock().await;
+            let (prev_ws, prev_https) = {
+                let site = state
+                    .sites
+                    .iter_mut()
+                    .find(|s| s.id == site_id)
+                    .ok_or("site missing for perf toggle")?;
+                let prev = (site.web_server.clone(), site.https);
+                site.https = https;
+                prev
+            };
+            apply_site_environment_change(
+                &ctx.paths,
+                &mut state,
+                site_id,
+                prev_ws,
+                prev_https,
+            )?;
+        }
+        let ms = start.elapsed().as_millis();
+        timings.push((format!("https={https}"), ms));
+        println!("PERF toggle https={https}: {ms}ms");
+        if ms > 3000 {
+            return Err(format!("HTTPS toggle took {ms}ms (>3000)").into());
+        }
+    }
+
+    // Apache → Nginx → Apache
+    for server in ["nginx", "apache"] {
+        let start = Instant::now();
+        let (http_port, https_port) = {
+            let mut state = ctx.state.lock().await;
+            let (prev_ws, prev_https) = {
+                let site = state
+                    .sites
+                    .iter_mut()
+                    .find(|s| s.id == site_id)
+                    .ok_or("site missing for server switch")?;
+                let prev = (site.web_server.clone(), site.https);
+                site.web_server = Some(server.into());
+                prev
+            };
+            apply_site_environment_change(
+                &ctx.paths,
+                &mut state,
+                site_id,
+                prev_ws,
+                prev_https,
+            )?;
+            if server == "nginx" {
+                (state.stack.http_port, state.stack.https_port)
+            } else {
+                (state.stack.apache_http_port, state.stack.apache_https_port)
+            }
+        };
+        let ms = start.elapsed().as_millis();
+        timings.push((format!("server={server}"), ms));
+        println!("PERF switch server={server}: {ms}ms");
+        if ms > 3000 {
+            return Err(format!("server switch to {server} took {ms}ms (>3000)").into());
+        }
+        // Fetch home on both schemes — must not be connection refused / No input file.
+        for (port, scheme) in [(http_port, "http"), (https_port, "https")] {
+            let body = http_get_scheme("demo.test", port, "/", scheme)?;
+            if body.to_lowercase().contains("no input file specified") {
+                return Err(
+                    format!("demo.test via {server} {scheme}: No input file specified").into(),
+                );
+            }
+        }
+    }
+
+    // Switch PHP version to another installed build when available.
+    {
+        let versions: Vec<String> = {
+            let state = ctx.state.lock().await;
+            state
+                .installed
+                .get("php")
+                .map(|v| v.iter().map(|r| r.version.clone()).collect())
+                .unwrap_or_default()
+        };
+        if versions.len() >= 2 {
+            let target = versions[1].clone();
+            let start = Instant::now();
+            {
+                let mut state = ctx.state.lock().await;
+                let (prev_ws, prev_https) = {
+                    let site = state
+                        .sites
+                        .iter_mut()
+                        .find(|s| s.id == site_id)
+                        .ok_or("site missing for php switch")?;
+                    let prev = (site.web_server.clone(), site.https);
+                    site.php_version = Some(target.clone());
+                    prev
+                };
+                apply_site_environment_change(
+                    &ctx.paths,
+                    &mut state,
+                    site_id,
+                    prev_ws,
+                    prev_https,
+                )?;
+            }
+            let ms = start.elapsed().as_millis();
+            timings.push((format!("php={target}"), ms));
+            println!("PERF switch php={target}: {ms}ms");
+            if ms > 3000 {
+                return Err(format!("PHP switch took {ms}ms (>3000)").into());
+            }
+        } else {
+            println!(
+                "PERF skip php switch — only {} PHP version(s) installed",
+                versions.len()
+            );
+        }
+    }
+
+    println!(
+        "PERF SUMMARY: {}",
+        timings
+            .iter()
+            .map(|(k, v)| format!("{k}={v}ms"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(())
 }

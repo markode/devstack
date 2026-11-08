@@ -833,6 +833,68 @@ select.native {
   margin-top: 18px;
 }
 
+.modal-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.modal-fieldset:disabled {
+  opacity: 0.72;
+}
+
+.modal-fieldset:disabled input,
+.modal-fieldset:disabled select,
+.modal-fieldset:disabled textarea,
+.modal-fieldset:disabled button {
+  cursor: not-allowed;
+}
+
+.modal-inline-error {
+  margin-top: 12px;
+}
+
+.modal-job-progress {
+  margin-top: 12px;
+  margin-bottom: 0;
+}
+
+.btn-busy-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.btn-busy-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  animation: btn-spin 0.7s linear infinite;
+}
+
+.btn:not(.btn-primary) .btn-spinner {
+  border-color: rgba(0, 0, 0, 0.15);
+  border-top-color: currentColor;
+}
+
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .cred-box {
   display: grid;
   gap: 10px;

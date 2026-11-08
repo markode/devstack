@@ -69,20 +69,19 @@ pub fn detect_site(site: &SiteRecord) -> SiteDetails {
         (site.database_name.clone(), site.database_user.clone(), None)
     };
 
+    // Placeholder only — real Open database mints a one-time token via
+    // `mint_phpmyadmin_signon_url` so the password never appears in the URL.
     let pma = if framework == "wordpress" {
         db_name.as_ref().map(|db| {
-            let user = db_user.clone().unwrap_or_else(|| "root".into());
-            let pass = db_pass.clone().unwrap_or_default();
             format!(
-                "https://phpmyadmin.test/devstack-signon.php?db={}&user={}&pass={}",
-                urlencoding_minimal(db),
-                urlencoding_minimal(&user),
-                urlencoding_minimal(&pass)
+                "https://phpmyadmin.test/devstack-signon.php?db={}",
+                urlencoding_minimal(db)
             )
         })
     } else {
         None
     };
+    let _ = db_pass;
 
     let mut updated = site.clone();
     updated.framework = Some(framework.clone());

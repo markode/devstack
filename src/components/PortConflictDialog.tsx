@@ -1,8 +1,11 @@
+import { BusyLabel } from "./AsyncModal";
 import type { PortCheckResult } from "../types";
 
 type Props = {
   conflict: PortCheckResult;
   busy?: boolean;
+  error?: string | null;
+  busyLabel?: string;
   onUseSuggested: () => void;
   onCoexistence?: () => void;
   onCancel: () => void;
@@ -11,19 +14,46 @@ type Props = {
 export function PortConflictDialog({
   conflict,
   busy,
+  error,
+  busyLabel = "Applying…",
   onUseSuggested,
   onCoexistence,
   onCancel,
 }: Props) {
   const suggested = Object.entries(conflict.suggested);
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="modal-card" style={{ maxWidth: 480 }}>
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-busy={busy || undefined}
+      onMouseDown={(e) => {
+        if (busy) return;
+        if (e.target === e.currentTarget) onCancel();
+      }}
+    >
+      <div
+        className="modal-card"
+        style={{ maxWidth: 480 }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <h3 style={{ marginTop: 0 }}>Port already in use</h3>
         <p className="muted" style={{ marginTop: 0 }}>
           {conflict.message ??
             `One or more ports for ${conflict.serviceId || "the stack"} are busy.`}
         </p>
+        {error ? <div className="error-banner modal-inline-error">{error}</div> : null}
+        {busy ? (
+          <div className="job-progress modal-job-progress" role="status">
+            <div className="job-progress-head">
+              <strong>Working</strong>
+              <span className="muted">{busyLabel}</span>
+            </div>
+            <div className="job-progress-bar">
+              <div className="job-progress-fill" style={{ width: "40%" }} />
+            </div>
+          </div>
+        ) : null}
         {conflict.conflicts.length ? (
           <ul style={{ fontSize: 13, paddingLeft: 18 }}>
             {conflict.conflicts.map((c) => (
@@ -67,7 +97,7 @@ export function PortConflictDialog({
               title="Switch to coexistence ports (8080/8443/3307…)"
               onClick={onCoexistence}
             >
-              Coexistence mode
+              <BusyLabel busy={!!busy} idle="Coexistence mode" busyText={busyLabel} />
             </button>
           ) : null}
           <button
@@ -81,10 +111,15 @@ export function PortConflictDialog({
             }
             onClick={onUseSuggested}
           >
-            Use suggested port
-            {suggested.length
-              ? ` (${suggested.map(([, v]) => v).join(", ")})`
-              : ""}
+            <BusyLabel
+              busy={!!busy}
+              idle={
+                suggested.length
+                  ? `Use suggested port (${suggested.map(([, v]) => v).join(", ")})`
+                  : "Use suggested port"
+              }
+              busyText={busyLabel}
+            />
           </button>
         </div>
       </div>

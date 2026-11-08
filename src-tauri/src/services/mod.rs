@@ -8,6 +8,7 @@ pub mod extras;
 pub mod httpd;
 pub mod nginx;
 pub mod php_runtime;
+pub mod pma_signon;
 pub mod ports;
 pub mod process;
 pub mod progress;

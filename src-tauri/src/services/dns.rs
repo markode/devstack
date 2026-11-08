@@ -405,14 +405,20 @@ fn trust_ca_windows(paths: &Paths, ca: &Path) -> Result<()> {
             ca.display()
         )));
     }
+    if crate::services::tls::is_ca_trust_cached(paths) {
+        return Ok(());
+    }
     if try_trust_ca_direct(ca) {
+        let _ = crate::services::tls::mark_ca_trusted(paths);
         return Ok(());
     }
     let ps = format!(
         "certutil -addstore -f Root {}\nWrite-DevStackLog 'CA trusted'\n",
         ps_quote(&ca.display().to_string())
     );
-    run_elevated_powershell(paths, &ps)
+    run_elevated_powershell(paths, &ps)?;
+    crate::services::tls::mark_ca_trusted(paths)?;
+    Ok(())
 }
 
 /// Write hosts + trust the DevStack CA in a **single** UAC prompt on Windows.
@@ -431,10 +437,22 @@ pub fn sync_hosts_and_trust_ca_windows(
     let hosts_path = windows_hosts_path();
     let existing = fs::read_to_string(&hosts_path).unwrap_or_default();
     let merged = merge_hosts_contents(&existing, domains);
-    let hosts_ok = try_write_hosts_direct(&hosts_path, &merged)?;
-    let ca_ok = try_trust_ca_direct(ca);
+    // Skip rewriting hosts when the DevStack block is already complete.
+    let hosts_complete = domains_missing_from_hosts(&existing, domains).is_empty();
+    let hosts_ok = if hosts_complete {
+        true
+    } else {
+        try_write_hosts_direct(&hosts_path, &merged)?
+    };
+    let ca_cached = crate::services::tls::is_ca_trust_cached(paths);
+    let ca_ok = ca_cached || try_trust_ca_direct(ca);
+    if ca_ok && !ca_cached {
+        let _ = crate::services::tls::mark_ca_trusted(paths);
+    }
     if hosts_ok && ca_ok {
-        verify_hosts_contain(&hosts_path, domains)?;
+        if !hosts_complete {
+            verify_hosts_contain(&hosts_path, domains)?;
+        }
         return Ok(());
     }
 
@@ -586,22 +604,52 @@ pub fn sync_hosts(paths: &Paths, state: &AppState) -> Result<()> {
 }
 
 /// Sync hosts file and trust the local CA — one elevation on Windows.
+///
+/// Skips both steps when hosts already contain every domain and the CA trust
+/// marker matches the on-disk root cert (avoids UAC / certutil on every toggle).
 pub fn sync_hosts_and_trust_ca(paths: &Paths, state: &AppState) -> Result<()> {
     let ca = crate::services::tls::ca_cert_path(paths);
     if !ca.exists() {
         crate::services::tls::ensure_root_ca(paths)?;
     }
+    let hosts_ok = check_hosts_status(paths, state).ok;
+    let ca_ok = crate::services::tls::is_ca_trust_cached(paths);
+    if hosts_ok && ca_ok {
+        return Ok(());
+    }
     #[cfg(windows)]
     {
         let domains = site_domains(&state.sites);
-        return sync_hosts_and_trust_ca_windows(paths, &domains, &ca);
+        if hosts_ok && !ca_ok {
+            trust_ca_windows(paths, &ca)?;
+            crate::services::tls::mark_ca_trusted(paths)?;
+            return Ok(());
+        }
+        if !hosts_ok && ca_ok {
+            return sync_hosts_windows(paths, &domains);
+        }
+        sync_hosts_and_trust_ca_windows(paths, &domains, &ca)?;
+        crate::services::tls::mark_ca_trusted(paths)?;
+        Ok(())
     }
     #[cfg(not(windows))]
     {
-        let _ = ca;
-        sync_hosts(paths, state)?;
-        crate::services::tls::trust_ca_via_helper(paths)
+        if !hosts_ok {
+            sync_hosts(paths, state)?;
+        }
+        if !ca_ok {
+            crate::services::tls::trust_ca_via_helper(paths)?;
+        }
+        Ok(())
     }
+}
+
+/// Hosts-only sync when entries are missing (never re-trusts the CA).
+pub fn sync_hosts_if_needed(paths: &Paths, state: &AppState) -> Result<()> {
+    if check_hosts_status(paths, state).ok {
+        return Ok(());
+    }
+    sync_hosts(paths, state)
 }
 
 /// True when `domain` resolves to a loopback address (hosts entry present).

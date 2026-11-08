@@ -962,6 +962,17 @@ pub fn wp_search_replace_urls(
     Ok(())
 }
 
+pub fn mysql_simple_replace_pub(
+    paths: &Paths,
+    state: &AppState,
+    engine: &str,
+    db: &str,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    mysql_simple_replace(paths, state, engine, db, from, to)
+}
+
 fn mysql_simple_replace(
     paths: &Paths,
     state: &AppState,

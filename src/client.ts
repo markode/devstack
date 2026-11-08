@@ -364,4 +364,11 @@ export async function applyNextFreePorts(serviceId: string) {
   return api.applyNextFreePorts(serviceId);
 }
 
+export async function mintPhpmyadminSignonUrl(siteId: string): Promise<string> {
+  if (useMock()) {
+    return `https://phpmyadmin.test/devstack-signon.php?token=mocktoken`;
+  }
+  return api.mintPhpmyadminSignonUrl(siteId);
+}
+
 export { useMock };

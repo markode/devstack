@@ -329,6 +329,16 @@ pub async fn update_site_environment(
 ) -> Result<SiteRecord> {
     let mut state = ctx.state.lock().await;
     ensure_welcome_site(&ctx.paths, &mut state);
+    let (prev_web_server, prev_https) = {
+        let site = state
+            .sites
+            .iter()
+            .find(|s| s.id == site_id)
+            .ok_or_else(|| {
+                crate::error::DevStackError::Message(format!("site not found: {site_id}"))
+            })?;
+        (site.web_server.clone(), site.https)
+    };
     let site = state
         .sites
         .iter_mut()
@@ -352,9 +362,15 @@ pub async fn update_site_environment(
     }
     let out = site.clone();
     save_state(&ctx.paths.state_file, &state)?;
-    // Propagate hosts/CA errors so the UI can toast the real message.
-    sync_hosts_after_change(&ctx.paths, &mut state)?;
-    let _ = reload_sites(&ctx.paths, &mut state);
+    // Fast path: cert cache + hosts-if-needed + reload only affected front-end.
+    // Do NOT re-run certutil/UAC or full stack restart on every toggle.
+    crate::services::stack::apply_site_environment_change(
+        &ctx.paths,
+        &mut state,
+        &site_id,
+        prev_web_server,
+        prev_https,
+    )?;
     save_state(&ctx.paths.state_file, &state)?;
     Ok(out)
 }
@@ -997,6 +1013,33 @@ pub async fn repair_hosts(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus> {
     Ok(dns::check_hosts_status(&ctx.paths, &state))
 }
 
+/// Mint a one-time phpMyAdmin sign-on URL (password never appears in the query string).
+#[tauri::command]
+pub async fn mint_phpmyadmin_signon_url(
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+) -> Result<String> {
+    let state = ctx.state.lock().await;
+    let site = state
+        .sites
+        .iter()
+        .find(|s| s.id == site_id)
+        .ok_or_else(|| crate::error::DevStackError::Message(format!("site not found: {site_id}")))?;
+    let (db_name, db_user, db_pass) = crate::services::sites::parse_wp_config(&site.path);
+    let db = db_name
+        .or_else(|| site.database_name.clone())
+        .ok_or_else(|| {
+            crate::error::DevStackError::Message("site has no database name".into())
+        })?;
+    let user = db_user
+        .or_else(|| site.database_user.clone())
+        .unwrap_or_else(|| "root".into());
+    let pass = db_pass.unwrap_or_default();
+    // Ensure signon.php knows the current tokens dir / DB port.
+    let _ = crate::services::database::configure_phpmyadmin(&ctx.paths, &state);
+    crate::services::pma_signon::mint_signon_url(&ctx.paths, &state, &db, &user, &pass)
+}
+
 #[tauri::command]
 pub async fn open_path_cmd(path: String) -> Result<()> {
     let p = PathBuf::from(&path);
@@ -1022,7 +1065,8 @@ pub async fn reveal_path_cmd(path: String) -> Result<()> {
     crate::paths_util::reveal_path_os(&abs)
 }
 
-/// Sync hosts+CA after site mutations and reload web servers (errors propagate).
+/// Sync hosts+CA after site mutations that add domains (create/duplicate/WP).
+/// Skips when hosts + CA trust marker are already current; still reloads servers.
 pub fn sync_hosts_after_change(paths: &Paths, state: &mut AppState) -> Result<HostsStatus> {
     let _ = crate::services::tls::ensure_root_ca(paths);
     dns::sync_hosts_and_trust_ca(paths, state)?;

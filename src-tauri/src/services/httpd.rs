@@ -286,21 +286,26 @@ fn nix_geteuid() -> u32 {
 
 /// PHP proxy directives for a vhost.
 ///
-/// Windows php-cgi needs an absolute SCRIPT_FILENAME. Trailing-slash SetHandler
-/// alone leaves a URL path ("No input file specified"); no slash glues `D:` onto
-/// the host. Fix: trailing slash + ProxyFCGISetEnvIf rebuild from DOCUMENT_ROOT.
+/// Windows php-cgi needs a real filesystem `SCRIPT_FILENAME`:
+/// - `SetHandler proxy:fcgi://host:port` (no slash) glues `D:` onto the authority
+/// - trailing-slash SetHandler alone leaves a URL path → "No input file specified"
+/// - `ProxyPassMatch …/C:/docroot/$1` often yields `/C:/…` (leading slash) which
+///   php-cgi also rejects
+///
+/// Fix: trailing-slash SetHandler + `ProxyFCGISetEnvIf` rebuild from
+/// `DOCUMENT_ROOT` + `SCRIPT_NAME` (forward-slash docroots via `conf_path`).
 ///
 /// Unix php-fpm uses SetHandler with a trailing slash.
 fn php_proxy_block(runtime: &PhpRuntime, _docroot_conf: &str) -> String {
     let fcgi = fcgi_target(runtime);
     if cfg!(windows) {
-        // ProxyPassMatch embeds the absolute docroot so php-cgi gets a real path.
-        // (SetHandler±slash either glues D: onto the host or leaves a URL path.)
-        let host = nginx_fastcgi_pass(runtime);
-        let docroot = _docroot_conf.trim_end_matches('/');
         format!(
             r#"  ProxyFCGIBackendType GENERIC
-  ProxyPassMatch "^/(.*\.php(/.*)?)$" "fcgi://{host}/{docroot}/$1"
+  <FilesMatch "\.php$">
+    SetHandler "proxy:{fcgi}"
+  </FilesMatch>
+  # Rebuild SCRIPT_FILENAME as DOCUMENT_ROOT + SCRIPT_NAME (Windows drive-safe).
+  ProxyFCGISetEnvIf "true" SCRIPT_FILENAME "%{{reqenv:DOCUMENT_ROOT}}%{{reqenv:SCRIPT_NAME}}"
   ProxyTimeout 3600
 "#
         )
@@ -508,9 +513,10 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     // Wait until the process is still alive and accepts TCP on the HTTPS port.
     // Do NOT use bind()-fails-as-ready: Windows SO_REUSEADDR lets bind succeed
     // while httpd is already listening, which false-negatived readiness.
+    // Keep the poll budget tight so site setting toggles stay under ~2s.
     let https_port = state.stack.apache_https_port;
     let mut ready = false;
-    for _ in 0..50 {
+    for _ in 0..40 {
         if !is_running(pid) {
             let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
             let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
@@ -522,7 +528,7 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
             ready = true;
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
     if !ready {
         let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
@@ -558,14 +564,19 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
                 let _ = stop_pid(file_pid);
             }
             state.runtime.apache_pid = None;
-            // Wait until our ports are free (mpm_winnt child can lag behind taskkill).
-            for _ in 0..30 {
-                let http_free = std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
-                let https_free = std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_https_port)).is_ok();
+            // Brief poll — mpm_winnt children usually release ports within ~200ms.
+            for _ in 0..40 {
+                let http_free =
+                    std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
+                let https_free = std::net::TcpListener::bind((
+                    "127.0.0.1",
+                    state.stack.apache_https_port,
+                ))
+                .is_ok();
                 if http_free && https_free {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
             return start_apache(paths, state);
         }
@@ -614,6 +625,41 @@ mod tests {
     use super::*;
     use crate::services::php_runtime::PhpRuntime;
     use std::path::PathBuf;
+
+    #[test]
+    fn windows_php_proxy_rebuilds_script_filename() {
+        let rt = PhpRuntime {
+            version: "8.4".into(),
+            root: PathBuf::from("."),
+            php_bin: PathBuf::from("php"),
+            fpm_bin: None,
+            cgi_bin: None,
+            listen: "127.0.0.1:9084".into(),
+            is_system: false,
+        };
+        let block = php_proxy_block(&rt, "C:/Users/Marcin/Sites/test");
+        if cfg!(windows) {
+            assert!(
+                block.contains("ProxyFCGISetEnvIf"),
+                "expected ProxyFCGISetEnvIf, got:\n{block}"
+            );
+            assert!(
+                block.contains("SCRIPT_FILENAME"),
+                "expected SCRIPT_FILENAME rebuild, got:\n{block}"
+            );
+            assert!(
+                block.contains("proxy:fcgi://127.0.0.1:9084/"),
+                "expected trailing-slash SetHandler, got:\n{block}"
+            );
+            assert!(
+                !block.contains("ProxyPassMatch"),
+                "ProxyPassMatch embeds /C:/… which php-cgi rejects:\n{block}"
+            );
+        } else {
+            assert!(block.contains("SetHandler"));
+            assert!(!block.contains("ProxyFCGISetEnvIf"));
+        }
+    }
 
     #[test]
     fn fcgi_target_tcp_has_trailing_slash() {

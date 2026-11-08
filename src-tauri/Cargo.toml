@@ -37,7 +37,7 @@ regex = "1"
 semver = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 url = "2"
-rcgen = "0.13"
+rcgen = { version = "0.13", default-features = true, features = ["x509-parser"] }
 rustls-pemfile = "2"
 which = "7"
 sysinfo = "0.33"

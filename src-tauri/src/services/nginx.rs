@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{find_installed, latest_installed, AppState, Paths, SiteRecord};
 use crate::error::{DevStackError, Result};
-use crate::services::php_runtime::{nginx_fastcgi_pass, resolve_php, start_php, PhpRuntime};
+use crate::services::php_runtime::{
+    nginx_fastcgi_pass, resolve_php, start_php, PhpRuntime,
+};
 use crate::services::process::{find_bin, is_running, read_pid, spawn_logged, stop_pid, write_pid};
 use crate::services::tls::ensure_site_cert;
 
@@ -393,8 +395,13 @@ pub fn reload_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
     let versions = collect_php_versions(state);
     let mut runtimes = Vec::new();
     for v in versions {
-        if let Ok(rt) = resolve_php(paths, state, &v) {
-            runtimes.push((v, rt));
+        match start_php(paths, state, &v) {
+            Ok(rt) => runtimes.push((v, rt)),
+            Err(_) => {
+                if let Ok(rt) = resolve_php(paths, state, &v) {
+                    runtimes.push((v, rt));
+                }
+            }
         }
     }
     if runtimes.is_empty() {
@@ -407,6 +414,30 @@ pub fn reload_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
     let bin = nginx_bin(&root)?;
     let conf_s = conf.display().to_string();
     let prefix_s = paths.nginx.display().to_string();
+
+    // Validate before signalling the master — surface syntax errors in the UI.
+    let test = crate::services::process::command(&bin)
+        .args(["-t", "-c", &conf_s, "-p", &prefix_s])
+        .output();
+    if let Ok(out) = &test {
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return Err(DevStackError::Message(format!(
+                "Nginx config test failed: {stderr}{stdout}"
+            )));
+        }
+    }
+
+    if state
+        .runtime
+        .nginx_pid
+        .filter(|p| is_running(*p))
+        .is_none()
+    {
+        return start_nginx(paths, state);
+    }
+
     let status = crate::services::process::command(&bin)
         .args(["-c", &conf_s, "-p", &prefix_s, "-s", "reload"])
         .status();
