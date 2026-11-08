@@ -1376,12 +1376,19 @@ fn http_get_scheme_opts(
     ];
     if follow_redirects {
         args.push("-L".into());
+        // Fail fast on redirect loops (wrong WP siteurl/home).
+        args.push("--max-redirs".into());
+        args.push("5".into());
     }
     args.push(url.clone());
     let status = smoke_command("curl").args(&args).output()?;
     let code = String::from_utf8_lossy(&status.stdout).trim().to_string();
     let body = std::fs::read_to_string(&out).unwrap_or_default();
+    let stderr = String::from_utf8_lossy(&status.stderr);
     println!("HTTP {code} for {url} (follow={follow_redirects})");
+    if stderr.to_lowercase().contains("maximum") && stderr.to_lowercase().contains("redirect") {
+        return Err(format!("redirect loop for {url}: {stderr}").into());
+    }
     // HTTP→HTTPS redirects (301/302) are success for the cleartext listener.
     if code == "200" || (!follow_redirects && (code == "301" || code == "302")) {
         return Ok(body);
@@ -2003,7 +2010,7 @@ async fn run_site_settings_perf(
         if ms > budget {
             return Err(format!("server switch to {server} took {ms}ms (>{budget})").into());
         }
-        // Fetch home on both schemes — must not be connection refused / No input file.
+        // Fetch home on both schemes — must not redirect-loop or show "No input file".
         let https_body = http_get_scheme("demo.test", https_port, "/", "https")?;
         if https_body.to_lowercase().contains("no input file specified") {
             return Err(format!("demo.test via {server} https: No input file specified").into());
@@ -2013,6 +2020,59 @@ async fn run_site_settings_perf(
             || http_body.to_lowercase().contains("ssl-enabled server port")
         {
             return Err(format!("demo.test via {server} http: bad response").into());
+        }
+        // Following HTTP redirects must land on the canonical HTTPS Open URL.
+        let followed = http_get_scheme("demo.test", http_port, "/", "http")?;
+        if followed.to_lowercase().contains("no input file specified") {
+            return Err(format!("demo.test via {server} http→https follow: No input file").into());
+        }
+        // Assert WP siteurl matches canonical after switch.
+        {
+            use devstack_lib::services::ports::canonical_site_url;
+            let state = ctx.state.lock().await;
+            let site = state
+                .sites
+                .iter()
+                .find(|s| s.id == site_id)
+                .ok_or("site missing for siteurl assert")?
+                .clone();
+            let want = canonical_site_url(&site, &state);
+            if let Some(db) = site.database_name.as_deref() {
+                let engine = site
+                    .database_engine
+                    .clone()
+                    .unwrap_or_else(|| "mariadb".into());
+                if let Ok(root) =
+                    devstack_lib::services::database::engine_install_dir(&state, &engine)
+                {
+                    if let Ok(client) =
+                        devstack_lib::services::database::client_bin_for(&root)
+                    {
+                        let mut args =
+                            devstack_lib::services::database::mysql_root_args(
+                                &ctx.paths, &state, &engine,
+                            );
+                        args.push(format!("--database={db}"));
+                        args.extend([
+                            "-N".into(),
+                            "-e".into(),
+                            "SELECT option_value FROM wp_options WHERE option_name='siteurl' LIMIT 1;"
+                                .into(),
+                        ]);
+                        if let Ok(out) = smoke_command(&client).args(&args).output() {
+                            let got =
+                                String::from_utf8_lossy(&out.stdout).trim().to_string();
+                            println!("siteurl after {server}: got={got} want={want}");
+                            if !got.is_empty() && got != want {
+                                return Err(format!(
+                                    "siteurl mismatch after switch to {server}: got={got} want={want}"
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

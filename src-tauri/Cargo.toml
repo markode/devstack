@@ -1,6 +1,6 @@
 [package]
 name = "devstack"
-version = "0.2.7"
+version = "0.2.8"
 description = "DevStack — local PHP/Node development environment"
 authors = ["DevStack"]
 edition = "2021"
