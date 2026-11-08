@@ -857,54 +857,55 @@ async fn run_apache_wordpress_smoke(
     }
 
     // Create a published post with a known slug for pretty-permalink probing.
+    // Must use run_wp_cli_with_ini so Windows loads extension_dir + mysqli from our php.ini
+    // (bare `php wp-cli.phar` skips the managed ini and WP reports mysqli missing).
     {
-        let state = ctx.state.lock().await;
-        let php_ver = created
-            .site
-            .php_version
-            .clone()
-            .unwrap_or_else(|| "8.3".into());
-        let php = state
-            .installed
-            .get("php")
-            .and_then(|list| {
-                list.iter()
-                    .find(|r| r.version == php_ver || r.channel.as_deref() == Some(php_ver.as_str()))
-                    .or_else(|| list.first())
-            })
-            .ok_or("php not installed")?;
-        let php_bin = php.path.join("bin/php");
-        let php_bin = if php_bin.exists() {
-            php_bin
-        } else {
-            which::which("php")?
+        use devstack_lib::services::wordpress::{ensure_wp_cli, run_wp_cli_with_ini};
+        let (php_bin, install_dir, abs) = {
+            let state = ctx.state.lock().await;
+            let php_ver = created
+                .site
+                .php_version
+                .clone()
+                .unwrap_or_else(|| "8.3".into());
+            let php = state
+                .installed
+                .get("php")
+                .and_then(|list| {
+                    list.iter()
+                        .find(|r| {
+                            r.version == php_ver || r.channel.as_deref() == Some(php_ver.as_str())
+                        })
+                        .or_else(|| list.first())
+                })
+                .ok_or("php not installed")?;
+            let php_bin =
+                devstack_lib::services::process::find_bin(&php.path, &["php", "php.exe"])
+                    .ok_or("php binary missing")?;
+            (php_bin, php.path.clone(), created.site.path.clone())
         };
-        let wp_cli = ctx.paths.root.join("tools/wp-cli.phar");
-        let abs = created.site.path.clone();
-        let status = smoke_command(&php_bin)
-            .args([
-                wp_cli.to_str().unwrap(),
+        let wp_cli = ensure_wp_cli(&ctx.paths, &progress, "apache-wp-cli").await?;
+        run_wp_cli_with_ini(
+            &php_bin,
+            &wp_cli,
+            &abs,
+            &[
                 "post",
                 "create",
                 "--post_title=Pretty Permalink Probe",
                 "--post_name=pretty-permalink-probe",
                 "--post_status=publish",
                 "--porcelain",
-            ])
-            .current_dir(&abs)
-            .status()?;
-        if !status.success() {
-            return Err("wp post create failed".into());
-        }
-        let _ = smoke_command(&php_bin)
-            .args([
-                wp_cli.to_str().unwrap(),
-                "rewrite",
-                "flush",
-                "--hard",
-            ])
-            .current_dir(&abs)
-            .status();
+            ],
+            Some(&install_dir),
+        )?;
+        let _ = run_wp_cli_with_ini(
+            &php_bin,
+            &wp_cli,
+            &abs,
+            &["rewrite", "flush", "--hard"],
+            Some(&install_dir),
+        );
     }
 
     let _ = smoke_command("sudo")
@@ -1067,7 +1068,11 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
 
     let mailpit_ver = pick_version(ctx, "mailpit", |_| true).await?;
     println!("Installing Mailpit {mailpit_ver}…");
-    install_pkg(ctx, "mailpit", &mailpit_ver).await?;
+    if let Err(e) = install_pkg(ctx, "mailpit", &mailpit_ver).await {
+        println!("[mailpit] install {mailpit_ver} failed ({e}); retrying once…");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        install_pkg(ctx, "mailpit", &mailpit_ver).await?;
+    }
 
     // Prefer curated fallback builds (16.8 / 17.x) so a rate-limited re-list
     // during install still resolves; any 16./17. is fine.

@@ -37,6 +37,46 @@ pub async fn download_file(
         fs::create_dir_all(parent)?;
     }
 
+    const MAX_ATTEMPTS: u32 = 4;
+    let mut last_err: Option<DevStackError> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match download_file_once(client, url, dest, package_id, version, progress).await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < MAX_ATTEMPTS && is_transient_download_error(&e) => {
+                let wait_ms = 500u64 * (1u64 << (attempt - 1));
+                eprintln!(
+                    "[download] {package_id}@{version} attempt {attempt}/{MAX_ATTEMPTS} failed ({e}); retrying in {wait_ms}ms"
+                );
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| DevStackError::Message("download failed".into())))
+}
+
+fn is_transient_download_error(err: &DevStackError) -> bool {
+    let s = err.to_string().to_ascii_lowercase();
+    s.contains("429")
+        || s.contains("502")
+        || s.contains("503")
+        || s.contains("504")
+        || s.contains("timeout")
+        || s.contains("timed out")
+        || s.contains("connection reset")
+        || s.contains("temporarily")
+}
+
+async fn download_file_once(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    package_id: &str,
+    version: &str,
+    progress: &ProgressFn,
+) -> Result<()> {
+    let _ = fs::remove_file(dest);
     let response = client.get(url).send().await?.error_for_status()?;
     let total = response.content_length();
     let mut stream = response.bytes_stream();
