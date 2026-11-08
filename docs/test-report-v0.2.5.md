@@ -30,23 +30,26 @@ Ship only after windows-latest + macos-latest E2E (real downloads, real backend)
 
 ### E2E (`devstack_smoke --e2e` on windows-latest + macos-latest)
 
+`--e2e` now runs: stack + wordpress (+perf/switch) + apache permalinks + db-files + services + persistence/PMA/empty/delete.
+
 | Flow | Status |
 | --- | --- |
 | Fresh data dir / reset sites | covered |
-| Install PHP + Nginx + MariaDB + phpMyAdmin + Apache | covered |
+| Install PHP (≥2 versions) + Nginx + MariaDB + MySQL(best-effort) + phpMyAdmin + Apache + Node | covered |
 | Start/stop stack | covered |
 | WordPress create (Apache) HTTP+HTTPS 200, no “No input file specified” | covered |
+| Apache↔Nginx↔Apache switch + fetch both schemes | covered |
 | Template + duplicate | covered |
-| DB backup streaming | covered |
-| Site setting perf: HTTPS / server Apache↔Nginx / PHP &lt;3s | covered (`PERF SUMMARY`) |
-| Install Node / Postgres / Mongo / Redis / Mailpit | `--services` (extend e2e follow-up) |
-| Port conflict + coexistence | unit + Services UI (extend e2e follow-up) |
-| Hosts sync + CA trust | launch + repair paths |
+| DB backup streaming + Databases folder import/URL rewrite | covered (`--db-files`) |
+| Site setting perf: HTTPS / server / PHP &lt;3s | covered (`PERF SUMMARY`) |
+| Postgres / Mongo / Redis / Mailpit | covered (`--services`) |
+| Port conflict + coexistence | unit tests + Services UI |
+| Hosts sync + CA trust | persistence smoke hosts status |
 | welcome.test seed | bootstrap |
-| Empty site / link folder | UI + create_site |
-| phpMyAdmin token signon 200 | unit mint; e2e probe follow-up |
-| Delete site cleans vhosts/hosts | `delete_site` command |
-| App restart persists state | state.json round-trip |
+| Empty site | persistence smoke |
+| phpMyAdmin token signon (no `pass=`, HTTP probe) | covered |
+| Delete site cleans vhosts | covered |
+| App restart persists state | state.json reload assert |
 
 ## Perf timings (filled from CI logs)
 

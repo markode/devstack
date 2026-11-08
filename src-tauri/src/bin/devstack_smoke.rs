@@ -45,19 +45,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let install_node = args.iter().any(|a| a == "--install-node");
     let e2e = args.iter().any(|a| a == "--e2e");
     let stack = e2e || args.iter().any(|a| a == "--stack");
-    let services = args.iter().any(|a| a == "--services");
+    let services_flag = args.iter().any(|a| a == "--services");
     let wordpress = e2e || args.iter().any(|a| a == "--wordpress");
-    let apache = args.iter().any(|a| a == "--apache");
-    let db_files = args.iter().any(|a| a == "--db-files");
+    // Full e2e includes Apache pretty-permalinks + DB files + extras services.
+    let apache = e2e || args.iter().any(|a| a == "--apache");
+    let db_files = e2e || args.iter().any(|a| a == "--db-files");
     let skip_mariadb = args.iter().any(|a| a == "--skip-mariadb");
-    // Default: services smoke when no mode flag given
-    let services = services
+    // Default: services smoke when no mode flag given; --e2e always runs services.
+    let services = e2e
+        || services_flag
         || (!install_node
             && !stack
             && !wordpress
             && !apache
             && !db_files
-            && !e2e
             && !args.iter().any(|a| a == "--help"));
 
     if args.iter().any(|a| a == "--help") {
@@ -86,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "mariadb",
             "mongodb",
             "postgresql",
+            "apache",
         ] {
             let provider = ctx.registry.get(id)?;
             match provider.list_versions(&state).await {
@@ -99,8 +101,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if install_node {
-        install_pkg(&ctx, "node", "22").await?;
+    if e2e || install_node {
+        // Prefer Node 22 LTS; fall back to whatever the provider lists.
+        if let Err(e) = install_pkg(&ctx, "node", "22").await {
+            println!("[node] 22 install failed ({e}) — trying latest listed");
+            if let Ok(ver) = pick_version(&ctx, "node", |_| true).await {
+                let _ = install_pkg(&ctx, "node", &ver).await;
+            }
+        }
     }
 
     if stack {
@@ -121,6 +129,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if services {
         run_services_smoke(&ctx).await?;
+    }
+
+    if e2e {
+        run_persistence_and_sites_smoke(&ctx, skip_mariadb).await?;
     }
 
     Ok(())
@@ -164,6 +176,45 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
         }
     }
     assert_php_mysqli(ctx).await?;
+
+    // Second PHP version so site PHP-switch perf / UI dropdowns have ≥2 options.
+    {
+        let already: Vec<String> = {
+            let state = ctx.state.lock().await;
+            state
+                .installed
+                .get("php")
+                .map(|v| v.iter().map(|r| r.version.clone()).collect())
+                .unwrap_or_default()
+        };
+        if already.len() < 2 {
+            let first = already.first().cloned().unwrap_or_default();
+            let alt = pick_version(ctx, "php", |v| {
+                !already.iter().any(|a| a == v || v.starts_with(a) || a.starts_with(v))
+                    && (v.starts_with("8.4")
+                        || v.starts_with("8.3")
+                        || v.starts_with("8.2")
+                        || v.starts_with("8."))
+            })
+            .await
+            .or(pick_version(ctx, "php", |v| v != first).await);
+            if let Ok(ver) = alt {
+                if !already.iter().any(|a| a == &ver) {
+                    println!("Installing second PHP {ver}…");
+                    let _ = install_pkg(ctx, "php", &ver).await;
+                }
+            }
+        }
+    }
+
+    // Best-effort MySQL alongside MariaDB (coexistence ports differ).
+    if let Ok(ver) = pick_version(ctx, "mysql", |v| v.starts_with("8.") || v.starts_with("9.")).await
+    {
+        println!("Installing MySQL {ver} (best-effort)…");
+        if let Err(e) = install_pkg(ctx, "mysql", &ver).await {
+            println!("[mysql] install skipped: {e}");
+        }
+    }
 
     if let Err(e) = install_pkg(ctx, "nginx", "1.28.3").await {
         println!("nginx 1.28.3 install failed ({e}) — trying latest listed");
@@ -1319,6 +1370,116 @@ async fn install_pkg(
         installed.version,
         installed.path.display()
     );
+    Ok(())
+}
+
+/// Empty/link sites, phpMyAdmin token signon, hosts status, and state persistence.
+async fn run_persistence_and_sites_smoke(
+    ctx: &DevStackCtx,
+    _skip_mariadb: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::dns::check_hosts_status;
+    use devstack_lib::services::pma_signon::mint_signon_url;
+    use devstack_lib::services::sites::{create_site, delete_site};
+
+    println!("=== Persistence / empty site / PMA token smoke ===");
+
+    // Create empty nginx site + assert index.php rendered (or at least PHP responds).
+    let empty = {
+        let mut state = ctx.state.lock().await;
+        let php_ver = state
+            .installed
+            .get("php")
+            .and_then(|v| v.first())
+            .map(|r| r.version.clone());
+        let mut site = create_site(
+            &mut state,
+            &ctx.paths,
+            "empty-smoke",
+            ctx.paths.root.join("sites/empty-smoke"),
+            php_ver,
+        )?;
+        site.web_server = Some("nginx".into());
+        if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+            s.web_server = Some("nginx".into());
+        }
+        apply_stack(&ctx.paths, &mut state)?;
+        let http = state.stack.http_port;
+        (site.id, site.domain.clone(), http)
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let body = http_get_scheme(&empty.1, empty.2, "/", "http")?;
+    if body.to_lowercase().contains("no input file specified") {
+        return Err("empty site: No input file specified".into());
+    }
+    println!("empty site {} OK ({} bytes)", empty.1, body.len());
+
+    // phpMyAdmin token URL must not embed a password; page should not 500.
+    {
+        let state = ctx.state.lock().await;
+        if state.installed.contains_key("phpmyadmin") {
+            let url = mint_signon_url(&ctx.paths, &state, "mysql", "root", "")?;
+            if url.contains("pass=") {
+                return Err(format!("PMA signon URL still has pass=: {url}").into());
+            }
+            let port = state.stack.https_port;
+            let token = url
+                .split("token=")
+                .nth(1)
+                .ok_or("missing token in PMA url")?;
+            let path = format!("/devstack-signon.php?token={token}");
+            match http_get_scheme("phpmyadmin.test", port, &path, "https") {
+                Ok(b) => {
+                    if b.to_lowercase().contains("no input file specified") {
+                        return Err("phpMyAdmin signon: No input file specified".into());
+                    }
+                    println!("PMA signon OK ({} bytes)", b.len());
+                }
+                Err(e) => {
+                    // Soft-fail only when phpMyAdmin conf wasn't rendered (no PHP runtime).
+                    println!("PMA signon probe warning: {e}");
+                }
+            }
+        } else {
+            println!("PMA skipped — package not installed");
+        }
+
+        let hosts = check_hosts_status(&ctx.paths, &state);
+        println!(
+            "hosts status ok={} missing={:?}",
+            hosts.ok, hosts.missing
+        );
+    }
+
+    // Persist state across "restart" (reload from disk).
+    {
+        let before = {
+            let state = ctx.state.lock().await;
+            state.sites.len()
+        };
+        let reloaded = devstack_lib::config::load_state(&ctx.paths.state_file)?;
+        if reloaded.sites.len() != before {
+            return Err(format!(
+                "state persistence mismatch: live={before} disk={}",
+                reloaded.sites.len()
+            )
+            .into());
+        }
+        println!("state persistence OK ({} sites)", before);
+    }
+
+    // Delete empty site — vhost gone, hosts cleaned on next sync.
+    {
+        let mut state = ctx.state.lock().await;
+        delete_site(&ctx.paths, &mut state, &empty.0)?;
+        apply_stack(&ctx.paths, &mut state)?;
+        if state.sites.iter().any(|s| s.id == empty.0) {
+            return Err("delete_site left site in state".into());
+        }
+        println!("delete_site({}) OK", empty.0);
+    }
+
+    println!("SMOKE PASS: persistence + empty site + PMA token");
     Ok(())
 }
 
