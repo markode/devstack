@@ -66,6 +66,8 @@ export function SitesPage({
   const [patching, setPatching] = useState(false);
   const [logOpenId, setLogOpenId] = useState<string | null>(null);
   const wasActive = useRef(active);
+  /** Sync guard — `busy` state alone can race before the next render. */
+  const stackOpInflight = useRef(false);
 
   const refresh = async () => {
     try {
@@ -179,6 +181,8 @@ export function SitesPage({
   const stackRunning = Boolean(stack?.nginx || stack?.apache);
 
   const toggleStack = async () => {
+    if (stackOpInflight.current || busy) return;
+    stackOpInflight.current = true;
     setBusy(true);
     setError(null);
     setPortConflict(null);
@@ -202,6 +206,7 @@ export function SitesPage({
       }
       await refresh();
     } finally {
+      stackOpInflight.current = false;
       setBusy(false);
     }
   };
