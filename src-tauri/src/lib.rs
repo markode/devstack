@@ -62,8 +62,11 @@ pub fn run() {
                 let mut state = launch_ctx.state.lock().await;
                 // Persist free ports beside WAMP/MAMP/IIS before the UI opens.
                 let before = crate::services::ports::PortSnapshot::from_stack(&state.stack);
-                let remap =
-                    crate::services::ports::auto_separate_busy_ports(&mut state.stack);
+                let owned = crate::services::ports::owned_runtime_pids(&state.runtime);
+                let remap = crate::services::ports::auto_separate_busy_ports(
+                    &mut state.stack,
+                    &owned,
+                );
                 if remap.changed {
                     state.runtime.port_notice = remap.messages.clone();
                     let _ = crate::config::save_state(&launch_ctx.paths.state_file, &state);

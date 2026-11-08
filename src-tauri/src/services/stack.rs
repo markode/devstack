@@ -9,7 +9,9 @@ use crate::services::dns::{start_dns, stop_dns, sync_hosts_and_trust_ca};
 use crate::services::httpd::{reload_apache, start_apache, stop_apache};
 use crate::services::nginx::{reload_nginx, start_nginx, stop_nginx};
 use crate::services::php_runtime::register_system_php;
-use crate::services::ports::{auto_separate_busy_ports, PortRemapNotice, PortSnapshot};
+use crate::services::ports::{
+    auto_separate_busy_ports, owned_runtime_pids, PortRemapNotice, PortSnapshot,
+};
 use crate::services::process::is_running;
 use crate::services::sites::refresh_site_metadata;
 use crate::services::tls::ensure_root_ca;
@@ -112,8 +114,10 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     refresh_site_metadata(state);
 
     // Auto-pick free ports when WAMP/MAMP/IIS hold 80/443/3306 — no modal required.
+    // Ignore our own nginx/httpd/mysqld PIDs so a live stack never remaps onto itself.
     let before = PortSnapshot::from_stack(&state.stack);
-    let remap: PortRemapNotice = auto_separate_busy_ports(&mut state.stack);
+    let owned = owned_runtime_pids(&state.runtime);
+    let remap: PortRemapNotice = auto_separate_busy_ports(&mut state.stack, &owned);
     if remap.changed {
         state.runtime.port_notice = remap.messages.clone();
         save_state(&paths.state_file, state)?;
