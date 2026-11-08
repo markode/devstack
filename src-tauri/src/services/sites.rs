@@ -396,19 +396,24 @@ pub fn probe_site_reachability(
             .unwrap_or(false)
     };
     let server_name = if apache { "Apache" } else { "Nginx" };
-    let stack_web_up = state
-        .runtime
-        .nginx_pid
-        .map(is_running)
-        .unwrap_or(false)
-        || state
-            .runtime
-            .apache_pid
-            .map(is_running)
-            .unwrap_or(false);
 
-    // Stopped stack → grey / neutral. Never surface stale apache.err / nginx error.log.
-    if !stack_web_up || !server_up {
+    // Front-end process down.
+    if !server_up {
+        // Intentional Stop stack (or never started) → grey / neutral, no stale logs.
+        let never_started = state.runtime.last_start_at.is_none()
+            && state.runtime.last_start_error.is_none();
+        if state.runtime.stack_intentionally_stopped || never_started {
+            details.site.status = "stopped".into();
+            return SiteReachability {
+                state: "stopped".into(),
+                message: Some("Stack stopped — Start".into()),
+                log_excerpt: None,
+                tcp_ok: false,
+                http_ok: false,
+                probed_url,
+                probed_port: port,
+            };
+        }
         if let Some(err) = state.runtime.last_start_error.as_deref() {
             let excerpt = fresh_error_log_excerpt(
                 paths,
@@ -424,7 +429,15 @@ pub fn probe_site_reachability(
                     if t.is_empty() {
                         None
                     } else {
-                        Some(t.chars().rev().take(800).collect::<String>().chars().rev().collect())
+                        Some(
+                            t.chars()
+                                .rev()
+                                .take(800)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect(),
+                        )
                     }
                 }),
                 tcp_ok: false,
@@ -433,11 +446,18 @@ pub fn probe_site_reachability(
                 probed_port: port,
             };
         }
-        details.site.status = "stopped".into();
+        // Unexpected crash / stop of this site's front-end while the stack was started
+        // (sibling front-end may still be up — still red for this site).
+        let excerpt = fresh_error_log_excerpt(
+            paths,
+            apache,
+            state.runtime.last_start_at.as_deref(),
+        );
+        details.site.status = "error".into();
         return SiteReachability {
-            state: "stopped".into(),
-            message: Some("Stack stopped — Start".into()),
-            log_excerpt: None,
+            state: "error".into(),
+            message: Some(format!("{server_name} is not running")),
+            log_excerpt: excerpt,
             tcp_ok: false,
             http_ok: false,
             probed_url,
