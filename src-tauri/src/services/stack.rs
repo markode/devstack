@@ -9,6 +9,7 @@ use crate::services::dns::{start_dns, stop_dns, sync_hosts_and_trust_ca};
 use crate::services::httpd::{reload_apache, start_apache, stop_apache};
 use crate::services::nginx::{reload_nginx, start_nginx, stop_nginx};
 use crate::services::php_runtime::register_system_php;
+use crate::services::ports::{auto_separate_busy_ports, PortRemapNotice, PortSnapshot};
 use crate::services::process::is_running;
 use crate::services::sites::refresh_site_metadata;
 use crate::services::tls::ensure_root_ca;
@@ -32,6 +33,9 @@ pub struct StackStatus {
     pub php_fpm_port: u16,
     pub coexistence_mode: bool,
     pub php_versions: Vec<String>,
+    /// Banner lines when ports were auto-remapped beside WAMP/MAMP/etc.
+    #[serde(default)]
+    pub port_notice: Vec<String>,
 }
 
 pub fn stack_status(state: &AppState) -> StackStatus {
@@ -64,11 +68,57 @@ pub fn stack_status(state: &AppState) -> StackStatus {
         php_fpm_port: state.stack.php_fpm_port,
         coexistence_mode: state.stack.coexistence_mode,
         php_versions: state.runtime.php_pids.keys().cloned().collect(),
+        port_notice: state.runtime.port_notice.clone(),
+    }
+}
+
+/// Mark each site running/stopped from the front-end that actually serves it.
+pub fn refresh_site_process_status(state: &mut AppState) {
+    let nginx_up = state
+        .runtime
+        .nginx_pid
+        .map(is_running)
+        .unwrap_or(false);
+    let apache_up = state
+        .runtime
+        .apache_pid
+        .map(is_running)
+        .unwrap_or(false);
+    for site in &mut state.sites {
+        let uses_apache = crate::services::httpd::site_uses_apache(site);
+        // Don't overwrite a more specific error/warning set by reachability probes.
+        if site.status == "error" || site.status == "warning" {
+            if (uses_apache && apache_up) || (!uses_apache && nginx_up) {
+                // Leave error/warning until the next probe refreshes it.
+                continue;
+            }
+        }
+        site.status = if uses_apache {
+            if apache_up {
+                "running"
+            } else {
+                "stopped"
+            }
+        } else if nginx_up {
+            "running"
+        } else {
+            "stopped"
+        }
+        .into();
     }
 }
 
 pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     refresh_site_metadata(state);
+
+    // Auto-pick free ports when WAMP/MAMP/IIS hold 80/443/3306 — no modal required.
+    let before = PortSnapshot::from_stack(&state.stack);
+    let remap: PortRemapNotice = auto_separate_busy_ports(&mut state.stack);
+    if remap.changed {
+        state.runtime.port_notice = remap.messages.clone();
+        save_state(&paths.state_file, state)?;
+    }
+
     ensure_root_ca(paths)?;
     // Single UAC on Windows for hosts + CA trust; unix uses helper/sudo separately.
     let _ = sync_hosts_and_trust_ca(paths, state);
@@ -89,6 +139,11 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
         let _ = configure_phpmyadmin(paths, state);
     }
 
+    // WP siteurl/home rewrite needs a live DB — run after start_database.
+    if remap.changed {
+        rewrite_all_wp_urls_for_port_remap(paths, state, before)?;
+    }
+
     if !state.installed.contains_key("php") {
         let _ = register_system_php(state, paths);
     }
@@ -97,6 +152,7 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     // Surface the first hard failure so PortConflict / UI dialogs can react.
     let nginx_err = start_nginx(paths, state).err();
     let apache_err = start_apache(paths, state).err();
+    refresh_site_process_status(state);
     save_state(&paths.state_file, state)?;
     if let Some(e) = nginx_err.or(apache_err) {
         return Err(e);
@@ -116,6 +172,7 @@ pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     for version in state.runtime.php_pids.keys().cloned().collect::<Vec<_>>() {
         let _ = crate::services::php_runtime::stop_php(paths, state, &version);
     }
+    refresh_site_process_status(state);
     save_state(&paths.state_file, state)?;
     Ok(stack_status(state))
 }
@@ -127,6 +184,7 @@ pub fn reload_sites(paths: &Paths, state: &mut AppState) -> Result<StackStatus> 
     let _ = ensure_root_ca(paths);
     let nginx_err = reload_nginx(paths, state).err();
     let apache_err = reload_apache(paths, state).err();
+    refresh_site_process_status(state);
     save_state(&paths.state_file, state)?;
     if let Some(e) = nginx_err.or(apache_err) {
         return Err(e);
@@ -232,6 +290,74 @@ fn rewrite_wp_urls_for_server_switch(
     let from = format!(":{old_port}");
     let to = format!(":{new_port}");
     let _ = crate::services::db_files::mysql_simple_replace_pub(paths, state, &engine, db, &from, &to);
+    Ok(())
+}
+
+/// After auto port remap, update every WordPress site's siteurl/home so Open URL
+/// and canonical redirects match the new listen ports.
+pub fn rewrite_all_wp_urls_for_port_remap(
+    paths: &Paths,
+    state: &AppState,
+    before: PortSnapshot,
+) -> Result<()> {
+    let after = PortSnapshot::from_stack(&state.stack);
+    for site in &state.sites {
+        let Some(db) = site.database_name.as_deref() else {
+            continue;
+        };
+        if !site
+            .path
+            .join("wp-config.php")
+            .exists()
+            && !crate::services::nginx::expand_home(&site.path)
+                .join("wp-config.php")
+                .exists()
+        {
+            continue;
+        }
+        let engine = site
+            .database_engine
+            .clone()
+            .or_else(|| state.active_database.clone())
+            .unwrap_or_else(|| "mariadb".into());
+        if !matches!(engine.as_str(), "mysql" | "mariadb") {
+            continue;
+        }
+        let apache = crate::services::httpd::site_uses_apache(site);
+        let (old_http, old_https, new_http, new_https) = if apache {
+            (
+                before.apache_http,
+                before.apache_https,
+                after.apache_http,
+                after.apache_https,
+            )
+        } else {
+            (
+                before.nginx_http,
+                before.nginx_https,
+                after.nginx_http,
+                after.nginx_https,
+            )
+        };
+        let pairs = [
+            (
+                crate::services::ports::format_url("https", &site.domain, old_https),
+                crate::services::ports::format_url("https", &site.domain, new_https),
+            ),
+            (
+                crate::services::ports::format_url("http", &site.domain, old_http),
+                crate::services::ports::format_url("http", &site.domain, new_http),
+            ),
+        ];
+        for (from, to) in pairs {
+            if from == to {
+                continue;
+            }
+            let _ = crate::services::db_files::mysql_wp_options_url_replace(
+                paths, state, &engine, db, &from, &to,
+            );
+        }
+    }
     Ok(())
 }
 

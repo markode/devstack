@@ -1,7 +1,10 @@
 //! Site detection (WordPress / Laravel) and detail helpers.
 
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use regex::Regex;
 use serde::Serialize;
@@ -9,6 +12,19 @@ use serde::Serialize;
 use crate::config::{slugify, AppState, Paths, SiteRecord};
 use crate::error::{DevStackError, Result};
 use crate::services::nginx::expand_home;
+use crate::services::process::is_running;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteReachability {
+    /// `running` | `stopped` | `error` | `warning`
+    pub state: String,
+    pub message: Option<String>,
+    pub tcp_ok: bool,
+    pub http_ok: bool,
+    pub probed_url: String,
+    pub probed_port: u16,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +39,8 @@ pub struct SiteDetails {
     pub database_user: Option<String>,
     pub phpmyadmin_url: Option<String>,
     pub has_wp_config: bool,
+    #[serde(default)]
+    pub reachability: Option<SiteReachability>,
 }
 
 pub fn detect_framework(path: &Path) -> (String, String) {
@@ -116,6 +134,7 @@ pub fn detect_site(site: &SiteRecord) -> SiteDetails {
         database_user: db_user,
         phpmyadmin_url: pma,
         has_wp_config: has_wp,
+        reachability: None,
     }
 }
 
@@ -150,6 +169,234 @@ pub fn apply_stack_ports(details: &mut SiteDetails, state: &AppState) {
             *pma = format!("{base}{path}");
         }
     }
+}
+
+fn site_listen_port(site: &SiteRecord, state: &AppState) -> (u16, bool) {
+    let apache = crate::services::httpd::site_uses_apache(site);
+    if site.https {
+        (
+            if apache {
+                state.stack.apache_https_port
+            } else {
+                state.stack.https_port
+            },
+            true,
+        )
+    } else {
+        (
+            if apache {
+                state.stack.apache_http_port
+            } else {
+                state.stack.http_port
+            },
+            false,
+        )
+    }
+}
+
+fn tail_log(path: &Path, max: usize) -> String {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let suffix: String = trimmed
+        .chars()
+        .rev()
+        .take(max)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    suffix
+}
+
+fn server_log_hint(paths: &Paths, apache: bool) -> Option<String> {
+    let candidates = if apache {
+        vec![
+            paths.logs.join("apache.err"),
+            paths.logs.join("apache/error.log"),
+        ]
+    } else {
+        vec![
+            paths.logs.join("nginx/stderr.log"),
+            paths.logs.join("nginx/error.log"),
+        ]
+    };
+    for p in candidates {
+        let t = tail_log(&p, 240);
+        if !t.is_empty() {
+            return Some(format!("{}: {t}", p.file_name()?.to_string_lossy()));
+        }
+    }
+    None
+}
+
+fn http_probe_ok(host: &str, port: u16, https: bool) -> bool {
+    // Prefer curl when available (handles TLS + Host). Fall back to raw HTTP.
+    let url = if https {
+        format!("https://{host}:{port}/")
+    } else {
+        format!("http://{host}:{port}/")
+    };
+    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+    if let Ok(out) = crate::services::process::command(curl)
+        .args([
+            "-k",
+            "-sS",
+            "--max-time",
+            "3",
+            "--resolve",
+            &format!("{host}:{port}:127.0.0.1"),
+            "-o",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+            "-w",
+            "%{http_code}",
+            &url,
+        ])
+        .output()
+    {
+        let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if code.starts_with('2') || code.starts_with('3') {
+            return true;
+        }
+        // 4xx still means the server answered — treat as reachable for status.
+        if code.starts_with('4') {
+            return true;
+        }
+    }
+    if https {
+        return false;
+    }
+    // Raw HTTP GET fallback.
+    let Ok(mut stream) =
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(800))
+    else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
+    let req = format!(
+        "GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    matches!(stream.read(&mut buf), Ok(n) if n > 0)
+}
+
+/// TCP-connect the site's listen port and HTTP-probe the actual Open URL.
+/// Updates `site.status` to match (`running` / `error` / `stopped`).
+pub fn probe_site_reachability(
+    paths: &Paths,
+    state: &AppState,
+    details: &mut SiteDetails,
+) -> SiteReachability {
+    let apache = crate::services::httpd::site_uses_apache(&details.site);
+    let (port, https) = site_listen_port(&details.site, state);
+    let probed_url = if https {
+        details.https_url.clone()
+    } else {
+        details.url.clone()
+    };
+    let server_up = if apache {
+        state
+            .runtime
+            .apache_pid
+            .map(is_running)
+            .unwrap_or(false)
+    } else {
+        state
+            .runtime
+            .nginx_pid
+            .map(is_running)
+            .unwrap_or(false)
+    };
+    let server_name = if apache { "Apache" } else { "Nginx" };
+
+    if !server_up {
+        let log = server_log_hint(paths, apache);
+        let message = match log {
+            Some(l) => format!("{server_name} is not running. {l}"),
+            None => format!("{server_name} process is not running"),
+        };
+        details.site.status = "error".into();
+        return SiteReachability {
+            state: "error".into(),
+            message: Some(message),
+            tcp_ok: false,
+            http_ok: false,
+            probed_url,
+            probed_port: port,
+        };
+    }
+
+    let tcp_ok =
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(600))
+            .is_ok();
+    if !tcp_ok {
+        let log = server_log_hint(paths, apache);
+        let message = match log {
+            Some(l) => format!(
+                "{server_name} is up but nothing listens on :{port}. {l}"
+            ),
+            None => format!(
+                "{server_name} is up but nothing listens on 127.0.0.1:{port}"
+            ),
+        };
+        details.site.status = "error".into();
+        return SiteReachability {
+            state: "error".into(),
+            message: Some(message),
+            tcp_ok: false,
+            http_ok: false,
+            probed_url,
+            probed_port: port,
+        };
+    }
+
+    let http_ok = http_probe_ok(&details.site.domain, port, https);
+    if !http_ok {
+        details.site.status = "warning".into();
+        return SiteReachability {
+            state: "warning".into(),
+            message: Some(format!(
+                "Port :{port} is open but {probed_url} did not return a valid HTTP response"
+            )),
+            tcp_ok: true,
+            http_ok: false,
+            probed_url,
+            probed_port: port,
+        };
+    }
+
+    details.site.status = "running".into();
+    SiteReachability {
+        state: "running".into(),
+        message: None,
+        tcp_ok: true,
+        http_ok: true,
+        probed_url,
+        probed_port: port,
+    }
+}
+
+/// Attach reachability to details and sync the matching SiteRecord.status in state.
+pub fn enrich_site_details(
+    paths: &Paths,
+    state: &mut AppState,
+    details: &mut SiteDetails,
+) {
+    apply_stack_ports(details, state);
+    let reach = probe_site_reachability(paths, state, details);
+    if let Some(site) = state.sites.iter_mut().find(|s| s.id == details.site.id) {
+        site.status = reach.state.clone();
+    }
+    details.site.status = reach.state.clone();
+    details.reachability = Some(reach);
 }
 
 fn urlencoding_minimal(s: &str) -> String {

@@ -416,6 +416,13 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
           </button>
         </div>
       ) : null}
+      {stack?.portNotice && stack.portNotice.length > 0 ? (
+        <div className="port-notice-banner" role="status">
+          {stack.portNotice.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      ) : null}
       {error ? <div className="error-banner">{error}</div> : null}
       {progress ? <ProgressToast progress={progress} /> : null}
       {details.length === 0 ? (
@@ -462,8 +469,20 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
                 </span>
                 <span
                   className={`status-dot ${
-                    d.site.status === "running" ? "on" : ""
+                    (d.reachability?.state ?? d.site.status) === "running"
+                      ? "on"
+                      : (d.reachability?.state ?? d.site.status) === "error"
+                        ? "error"
+                        : (d.reachability?.state ?? d.site.status) === "warning"
+                          ? "warn"
+                          : ""
                   }`}
+                  title={
+                    d.reachability?.message ??
+                    d.reachability?.state ??
+                    d.site.status ??
+                    "stopped"
+                  }
                 />
               </div>
               <div className="site-tile-name">
@@ -473,6 +492,11 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
                 ) : null}
               </div>
               <div className="site-tile-domain">{d.site.domain}</div>
+              {d.reachability?.message ? (
+                <div className="site-tile-meta" style={{ color: "var(--danger, #ff3b30)" }}>
+                  {d.reachability.message}
+                </div>
+              ) : null}
               <div className="site-tile-meta">
                 <span>PHP {d.site.phpVersion ?? "—"}</span>
                 <span className="muted">

@@ -23,7 +23,7 @@ use crate::services::backup::{
 };
 use crate::services::progress::{JobProgress, JobProgressFn};
 use crate::services::sites::{
-    apply_stack_ports, create_site, delete_site, detect_site, refresh_site_metadata, SiteDetails,
+    create_site, delete_site, detect_site, refresh_site_metadata, SiteDetails,
 };
 use crate::services::stack::{
     apply_stack, reload_sites, stack_status, start_stack, stop_stack, StackStatus,
@@ -236,15 +236,13 @@ pub async fn list_site_details(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDe
     let mut state = ctx.state.lock().await;
     ensure_welcome_site(&ctx.paths, &mut state);
     refresh_site_metadata(&mut state);
-    let details: Vec<_> = state
-        .sites
-        .iter()
-        .map(|s| {
-            let mut d = detect_site(s);
-            apply_stack_ports(&mut d, &state);
-            d
-        })
-        .collect();
+    let sites: Vec<_> = state.sites.clone();
+    let mut details = Vec::with_capacity(sites.len());
+    for s in sites {
+        let mut d = detect_site(&s);
+        crate::services::sites::enrich_site_details(&ctx.paths, &mut state, &mut d);
+        details.push(d);
+    }
     save_state(&ctx.paths.state_file, &state)?;
     Ok(details)
 }
@@ -263,7 +261,8 @@ pub async fn get_site_details(
         .ok_or_else(|| crate::error::DevStackError::Message(format!("site not found: {site_id}")))?
         .clone();
     let mut details = detect_site(&site);
-    apply_stack_ports(&mut details, &state);
+    crate::services::sites::enrich_site_details(&ctx.paths, &mut state, &mut details);
+    save_state(&ctx.paths.state_file, &state)?;
     Ok(details)
 }
 
@@ -685,10 +684,14 @@ pub async fn update_ports_config(
     config: PortsConfig,
 ) -> Result<PortsConfig> {
     let mut state = ctx.state.lock().await;
+    let before = crate::services::ports::PortSnapshot::from_stack(&state.stack);
     // phpMyAdmin is served by Nginx — keep the displayed URL port in sync.
     let mut cfg = config;
     cfg.phpmyadmin = cfg.nginx_https;
     cfg.apply_to_stack(&mut state.stack);
+    let _ = crate::services::stack::rewrite_all_wp_urls_for_port_remap(
+        &ctx.paths, &state, before,
+    );
     save_state(&ctx.paths.state_file, &state)?;
     // Regenerate configs so running services pick up new ports on next start/reload.
     let _ = reload_sites(&ctx.paths, &mut state);
@@ -701,8 +704,12 @@ pub async fn set_coexistence_mode(
     enabled: bool,
 ) -> Result<PortsConfig> {
     let mut state = ctx.state.lock().await;
+    let before = crate::services::ports::PortSnapshot::from_stack(&state.stack);
     if enabled {
         PortsConfig::coexistence().apply_to_stack(&mut state.stack);
+        state.runtime.port_notice = vec![
+            "Coexistence mode on — DevStack uses alternate ports beside WAMP/MAMP.".into(),
+        ];
     } else {
         // Restore classic defaults for web + DB ports; keep Apache on 8088/8444.
         state.stack.coexistence_mode = false;
@@ -713,7 +720,11 @@ pub async fn set_coexistence_mode(
         state.stack.postgresql_port = 5432;
         state.stack.mongodb_port = 27017;
         state.stack.php_fpm_port = 9000;
+        state.runtime.port_notice.clear();
     }
+    let _ = crate::services::stack::rewrite_all_wp_urls_for_port_remap(
+        &ctx.paths, &state, before,
+    );
     save_state(&ctx.paths.state_file, &state)?;
     let _ = reload_sites(&ctx.paths, &mut state);
     Ok(PortsConfig::from_stack(&state.stack))
@@ -734,6 +745,7 @@ pub async fn apply_next_free_ports(
     service_id: String,
 ) -> Result<PortsConfig> {
     let mut state = ctx.state.lock().await;
+    let before = crate::services::ports::PortSnapshot::from_stack(&state.stack);
     let check = check_service_ports(&state.stack, &service_id);
     if !check.suggested.is_empty() {
         apply_suggested_ports(&mut state.stack, &check.suggested)?;
@@ -745,6 +757,9 @@ pub async fn apply_next_free_ports(
         {
             state.stack.coexistence_mode = true;
         }
+        let _ = crate::services::stack::rewrite_all_wp_urls_for_port_remap(
+            &ctx.paths, &state, before,
+        );
         save_state(&ctx.paths.state_file, &state)?;
         let _ = reload_sites(&ctx.paths, &mut state);
     }

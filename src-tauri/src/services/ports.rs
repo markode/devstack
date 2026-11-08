@@ -459,6 +459,125 @@ pub fn ensure_ports_free(stack: &StackPreferences, service_id: &str) -> Result<(
     )))
 }
 
+/// Result of silently remapping ports that are held by WAMP/MAMP/IIS/etc.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PortRemapNotice {
+    pub changed: bool,
+    /// Short lines for the Sites banner, e.g. `WAMP detected on :80, DevStack uses :8080`.
+    pub messages: Vec<String>,
+    pub previous: Option<PortsConfig>,
+    pub current: Option<PortsConfig>,
+}
+
+/// Snapshot of ports used when rewriting WordPress siteurl/home after a remap.
+#[derive(Debug, Clone, Copy)]
+pub struct PortSnapshot {
+    pub nginx_http: u16,
+    pub nginx_https: u16,
+    pub apache_http: u16,
+    pub apache_https: u16,
+}
+
+impl PortSnapshot {
+    pub fn from_stack(stack: &StackPreferences) -> Self {
+        Self {
+            nginx_http: stack.http_port,
+            nginx_https: stack.https_port,
+            apache_http: stack.apache_http_port,
+            apache_https: stack.apache_https_port,
+        }
+    }
+}
+
+/// On startup / start-stack: if classic defaults (80/443/3306/…) are busy,
+/// automatically pick free ports, persist coexistence, and return a banner notice.
+///
+/// Does **not** fail when ports are busy — it remaps instead. Callers should
+/// rewrite WP URLs when `changed` is true.
+pub fn auto_separate_busy_ports(stack: &mut StackPreferences) -> PortRemapNotice {
+    let previous = PortsConfig::from_stack(stack);
+    let before = PortSnapshot::from_stack(stack);
+    // (who, busy_port, service) — messages are built after final ports are set.
+    let mut conflicts_noted: Vec<(String, u16, &'static str)> = Vec::new();
+
+    for service in ["nginx", "apache", "mysql", "mariadb"] {
+        let check = check_service_ports(stack, service);
+        if check.ok {
+            continue;
+        }
+        for c in &check.conflicts {
+            let who = c
+                .hint
+                .clone()
+                .or_else(|| c.process_name.clone())
+                .unwrap_or_else(|| "another process".into());
+            conflicts_noted.push((who, c.port, service));
+        }
+        let _ = apply_suggested_ports(stack, &check.suggested);
+        // Prefer the classic coexistence pair when 80/443 were the conflict.
+        if service == "nginx"
+            && check.conflicts.iter().any(|c| c.port == 80 || c.port == 443)
+            && port_is_free(ALT_HTTP)
+            && port_is_free(ALT_HTTPS)
+        {
+            stack.http_port = ALT_HTTP;
+            stack.https_port = ALT_HTTPS;
+        }
+        if service == "mysql" && check.conflicts.iter().any(|c| c.port == 3306) && port_is_free(ALT_MYSQL)
+        {
+            stack.mysql_port = ALT_MYSQL;
+        }
+        if service == "mariadb"
+            && check.conflicts.iter().any(|c| c.port == 3306)
+            && port_is_free(ALT_MARIADB)
+        {
+            stack.mariadb_port = ALT_MARIADB;
+        }
+    }
+
+    let after = PortSnapshot::from_stack(stack);
+    let changed = before.nginx_http != after.nginx_http
+        || before.nginx_https != after.nginx_https
+        || before.apache_http != after.apache_http
+        || before.apache_https != after.apache_https
+        || previous.mysql != stack.mysql_port
+        || previous.mariadb != stack.mariadb_port;
+
+    let mut messages = Vec::new();
+    if changed {
+        stack.coexistence_mode = true;
+        for (who, busy, service) in conflicts_noted {
+            let alt = match (service, busy) {
+                ("nginx", 80) => stack.http_port,
+                ("nginx", 443) => stack.https_port,
+                ("apache", p) if p == before.apache_http => stack.apache_http_port,
+                ("apache", _) => stack.apache_https_port,
+                ("mysql", _) => stack.mysql_port,
+                ("mariadb", _) => stack.mariadb_port,
+                _ => continue,
+            };
+            if alt == busy {
+                continue;
+            }
+            messages.push(format!("{who} detected on :{busy}, DevStack uses :{alt}"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        messages.retain(|m| seen.insert(m.clone()));
+    }
+
+    PortRemapNotice {
+        changed,
+        messages,
+        previous: if changed {
+            Some(previous)
+        } else {
+            None
+        },
+        current: Some(PortsConfig::from_stack(stack)),
+    }
+}
+
 pub fn parse_ports_patch(value: &serde_json::Value) -> Result<PortsConfig> {
     serde_json::from_value(value.clone())
         .map_err(|e| DevStackError::Message(format!("invalid ports config: {e}")))
@@ -560,6 +679,33 @@ mod tests {
         apply_suggested_ports(&mut stack, &suggested).unwrap();
         assert_eq!(stack.http_port, 8080);
         assert_eq!(stack.mysql_port, 3307);
+    }
+
+    #[test]
+    fn auto_separate_remaps_busy_classic_ports() {
+        let _holders: Vec<TcpListener> = [80u16, 443, 3306]
+            .into_iter()
+            .filter_map(|p| TcpListener::bind(("127.0.0.1", p)).ok())
+            .collect();
+        if _holders.is_empty() {
+            // Environment cannot bind classic ports — skip quietly.
+            return;
+        }
+        let mut stack = StackPreferences::default();
+        assert_eq!(stack.http_port, 80);
+        let notice = auto_separate_busy_ports(&mut stack);
+        assert!(notice.changed, "expected remap when classic ports held");
+        assert!(stack.coexistence_mode);
+        if !port_is_free(80) {
+            assert_ne!(stack.http_port, 80);
+        }
+        if !port_is_free(443) {
+            assert_ne!(stack.https_port, 443);
+        }
+        if !port_is_free(3306) {
+            assert!(stack.mysql_port != 3306 || stack.mariadb_port != 3306);
+        }
+        assert!(!notice.messages.is_empty());
     }
 
     #[test]
