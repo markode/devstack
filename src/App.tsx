@@ -10,6 +10,7 @@ import { LogsPage } from "./pages/LogsPage";
 import { AboutPage } from "./pages/AboutPage";
 import { AppDataProvider, useAppData } from "./store/AppData";
 import * as client from "./client";
+import { detectPlatform, type AppPlatform } from "./platform";
 import type { DeveloperSettings, SectionId } from "./types";
 
 const TITLES: Record<SectionId, string> = {
@@ -82,8 +83,22 @@ function AppShell() {
     redactSecrets: false,
   });
   const [logErrors, setLogErrors] = useState(0);
+  const [platform, setPlatform] = useState<AppPlatform>(() => detectPlatform());
   const { sites } = useAppData();
   const sitesBusy = sites.refreshing || sites.probing;
+
+  useEffect(() => {
+    void client
+      .getAppInfo()
+      .then((info) => {
+        const os = (info.os || "").toLowerCase();
+        if (os.includes("win")) setPlatform("windows");
+        else if (os.includes("mac") || os.includes("darwin")) setPlatform("macos");
+        else if (os.includes("linux")) setPlatform("linux");
+        else setPlatform(detectPlatform());
+      })
+      .catch(() => setPlatform(detectPlatform()));
+  }, []);
 
   useEffect(() => {
     void client.getDeveloperSettings().then(setDeveloper).catch(() => {});
@@ -151,12 +166,17 @@ function AppShell() {
   };
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell platform-${platform}`}
+      data-platform={platform}
+      data-testid="app-shell"
+    >
       <Sidebar
         active={section}
         onSelect={selectLogged}
         showLogsTab={developer.showLogsTab}
         logErrorCount={section === "logs" ? 0 : logErrors}
+        platform={platform}
       />
       <main className="content">
         <PageHeader
@@ -169,6 +189,8 @@ function AppShell() {
               : undefined
           }
           refreshing={sitesBusy}
+          platform={platform}
+          showWindowControls={platform === "windows"}
         />
         <div className="content-body">
           <KeepAlivePane id="sites" active={section} visited={visited}>

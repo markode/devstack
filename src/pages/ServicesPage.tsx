@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Hero, VersionTable } from "../components/VersionTable";
+import { SectionHeader } from "../components/SectionHeader";
+import { VersionTable } from "../components/VersionTable";
 import { PortConflictDialog } from "../components/PortConflictDialog";
 import { usePackageVersions } from "../hooks/usePackageVersions";
 import * as client from "../client";
@@ -153,11 +154,9 @@ export function ServicesPage() {
 
   return (
     <div>
-      <Hero
-        title="Services"
-        description="Install runtimes from official sources, then start/stop with live ports and logs."
-        color="#5856d6"
-        glyph="Sv"
+      <SectionHeader
+        title="Runtime status"
+        description="Ports, process state, and recent logs for each managed service."
       />
       {error ? <div className="error-banner">{error}</div> : null}
       {portConflict && !portConflict.ok ? (
@@ -170,10 +169,6 @@ export function ServicesPage() {
         />
       ) : null}
 
-      <div className="section-head">
-        <h2>Runtime status</h2>
-        <p>Ports, process state, and recent stderr for each managed service.</p>
-      </div>
       <div className="svc-status-grid">
         {services.map((svc) => (
           <div key={svc.id} className="svc-card">

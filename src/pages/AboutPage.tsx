@@ -11,17 +11,12 @@ export function AboutPage() {
 
   return (
     <div className="about-page">
-      <div className="about-hero">
-        <div className="about-mark" aria-hidden>
-          <span>DS</span>
-        </div>
-        <div>
-          <h2 className="about-brand">DevStack</h2>
-          <p className="about-tagline">
-            Local PHP development environment for macOS &amp; Windows —
-            Nginx, databases, WordPress, and tooling in one place.
-          </p>
-        </div>
+      <div className="section-head">
+        <h2>About DevStack</h2>
+        <p>
+          Local PHP development environment for macOS &amp; Windows — Nginx,
+          databases, WordPress, and tooling in one place.
+        </p>
       </div>
 
       <div className="about-grid">

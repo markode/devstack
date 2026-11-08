@@ -12,12 +12,14 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "DevStack",
         "width": 980,
         "height": 680,
         "minWidth": 820,
         "minHeight": 560,
-        "resizable": true
+        "resizable": true,
+        "shadow": true
       }
     ],
     "security": {

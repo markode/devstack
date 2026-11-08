@@ -122,6 +122,50 @@ pub fn format_url(scheme: &str, host: &str, port: u16) -> String {
     }
 }
 
+/// Single source of truth for a site's Open / WP canonical URL.
+/// `https` enabled → https://domain:httpsPort; otherwise http://domain:httpPort,
+/// using the site's front-end (nginx vs apache) port pair.
+pub fn canonical_site_url(site: &crate::config::SiteRecord, state: &crate::config::AppState) -> String {
+    let apache = crate::services::httpd::site_uses_apache(site);
+    let (scheme, port) = if site.https {
+        (
+            "https",
+            if apache {
+                state.stack.apache_https_port
+            } else {
+                state.stack.https_port
+            },
+        )
+    } else {
+        (
+            "http",
+            if apache {
+                state.stack.apache_http_port
+            } else {
+                state.stack.http_port
+            },
+        )
+    };
+    format_url(scheme, &site.domain, port)
+}
+
+/// Both http and https absolute URLs for a site (correct ports per front-end).
+pub fn site_http_https_urls(
+    site: &crate::config::SiteRecord,
+    state: &crate::config::AppState,
+) -> (String, String) {
+    let apache = crate::services::httpd::site_uses_apache(site);
+    let (http_port, https_port) = if apache {
+        (state.stack.apache_http_port, state.stack.apache_https_port)
+    } else {
+        (state.stack.http_port, state.stack.https_port)
+    };
+    (
+        format_url("http", &site.domain, http_port),
+        format_url("https", &site.domain, https_port),
+    )
+}
+
 /// MySQL/MariaDB TCP host string for WP-CLI / clients (`127.0.0.1` or `127.0.0.1:3307`).
 pub fn mysql_db_host(port: u16) -> String {
     if port == 3306 {
@@ -544,11 +588,14 @@ fn occupant_is_ours(occ: &PortOccupant, owned_pids: &[u32], runtime: &crate::con
     {
         return true;
     }
-    if runtime.database_pid.is_some()
+    // Any mysqld/mariadbd is treated as ours when we have a DB PID *or* when the
+    // listener sits on our configured mysql/mariadb ports (checked by callers via
+    // owned pid files). Name-only match when database_pid is set covers workers.
+    if (runtime.database_pid.is_some()
+        || runtime.database_engine.is_some())
         && (name.contains("mysqld")
             || name.contains("mariadbd")
-            || name.contains("mariadb")
-            || name.contains("mysql"))
+            || name.contains("mariadb"))
     {
         return true;
     }
@@ -689,11 +736,21 @@ pub fn auto_separate_busy_ports(
     }
 
     // --- MySQL / MariaDB ---
+    // Never remap onto the sibling engine's port; keep mysql ≠ mariadb always.
     if let Some(occ) = foreign_occupant(stack.mysql_port, owned_pids, runtime) {
-        let alt = if stack.mysql_port == 3306 && port_is_free(ALT_MYSQL) {
+        let mut reserved = stack_reserved_ports(stack, &["mysql"]);
+        reserved.push(stack.mariadb_port);
+        let alt = if stack.mysql_port == 3306
+            && port_is_free(ALT_MYSQL)
+            && ALT_MYSQL != stack.mariadb_port
+        {
             ALT_MYSQL
         } else {
-            find_next_free(stack.mysql_port, &candidate_ports_for("mysql", stack.mysql_port))
+            find_next_free_excluding(
+                stack.mysql_port,
+                &candidate_ports_for("mysql", stack.mysql_port),
+                &reserved,
+            )
         };
         messages.push(format!(
             "{} detected on :{}, DevStack uses :{alt}",
@@ -703,18 +760,38 @@ pub fn auto_separate_busy_ports(
         stack.mysql_port = alt;
     }
     if let Some(occ) = foreign_occupant(stack.mariadb_port, owned_pids, runtime) {
-        let alt = if stack.mariadb_port == 3306 && port_is_free(ALT_MARIADB) {
+        let mut reserved = stack_reserved_ports(stack, &["mariadb"]);
+        reserved.push(stack.mysql_port);
+        let alt = if stack.mariadb_port == 3306
+            && port_is_free(ALT_MARIADB)
+            && ALT_MARIADB != stack.mysql_port
+        {
             ALT_MARIADB
         } else {
-            find_next_free(
+            find_next_free_excluding(
                 stack.mariadb_port,
                 &candidate_ports_for("mariadb", stack.mariadb_port),
+                &reserved,
             )
         };
         messages.push(format!(
             "{} detected on :{}, DevStack uses :{alt}",
             who_label(&occ),
             occ.port
+        ));
+        stack.mariadb_port = alt;
+    }
+    // Final uniqueness guard (e.g. both remapped to the same free port).
+    if stack.mysql_port == stack.mariadb_port {
+        let reserved = vec![stack.mysql_port];
+        let alt = find_next_free_excluding(
+            stack.mariadb_port,
+            &candidate_ports_for("mariadb", stack.mariadb_port),
+            &reserved,
+        );
+        messages.push(format!(
+            "MariaDB port collided with MySQL :{}; MariaDB uses :{alt}",
+            stack.mysql_port
         ));
         stack.mariadb_port = alt;
     }
@@ -766,6 +843,41 @@ pub fn owned_runtime_pids(runtime: &crate::config::RuntimeState) -> Vec<u32> {
         pids.push(p);
     }
     pids.extend(runtime.php_pids.values().copied());
+    pids
+}
+
+/// Also include mysql/mariadb/nginx/apache/php-cgi pid-file PIDs (covers leftover
+/// listeners after a crash when `runtime.*_pid` was cleared).
+pub fn owned_runtime_pids_with_files(
+    paths: &crate::config::Paths,
+    runtime: &crate::config::RuntimeState,
+) -> Vec<u32> {
+    let mut pids = owned_runtime_pids(runtime);
+    for name in [
+        "nginx", "apache", "mariadb", "mysql", "mongodb", "postgresql", "redis", "mailpit", "dns",
+    ] {
+        if let Some(pid) = crate::services::process::read_pid(&paths.pid_file(name)) {
+            if crate::services::process::is_running(pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    // php-cgi / php-fpm per version
+    if let Ok(rd) = std::fs::read_dir(&paths.run) {
+        for ent in rd.flatten() {
+            let fname = ent.file_name().to_string_lossy().to_string();
+            if !(fname.starts_with("php-cgi-") || fname.starts_with("php-fpm-")) {
+                continue;
+            }
+            if let Some(pid) = crate::services::process::read_pid(&ent.path()) {
+                if crate::services::process::is_running(pid) {
+                    pids.push(pid);
+                }
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
     pids
 }
 

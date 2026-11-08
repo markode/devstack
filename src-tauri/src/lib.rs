@@ -178,6 +178,16 @@ pub fn run() {
                 use tauri::Emitter;
                 let _ = handle.emit("app-log", entry);
             });
+            // Windows: undecorated chrome needs an explicit shadow so Win11 keeps
+            // rounded corners + DWM border (resize / Snap still work via system).
+            #[cfg(target_os = "windows")]
+            {
+                use tauri::Manager;
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.set_decorations(false);
+                    let _ = win.set_shadow(true);
+                }
+            }
             crate::applog::info("app", "Tauri setup complete");
             Ok(())
         })
