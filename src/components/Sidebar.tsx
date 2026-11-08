@@ -14,6 +14,7 @@ const ITEMS: NavItem[] = [
   { id: "javascript", label: "JavaScript", color: "#3C873A", glyph: "N" },
   { id: "services", label: "Services", color: "#5856d6", glyph: "S" },
   { id: "sites", label: "Sites", color: "#007aff", glyph: "W" },
+  { id: "logs", label: "Logs", color: "#34c759", glyph: "L" },
   { id: "ai", label: "AI", color: "#af52de", glyph: "A", placeholder: true },
   { id: "pro", label: "Pro", color: "#ff9500", glyph: "★", placeholder: true },
   {
@@ -36,9 +37,13 @@ const ITEMS: NavItem[] = [
 export function Sidebar({
   active,
   onSelect,
+  showLogsTab = true,
+  logErrorCount = 0,
 }: {
   active: SectionId;
   onSelect: (id: SectionId) => void;
+  showLogsTab?: boolean;
+  logErrorCount?: number;
 }) {
   return (
     <aside className="sidebar">
@@ -46,7 +51,7 @@ export function Sidebar({
         <div className="brand-mark">DS</div>
         <div className="brand-name">DevStack</div>
       </div>
-      {ITEMS.map((item) => (
+      {ITEMS.filter((item) => item.id !== "logs" || showLogsTab).map((item) => (
         <button
           key={item.id}
           type="button"
@@ -59,6 +64,11 @@ export function Sidebar({
             {item.glyph}
           </span>
           <span className="nav-label">{item.label}</span>
+          {item.id === "logs" && logErrorCount > 0 ? (
+            <span className="nav-badge" data-testid="logs-error-badge">
+              {logErrorCount > 99 ? "99+" : logErrorCount}
+            </span>
+          ) : null}
         </button>
       ))}
     </aside>

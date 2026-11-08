@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as client from "../client";
 import {
   AsyncModal,
@@ -14,27 +14,43 @@ import {
   openInFileManager,
 } from "../open";
 import { humanizeError, parsePortBusy } from "../portBusy";
+import { useAppData } from "../store/AppData";
 import type {
   CreateWordPressResult,
-  HostsStatus,
   InstalledPackage,
   JobProgress,
   PortCheckResult,
   SiteDetails,
-  StackStatus,
-  TemplateRecord,
 } from "../types";
 
-export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) {
-  const [details, setDetails] = useState<SiteDetails[]>([]);
-  const [templates, setTemplates] = useState<TemplateRecord[]>([]);
+export function SitesPage({
+  initialSiteId,
+  active = true,
+}: {
+  initialSiteId?: string | null;
+  /** False while the keep-alive pane is hidden. */
+  active?: boolean;
+}) {
+  const {
+    sites: sitesCache,
+    loadSites,
+    setSitesDetails,
+    setStack,
+    patchSitesCache,
+  } = useAppData();
+  const details = sitesCache.details;
+  const templates = sitesCache.templates;
+  const phpInstalled = sitesCache.phpInstalled;
+  const nodeInstalled = sitesCache.nodeInstalled;
+  const stack = sitesCache.stack;
+  const hosts = sitesCache.hosts;
+  const sitesLoaded = sitesCache.loaded;
+  const sitesRefreshing = sitesCache.refreshing || sitesCache.probing;
+
+  const setDetails = setSitesDetails;
   const [selectedId, setSelectedId] = useState<string | null>(
     initialSiteId ?? null,
   );
-  const [phpInstalled, setPhpInstalled] = useState<InstalledPackage[]>([]);
-  const [nodeInstalled, setNodeInstalled] = useState<InstalledPackage[]>([]);
-  const [stack, setStack] = useState<StackStatus | null>(null);
-  const [hosts, setHosts] = useState<HostsStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<JobProgress | null>(null);
@@ -48,23 +64,12 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
     useState<CreateWordPressResult | null>(null);
   const [lastBackup, setLastBackup] = useState<string | null>(null);
   const [patching, setPatching] = useState(false);
+  const [logOpenId, setLogOpenId] = useState<string | null>(null);
+  const wasActive = useRef(active);
 
   const refresh = async () => {
     try {
-      const [d, php, node, st, tpl, h] = await Promise.all([
-        client.listSiteDetails(),
-        client.listInstalled("php"),
-        client.listInstalled("node"),
-        client.getStackStatus(),
-        client.getTemplates(),
-        client.getHostsStatus(),
-      ]);
-      setDetails(d);
-      setPhpInstalled(php);
-      setNodeInstalled(node);
-      setStack(st);
-      setTemplates(tpl);
-      setHosts(h);
+      await loadSites({ force: true, probe: true });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -75,7 +80,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
     setError(null);
     try {
       const h = await client.repairHosts();
-      setHosts(h);
+      patchSitesCache({ hosts: h });
       if (!h.ok) {
         setError(h.message ?? "Hosts repair incomplete");
       }
@@ -88,7 +93,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
 
   const openWithHostsCheck = async (url: string) => {
     const h = await client.getHostsStatus();
-    setHosts(h);
+    patchSitesCache({ hosts: h });
     if (!h.ok) {
       setError(
         h.message ??
@@ -100,23 +105,25 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   };
 
   useEffect(() => {
-    void refresh();
+    void loadSites({ probe: true }).catch((e) =>
+      setError(e instanceof Error ? e.message : String(e)),
+    );
     let unlisten: (() => void) | undefined;
     void client.onJobProgress((ev) => setProgress(ev)).then((u) => {
       unlisten = u;
     });
-    // Re-fetch installed runtimes when returning from PHP/JS install pages.
-    const onFocus = () => {
-      void refresh();
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onFocus);
     return () => {
       unlisten?.();
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onFocus);
     };
-  }, []);
+  }, [loadSites]);
+
+  // Soft background refresh when returning to Sites — cached tiles stay visible.
+  useEffect(() => {
+    if (active && !wasActive.current && sitesLoaded) {
+      void loadSites({ force: true, probe: true });
+    }
+    wasActive.current = active;
+  }, [active, loadSites, sitesLoaded]);
 
   useEffect(() => {
     if (initialSiteId) setSelectedId(initialSiteId);
@@ -146,8 +153,8 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
     setError(null);
     setPatching(true);
     // Optimistic UI — reflect the toggle/select immediately while backend reloads.
-    setDetails((prev) =>
-      prev.map((d) => {
+    setDetails(
+      details.map((d) => {
         if (d.site.id !== siteId) return d;
         const site = { ...d.site };
         if (update.phpVersion !== undefined) site.phpVersion = update.phpVersion;
@@ -179,13 +186,8 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       if (stackRunning) {
         setStack(await client.stopDevStack());
       } else {
-        // Preflight nginx ports so the dialog can offer suggested/coexistence.
-        const check = await client.checkServicePorts("nginx");
-        if (!check.ok) {
-          setPortConflict(check);
-          setError(check.message ?? "Ports are in use");
-          return;
-        }
+        // Auto-separates busy ports — do not block on a preflight modal, and
+        // never open a browser from Start stack.
         setStack(await client.startDevStack());
       }
       await refresh();
@@ -198,6 +200,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       } else {
         setError(humanizeError(msg));
       }
+      await refresh();
     } finally {
       setBusy(false);
     }
@@ -350,17 +353,37 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   return (
     <div>
       <div className="sites-toolbar">
-        <div className="section-head" style={{ margin: 0 }}>
-          <h2>Sites</h2>
-          <p>Local projects on .test domains — click a tile for details.</p>
-        </div>
+        <p className="sites-toolbar-blurb muted">
+          Local projects on .test domains — click a tile for details.
+        </p>
         <div className="sites-toolbar-actions">
-          <span className="muted" style={{ fontSize: 12 }}>
-            {stackRunning ? "Stack running" : "Stack stopped"}
-            {stack?.nginx ? " · Nginx" : ""}
-            {stack?.apache ? " · Apache" : ""}
-            {stack?.databaseEngine ? ` · ${stack.databaseEngine}` : ""}
+          <span
+            className="stack-status-pill"
+            title={
+              stackRunning
+                ? [
+                    stack?.nginx ? "Nginx" : null,
+                    stack?.apache ? "Apache" : null,
+                    stack?.database
+                      ? stack.databaseEngine ?? "database"
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || "Running"
+                : "Stack stopped — Start"
+            }
+          >
+            <span
+              className={`status-dot ${stackRunning ? "on" : ""}`}
+              aria-hidden
+            />
+            {stackRunning ? "Running" : "Stopped"}
           </span>
+          {sitesRefreshing ? (
+            <span className="muted" style={{ fontSize: 11 }} data-testid="sites-updating">
+              Updating…
+            </span>
+          ) : null}
           <button
             type="button"
             className="btn btn-install"
@@ -425,8 +448,16 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       ) : null}
       {error ? <div className="error-banner">{error}</div> : null}
       {progress ? <ProgressToast progress={progress} /> : null}
-      {details.length === 0 ? (
-        <div className="empty-state" style={{ padding: "48px 24px", textAlign: "center" }}>
+      {!sitesLoaded ? (
+        <div className="loading" data-testid="sites-loading">
+          Loading sites…
+        </div>
+      ) : details.length === 0 ? (
+        <div
+          className="empty-state"
+          data-testid="sites-empty"
+          style={{ padding: "48px 24px", textAlign: "center" }}
+        >
           <h3 style={{ marginTop: 0 }}>No sites yet</h3>
           <p className="muted">
             Add an empty PHP site, link an existing folder, or create WordPress
@@ -452,60 +483,93 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
           </div>
         </div>
       ) : (
-        <div className="sites-grid">
-          {details.map((d) => (
-            <button
-              key={d.site.id}
-              type="button"
-              className="site-tile"
-              onClick={() => openSite(d.site.id)}
-            >
-              <div className="site-tile-top">
-                <span
-                  className={`fw-icon fw-${d.framework}`}
-                  title={d.framework}
-                >
-                  {d.frameworkIcon}
-                </span>
-                <span
-                  className={`status-dot ${
-                    (d.reachability?.state ?? d.site.status) === "running"
-                      ? "on"
-                      : (d.reachability?.state ?? d.site.status) === "error"
-                        ? "error"
-                        : (d.reachability?.state ?? d.site.status) === "warning"
-                          ? "warn"
-                          : ""
-                  }`}
-                  title={
-                    d.reachability?.message ??
-                    d.reachability?.state ??
-                    d.site.status ??
-                    "stopped"
-                  }
-                />
-              </div>
-              <div className="site-tile-name">
-                {d.site.name}
-                {d.site.isTemplate ? (
-                  <span className="tpl-badge">template</span>
-                ) : null}
-              </div>
-              <div className="site-tile-domain">{d.site.domain}</div>
-              {d.reachability?.message ? (
-                <div className="site-tile-meta" style={{ color: "var(--danger, #ff3b30)" }}>
-                  {d.reachability.message}
+        <div className="sites-grid" data-testid="sites-grid">
+          {details.map((d) => {
+            const state = d.reachability?.state ?? d.site.status ?? "stopped";
+            const isError = state === "error";
+            const isWarn = state === "warning";
+            const isOn = state === "running";
+            return (
+              <button
+                key={d.site.id}
+                type="button"
+                className="site-tile"
+                onClick={() => openSite(d.site.id)}
+              >
+                <div className="site-tile-top">
+                  <span
+                    className={`fw-icon fw-${d.framework}`}
+                    title={d.framework}
+                  >
+                    {d.frameworkIcon}
+                  </span>
+                  <span
+                    className={`status-dot ${
+                      isOn ? "on" : isError ? "error" : isWarn ? "warn" : ""
+                    }`}
+                    title={
+                      d.reachability?.message ?? state
+                    }
+                  />
                 </div>
-              ) : null}
-              <div className="site-tile-meta">
-                <span>PHP {d.site.phpVersion ?? "—"}</span>
-                <span className="muted">
-                  {(d.site.webServer ?? "nginx").toUpperCase()}
-                </span>
-                <span className="muted">{d.framework}</span>
-              </div>
-            </button>
-          ))}
+                <div className="site-tile-name">
+                  {d.site.name}
+                  {d.site.isTemplate ? (
+                    <span className="tpl-badge">template</span>
+                  ) : null}
+                </div>
+                <div className="site-tile-domain">{d.site.domain}</div>
+                {d.reachability?.message ? (
+                  <div
+                    className="site-tile-meta"
+                    style={{
+                      color: isError || isWarn
+                        ? "var(--danger, #ff3b30)"
+                        : "var(--text-secondary)",
+                    }}
+                  >
+                    {d.reachability.message}
+                  </div>
+                ) : null}
+                {d.reachability?.logExcerpt ? (
+                  <div
+                    className="site-tile-meta"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setLogOpenId((id) =>
+                        id === d.site.id ? null : d.site.id,
+                      );
+                    }}
+                  >
+                    <span className="muted" style={{ textDecoration: "underline" }}>
+                      {logOpenId === d.site.id ? "Hide log" : "Show log"}
+                    </span>
+                    {logOpenId === d.site.id ? (
+                      <pre
+                        style={{
+                          margin: "6px 0 0",
+                          fontSize: 10,
+                          whiteSpace: "pre-wrap",
+                          textAlign: "left",
+                          maxHeight: 120,
+                          overflow: "auto",
+                        }}
+                      >
+                        {d.reachability.logExcerpt}
+                      </pre>
+                    ) : null}
+                  </div>
+                ) : null}
+                <div className="site-tile-meta">
+                  <span>PHP {d.site.phpVersion ?? "—"}</span>
+                  <span className="muted">
+                    {(d.site.webServer ?? "nginx").toUpperCase()}
+                  </span>
+                  <span className="muted">{d.framework}</span>
+                </div>
+              </button>
+            );
+          })}
         </div>
       )}
 

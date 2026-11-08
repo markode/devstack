@@ -59,6 +59,7 @@ pub struct AppInfo {
     pub arch: String,
     pub php_manifest_url: Option<String>,
     pub stack: StackStatus,
+    pub developer: crate::config::DeveloperSettings,
 }
 
 #[tauri::command]
@@ -75,6 +76,7 @@ pub async fn get_app_info(ctx: State<'_, Arc<AppCtx>>) -> Result<AppInfo> {
             .clone()
             .or_else(|| std::env::var("DEVSTACK_PHP_MANIFEST_URL").ok()),
         stack: stack_status(&state),
+        developer: state.developer.clone(),
     })
 }
 
@@ -231,8 +233,22 @@ pub async fn get_sites(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteRecord>> {
     Ok(state.sites.clone())
 }
 
+/// Fast site list for UI: local config only — no TCP/HTTP probes.
+/// Call `probe_site_reachability_cmd` (or list with probe=true) in the background.
 #[tauri::command]
 pub async fn list_site_details(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDetails>> {
+    list_site_details_inner(ctx, false).await
+}
+
+#[tauri::command]
+pub async fn list_site_details_probed(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDetails>> {
+    list_site_details_inner(ctx, true).await
+}
+
+async fn list_site_details_inner(
+    ctx: State<'_, Arc<AppCtx>>,
+    probe: bool,
+) -> Result<Vec<SiteDetails>> {
     let mut state = ctx.state.lock().await;
     ensure_welcome_site(&ctx.paths, &mut state);
     refresh_site_metadata(&mut state);
@@ -240,11 +256,24 @@ pub async fn list_site_details(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDe
     let mut details = Vec::with_capacity(sites.len());
     for s in sites {
         let mut d = detect_site(&s);
-        crate::services::sites::enrich_site_details(&ctx.paths, &mut state, &mut d);
+        if probe {
+            crate::services::sites::enrich_site_details(&ctx.paths, &mut state, &mut d);
+        } else {
+            crate::services::sites::enrich_site_details_fast(&mut d, &state);
+        }
         details.push(d);
     }
-    save_state(&ctx.paths.state_file, &state)?;
+    if probe {
+        save_state(&ctx.paths.state_file, &state)?;
+    }
     Ok(details)
+}
+
+#[tauri::command]
+pub async fn probe_all_site_reachability(
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<Vec<SiteDetails>> {
+    list_site_details_inner(ctx, true).await
 }
 
 #[tauri::command]
@@ -411,20 +440,56 @@ pub async fn get_stack_status(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus
 
 #[tauri::command]
 pub async fn start_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    crate::applog::command_call("start_dev_stack", "{}");
     let mut state = ctx.state.lock().await;
-    start_stack(&ctx.paths, &mut state)
+    match start_stack(&ctx.paths, &mut state) {
+        Ok(s) => {
+            crate::applog::command_ok(
+                "start_dev_stack",
+                &format!(
+                    "nginx={} apache={} db={:?}",
+                    s.nginx, s.apache, s.database_engine
+                ),
+            );
+            Ok(s)
+        }
+        Err(e) => {
+            crate::applog::command_err("start_dev_stack", &format!("{e:#}"));
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn stop_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    crate::applog::command_call("stop_dev_stack", "{}");
     let mut state = ctx.state.lock().await;
-    stop_stack(&ctx.paths, &mut state)
+    match stop_stack(&ctx.paths, &mut state) {
+        Ok(s) => {
+            crate::applog::command_ok("stop_dev_stack", "stopped");
+            Ok(s)
+        }
+        Err(e) => {
+            crate::applog::command_err("stop_dev_stack", &format!("{e:#}"));
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn apply_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    crate::applog::command_call("apply_dev_stack", "{}");
     let mut state = ctx.state.lock().await;
-    apply_stack(&ctx.paths, &mut state)
+    match apply_stack(&ctx.paths, &mut state) {
+        Ok(s) => {
+            crate::applog::command_ok("apply_dev_stack", "ok");
+            Ok(s)
+        }
+        Err(e) => {
+            crate::applog::command_err("apply_dev_stack", &format!("{e:#}"));
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -983,7 +1048,9 @@ pub async fn import_site_database_file(
 
 pub fn bootstrap_ctx(data_root: std::path::PathBuf) -> Result<AppCtx> {
     let paths = Paths::from_root(data_root)?;
+    crate::applog::init(&paths.logs);
     let mut state = load_state(&paths.state_file)?;
+    crate::applog::set_redact_secrets(state.developer.redact_secrets);
     ensure_welcome_site(&paths, &mut state);
     let _ = crate::services::db_files::databases_folder(&paths, &state.db_files);
     let _ = crate::php::regenerate_all_php_ini(&paths, &state);
@@ -1020,12 +1087,25 @@ pub async fn get_hosts_status(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus
 
 #[tauri::command]
 pub async fn repair_hosts(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus> {
+    crate::applog::command_call("repair_hosts", "{}");
     let mut state = ctx.state.lock().await;
     ensure_welcome_site(&ctx.paths, &mut state);
     let _ = crate::services::tls::ensure_root_ca(&ctx.paths);
-    dns::sync_hosts_and_trust_ca(&ctx.paths, &state)?;
+    crate::applog::info("hosts", "sync_hosts_and_trust_ca begin");
+    match dns::sync_hosts_and_trust_ca(&ctx.paths, &state) {
+        Ok(()) => crate::applog::info("hosts", "sync_hosts_and_trust_ca ok"),
+        Err(e) => {
+            crate::applog::error("hosts", format!("sync_hosts_and_trust_ca failed: {e:#}"));
+            return Err(e);
+        }
+    }
     save_state(&ctx.paths.state_file, &state)?;
-    Ok(dns::check_hosts_status(&ctx.paths, &state))
+    let status = dns::check_hosts_status(&ctx.paths, &state);
+    crate::applog::command_ok(
+        "repair_hosts",
+        &format!("ok={} missing={:?}", status.ok, status.missing),
+    );
+    Ok(status)
 }
 
 /// Mint a one-time phpMyAdmin sign-on URL (password never appears in the query string).
@@ -1107,4 +1187,80 @@ pub fn sync_hosts_after_change(paths: &Paths, state: &mut AppState) -> Result<Ho
     let _ = crate::services::nginx::reload_nginx(paths, state);
     let _ = crate::services::httpd::reload_apache(paths, state);
     Ok(dns::check_hosts_status(paths, state))
+}
+
+// --- Application logs (Logs tab) -------------------------------------------------
+
+#[tauri::command]
+pub async fn get_app_logs(limit: Option<usize>) -> Result<Vec<crate::applog::LogEntry>> {
+    Ok(crate::applog::snapshot(limit))
+}
+
+#[tauri::command]
+pub async fn get_app_log_error_count() -> Result<u64> {
+    Ok(crate::applog::error_count())
+}
+
+#[tauri::command]
+pub async fn clear_app_logs() -> Result<()> {
+    crate::applog::clear();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_app_log_error_count() -> Result<()> {
+    crate::applog::clear_error_count();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_app_log_folder() -> Result<String> {
+    let dir = crate::applog::log_dir_path().ok_or_else(|| {
+        crate::error::DevStackError::Message("log directory not initialized".into())
+    })?;
+    std::fs::create_dir_all(&dir)?;
+    crate::paths_util::open_path_os(&dir)?;
+    Ok(dir.display().to_string())
+}
+
+/// Append a client-side log line (UI actions, console errors, unhandled rejections).
+/// Skips recursive logging for this command itself.
+#[tauri::command]
+pub async fn append_app_log(level: String, source: String, message: String) -> Result<()> {
+    match crate::applog::LogLevel::parse(&level) {
+        crate::applog::LogLevel::Error => crate::applog::error(&source, message),
+        crate::applog::LogLevel::Warn => crate::applog::warn(&source, message),
+        crate::applog::LogLevel::Info => crate::applog::info(&source, message),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_developer_settings(
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<crate::config::DeveloperSettings> {
+    let state = ctx.state.lock().await;
+    Ok(state.developer.clone())
+}
+
+#[tauri::command]
+pub async fn update_developer_settings(
+    ctx: State<'_, Arc<AppCtx>>,
+    show_logs_tab: Option<bool>,
+    redact_secrets: Option<bool>,
+) -> Result<crate::config::DeveloperSettings> {
+    let mut state = ctx.state.lock().await;
+    if let Some(v) = show_logs_tab {
+        state.developer.show_logs_tab = v;
+    }
+    if let Some(v) = redact_secrets {
+        state.developer.redact_secrets = v;
+        crate::applog::set_redact_secrets(v);
+        crate::applog::info(
+            "app",
+            format!("developer.redact_secrets set to {v}"),
+        );
+    }
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(state.developer.clone())
 }

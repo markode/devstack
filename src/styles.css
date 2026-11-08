@@ -201,6 +201,46 @@ select {
   flex-shrink: 0;
 }
 
+.content-header-meta {
+  position: absolute;
+  right: 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.content-header-loader {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.content-header-loader::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: 40%;
+  background: var(--accent);
+  animation: header-loader 1s ease-in-out infinite;
+}
+
+@keyframes header-loader {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+.page-pane[hidden] {
+  display: none !important;
+}
+
 .nav-arrows {
   position: absolute;
   left: 14px;
@@ -618,16 +658,80 @@ select.native {
 
 .sites-toolbar {
   display: flex;
-  align-items: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px 16px;
   margin-bottom: 16px;
+}
+
+.sites-toolbar-blurb {
+  margin: 0;
+  font-size: 13px;
+  max-width: 42ch;
+  line-height: 1.35;
 }
 
 .sites-toolbar-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.sites-toolbar-actions .btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.stack-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--card, #f5f5f7);
+  border: 1px solid var(--card-border, #e5e5ea);
+}
+
+/* Herd-style: on narrow widths stack the blurb above a wrapping action row. */
+@media (max-width: 720px) {
+  .content-body {
+    padding: 14px 14px 24px;
+  }
+
+  .sites-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .sites-toolbar-blurb {
+    max-width: none;
+  }
+
+  .sites-toolbar-actions {
+    justify-content: flex-start;
+  }
+
+  .content-header-meta {
+    display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .sites-toolbar-actions .btn {
+    flex: 1 1 calc(50% - 8px);
+  }
+
+  .stack-status-pill {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
 }
 
 .sites-grid {
@@ -1132,4 +1236,135 @@ select.native {
 .about-foot {
   margin-top: 18px;
   font-size: 12px;
+}
+
+/* --- Logs tab --- */
+.logs-page {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: calc(100vh - 120px);
+}
+
+.logs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.logs-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.logs-filter select,
+.logs-search {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--card-border, #e5e5ea);
+  background: #fff;
+  min-width: 110px;
+}
+
+.logs-search {
+  flex: 1 1 160px;
+  min-width: 140px;
+}
+
+.logs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.logs-meta {
+  font-size: 11px;
+}
+
+.logs-viewport {
+  flex: 1;
+  min-height: 360px;
+  max-height: calc(100vh - 200px);
+  overflow: auto;
+  border: 1px solid var(--card-border, #e5e5ea);
+  border-radius: 8px;
+  background: #1e1e22;
+  color: #e8e8ed;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.logs-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.logs-window {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+}
+
+.logs-row {
+  display: grid;
+  grid-template-columns: 88px 48px 72px 1fr;
+  gap: 8px;
+  padding: 0 10px;
+  align-items: center;
+  white-space: nowrap;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.logs-row .logs-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.logs-row.level-info .logs-level {
+  color: #8e8e93;
+}
+
+.logs-row.level-warn {
+  background: rgba(255, 149, 0, 0.08);
+}
+
+.logs-row.level-warn .logs-level {
+  color: #ff9f0a;
+}
+
+.logs-row.level-error {
+  background: rgba(255, 59, 48, 0.12);
+}
+
+.logs-row.level-error .logs-level {
+  color: #ff453a;
+}
+
+.logs-ts {
+  color: #8e8e93;
+}
+
+.logs-source {
+  color: #64d2ff;
+}
+
+.nav-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ff3b30;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-grid;
+  place-items: center;
 }

@@ -118,3 +118,43 @@ jobs:
           releaseDraft: false
           prerelease: true
           args: ${{ matrix.args }}
+
+  # Dedicated E2E on the tagged commit after installers build — verifies clean + busy-port flows.
+  release-e2e:
+    needs: publish
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Frontend typecheck + vitest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci
+          npm run smoke:frontend
+          npm test
+
+      - name: Playwright responsive header screenshots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npx playwright install chromium
+          npm run test:e2e
+
+      - name: Release E2E — clean ports + busy 80/443/3306/8025 full flow
+        working-directory: src-tauri
+        shell: pwsh
+        env:
+          DEVSTACK_DATA_DIR: ${{ runner.temp }}\devstack-release-e2e
+          DEVSTACK_RESET_SITES: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --bin devstack_smoke --release
+          $bin = Join-Path (Get-Location) 'target\release\devstack_smoke.exe'
+          & $bin --e2e
+          if ($LASTEXITCODE -ne 0) { throw "release E2E failed ($LASTEXITCODE)" }
+          Write-Host "Release E2E verified: dual nginx+apache HTML 200, WAMP coexist (80/443/3306/8025), status error, stopped status"

@@ -113,6 +113,10 @@ pub fn refresh_site_process_status(state: &mut AppState) {
 pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     refresh_site_metadata(state);
 
+    state.runtime.stack_intentionally_stopped = false;
+    state.runtime.last_start_at = Some(chrono::Utc::now().to_rfc3339());
+    state.runtime.last_start_error = None;
+
     // Auto-pick free ports when WAMP/MAMP/IIS hold 80/443/3306 — no modal required.
     // Ignore our own nginx/httpd/mysqld PIDs so a live stack never remaps onto itself.
     let before = PortSnapshot::from_stack(&state.stack);
@@ -122,6 +126,9 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
         auto_separate_busy_ports(&mut state.stack, &owned, &runtime_snap);
     if remap.changed {
         state.runtime.port_notice = remap.messages.clone();
+        for msg in &remap.messages {
+            crate::applog::info("ports", msg);
+        }
         save_state(&paths.state_file, state)?;
     }
 
@@ -141,7 +148,11 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
         }
     });
     if let Some(engine) = engine {
-        start_database(paths, state, &engine)?;
+        if let Err(e) = start_database(paths, state, &engine) {
+            state.runtime.last_start_error = Some(e.to_string());
+            save_state(&paths.state_file, state)?;
+            return Err(e);
+        }
         let _ = configure_phpmyadmin(paths, state);
     }
 
@@ -156,9 +167,15 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
 
     // Both front-ends can run together on different ports (see docs/apache.md).
     // Surface the first hard failure so PortConflict / UI dialogs can react.
+    // Never auto-open a browser from Start stack — the Sites UI owns that.
     let nginx_err = start_nginx(paths, state).err();
     let apache_err = start_apache(paths, state).err();
     refresh_site_process_status(state);
+    if let Some(ref e) = nginx_err.as_ref().or(apache_err.as_ref()) {
+        state.runtime.last_start_error = Some(e.to_string());
+    } else {
+        state.runtime.last_start_error = None;
+    }
     save_state(&paths.state_file, state)?;
     if let Some(e) = nginx_err.or(apache_err) {
         return Err(e);
@@ -178,6 +195,9 @@ pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     for version in state.runtime.php_pids.keys().cloned().collect::<Vec<_>>() {
         let _ = crate::services::php_runtime::stop_php(paths, state, &version);
     }
+    // Intentional stop → grey sites; clear start errors so probes never show stale logs.
+    state.runtime.stack_intentionally_stopped = true;
+    state.runtime.last_start_error = None;
     refresh_site_process_status(state);
     save_state(&paths.state_file, state)?;
     Ok(stack_status(state))

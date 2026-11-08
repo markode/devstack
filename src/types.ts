@@ -4,11 +4,27 @@ export type SectionId =
   | "javascript"
   | "services"
   | "sites"
+  | "logs"
   | "ai"
   | "pro"
   | "sharing"
   | "shortcuts"
   | "about";
+
+export type LogLevel = "info" | "warn" | "error";
+
+export interface LogEntry {
+  id: number;
+  ts: string;
+  level: LogLevel;
+  source: string;
+  message: string;
+}
+
+export interface DeveloperSettings {
+  showLogsTab: boolean;
+  redactSecrets: boolean;
+}
 
 export interface PackageInfo {
   id: string;
@@ -91,6 +107,8 @@ export interface SiteReachability {
   /** `running` | `stopped` | `error` | `warning` */
   state: string;
   message?: string | null;
+  /** Fresh log lines for a Show log expander. */
+  logExcerpt?: string | null;
   tcpOk: boolean;
   httpOk: boolean;
   probedUrl: string;
@@ -134,6 +152,7 @@ export interface AppInfo {
   arch: string;
   phpManifestUrl?: string | null;
   stack?: StackStatus;
+  developer?: DeveloperSettings;
 }
 
 export interface DatabaseFilesSettings {

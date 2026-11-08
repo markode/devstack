@@ -4,6 +4,7 @@ import type {
   AppInfo,
   DatabaseFilesSettings,
   DbFileEntry,
+  DeveloperSettings,
   HostsStatus,
   PortsConfig,
 } from "../types";
@@ -32,7 +33,11 @@ const PORT_FIELDS: {
   { key: "phpFpm", label: "PHP-FPM base", hint: "Windows TCP base (9000)" },
 ];
 
-export function GeneralPage() {
+export function GeneralPage({
+  onDeveloperChange,
+}: {
+  onDeveloperChange?: (d: DeveloperSettings) => void;
+} = {}) {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [dbSettings, setDbSettings] = useState<DatabaseFilesSettings | null>(
     null,
@@ -42,19 +47,24 @@ export function GeneralPage() {
   const [folderInput, setFolderInput] = useState("");
   const [ports, setPorts] = useState<PortsConfig | null>(null);
   const [hosts, setHosts] = useState<HostsStatus | null>(null);
+  const [developer, setDeveloper] = useState<DeveloperSettings>({
+    showLogsTab: true,
+    redactSecrets: false,
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
   const refresh = async () => {
     try {
-      const [i, s, folder, files, p, h] = await Promise.all([
+      const [i, s, folder, files, p, h, d] = await Promise.all([
         client.getAppInfo(),
         client.getDbFilesSettings(),
         client.getDatabasesFolder(),
         client.listDatabaseFiles(),
         client.getPortsConfig(),
         client.getHostsStatus(),
+        client.getDeveloperSettings(),
       ]);
       setInfo(i);
       setDbSettings(s);
@@ -63,8 +73,25 @@ export function GeneralPage() {
       setDbFiles(files);
       setPorts(p);
       setHosts(h);
+      setDeveloper(d);
+      onDeveloperChange?.(d);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const saveDeveloper = async (patch: Partial<DeveloperSettings>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const d = await client.updateDeveloperSettings(patch);
+      setDeveloper(d);
+      onDeveloperChange?.(d);
+      setNote("Developer settings saved");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -424,6 +451,45 @@ export function GeneralPage() {
           >
             Export all running
           </button>
+        </div>
+      </div>
+
+      <div className="section-head" style={{ marginTop: 28 }}>
+        <h2>Developer</h2>
+        <p>Diagnostics for development builds — turn redaction on before release.</p>
+      </div>
+      <div className="settings-card" data-testid="developer-settings">
+        <div className="settings-row">
+          <label>
+            Show Logs tab
+            <span className="hint">Sidebar Logs stream (default on)</span>
+          </label>
+          <input
+            type="checkbox"
+            checked={developer.showLogsTab}
+            disabled={busy}
+            onChange={(e) =>
+              void saveDeveloper({ showLogsTab: e.target.checked })
+            }
+            data-testid="dev-show-logs"
+          />
+        </div>
+        <div className="settings-row">
+          <label>
+            Redact secrets
+            <span className="hint">
+              Off = full command lines, args, env, stdout/stderr (dev default)
+            </span>
+          </label>
+          <input
+            type="checkbox"
+            checked={developer.redactSecrets}
+            disabled={busy}
+            onChange={(e) =>
+              void saveDeveloper({ redactSecrets: e.target.checked })
+            }
+            data-testid="dev-redact-secrets"
+          />
         </div>
       </div>
     </div>

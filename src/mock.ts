@@ -114,6 +114,45 @@ export function mockApplyNextFreePorts(serviceId: string) {
   return { ...mockPorts };
 }
 
+export const mockLogState = {
+  errorCount: 0,
+  ring: [] as import("./types").LogEntry[],
+  nextId: 1,
+};
+export const mockDeveloperSettingsState = {
+  showLogsTab: true,
+  redactSecrets: false,
+};
+
+export function mockAppendAppLog(
+  level: import("./types").LogLevel,
+  source: string,
+  message: string,
+) {
+  if (level === "error") mockLogState.errorCount += 1;
+  mockLogState.ring.push({
+    id: mockLogState.nextId++,
+    ts: new Date().toISOString(),
+    level,
+    source,
+    message,
+  });
+  if (mockLogState.ring.length > 5000) mockLogState.ring.shift();
+}
+
+export function mockGetAppLogs(limit?: number) {
+  const n = limit ?? mockLogState.ring.length;
+  return mockLogState.ring.slice(-n);
+}
+
+export function mockClearAppLogs() {
+  mockLogState.ring.length = 0;
+  mockLogState.errorCount = 0;
+  mockAppendAppLog("info", "app", "log buffer cleared");
+}
+
+export const mockDeveloperSettings = mockDeveloperSettingsState;
+
 export const mockAppInfo: AppInfo = {
   name: "DevStack",
   version: "0.1.0",
@@ -122,6 +161,7 @@ export const mockAppInfo: AppInfo = {
   arch: "aarch64",
   phpManifestUrl: null,
   stack: mockStackStatus,
+  developer: mockDeveloperSettingsState,
 };
 
 export const mockPackages: PackageInfo[] = [
@@ -505,6 +545,25 @@ function toDetails(s: SiteRecord): SiteDetails {
 
 export async function mockListSiteDetails(): Promise<SiteDetails[]> {
   return sites.map(toDetails);
+}
+
+/** Simulated slow probe pass — used to assert cache-first UI. */
+export async function mockListSiteDetailsProbed(): Promise<SiteDetails[]> {
+  await delay(30);
+  return sites.map((s) => {
+    const d = toDetails(s);
+    return {
+      ...d,
+      reachability: {
+        state: s.status === "running" ? "running" : "stopped",
+        message: null,
+        tcpOk: s.status === "running",
+        httpOk: s.status === "running",
+        probedUrl: d.url,
+        probedPort: 80,
+      },
+    };
+  });
 }
 
 export async function mockGetSiteDetails(siteId: string): Promise<SiteDetails> {

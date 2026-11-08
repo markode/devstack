@@ -62,6 +62,10 @@ pub fn render_stack(
     let http_port = state.stack.http_port;
     let https_port = state.stack.https_port;
 
+    // Catch-all first (lexicographically `00-`) so unmatched Host never hits
+    // mailpit/phpMyAdmin proxy blocks.
+    write_default_catch_all(&sites_dir, http_port, https_port)?;
+
     for site in &state.sites {
         if crate::services::httpd::site_uses_apache(site) {
             continue;
@@ -84,7 +88,14 @@ pub fn render_stack(
         http_port,
         https_port,
     )?;
-    if latest_installed(state, "mailpit").is_some() {
+    // Mailpit vhost only when the process is actually running — never as a
+    // default_server / catch-all for other Host headers.
+    let mailpit_up = state
+        .runtime
+        .mailpit_pid
+        .map(crate::services::process::is_running)
+        .unwrap_or(false);
+    if mailpit_up && latest_installed(state, "mailpit").is_some() {
         let _ = crate::services::extras::write_mailpit_nginx(paths, state);
     }
 
@@ -155,6 +166,22 @@ fn php_for_site<'a>(
         .map(|(_, r)| r)
 }
 
+fn write_default_catch_all(sites_dir: &Path, http_port: u16, _https_port: u16) -> Result<()> {
+    // HTTP-only default_server — never proxies. Unmatched Host → clear 404.
+    // (Avoid ssl default_server here: needs certs and varies by nginx build.)
+    let body = format!(
+        r#"server {{
+  listen {http_port} default_server;
+  listen [::]:{http_port} default_server;
+  server_name _;
+  return 404 "DevStack: no site matched this Host header.\n";
+}}
+"#
+    );
+    fs::write(sites_dir.join("00-default.conf"), body)?;
+    Ok(())
+}
+
 fn write_site_conf(
     paths: &Paths,
     state: &AppState,
@@ -165,10 +192,27 @@ fn write_site_conf(
     https_port: u16,
 ) -> Result<()> {
     let root = expand_home(&site.path);
-    let Some(runtime) = php_for_site(site, runtimes, state) else {
-        return Ok(());
+    // Always write a server block for the site domain — never leave Host
+    // unmatched so nginx falls through to mailpit/phpMyAdmin.
+    let php_block = if let Some(runtime) = php_for_site(site, runtimes, state) {
+        let fastcgi = nginx_fastcgi_pass(runtime);
+        format!(
+            r#"  location ~ \.php$ {{
+    include {fcgi};
+    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    fastcgi_pass {fastcgi};
+    fastcgi_read_timeout 3600s;
+    fastcgi_send_timeout 3600s;
+  }}
+"#,
+            fastcgi = fastcgi_pass_value(&fastcgi),
+            fcgi = crate::paths_util::quoted_conf_path(
+                &paths.nginx_conf_dir().join("fastcgi_params"),
+            ),
+        )
+    } else {
+        String::new()
     };
-    let fastcgi = nginx_fastcgi_pass(runtime);
     let mut server = format!(
         r#"server {{
   listen {http_port};
@@ -180,25 +224,34 @@ fn write_site_conf(
   location / {{
     try_files $uri $uri/ /index.php?$query_string;
   }}
-  location ~ \.php$ {{
+{php_block}}}
+"#,
+        domain = site.domain,
+        root = crate::paths_util::quoted_conf_path(&root),
+        php_block = php_block,
+    );
+
+    if site.https {
+        let certs = ensure_site_cert(paths, &site.domain)?;
+        let php_ssl = if let Some(runtime) = php_for_site(site, runtimes, state) {
+            let fastcgi = nginx_fastcgi_pass(runtime);
+            format!(
+                r#"  location ~ \.php$ {{
     include {fcgi};
     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
     fastcgi_pass {fastcgi};
     fastcgi_read_timeout 3600s;
     fastcgi_send_timeout 3600s;
   }}
-}}
 "#,
-        domain = site.domain,
-        root = crate::paths_util::quoted_conf_path(&root),
-        fastcgi = fastcgi_pass_value(&fastcgi),
-        fcgi = crate::paths_util::quoted_conf_path(
-            &paths.nginx_conf_dir().join("fastcgi_params"),
-        ),
-    );
-
-    if site.https {
-        let certs = ensure_site_cert(paths, &site.domain)?;
+                fastcgi = fastcgi_pass_value(&fastcgi),
+                fcgi = crate::paths_util::quoted_conf_path(
+                    &paths.nginx_conf_dir().join("fastcgi_params"),
+                ),
+            )
+        } else {
+            String::new()
+        };
         server.push_str(&format!(
             r#"
 server {{
@@ -213,23 +266,13 @@ server {{
   location / {{
     try_files $uri $uri/ /index.php?$query_string;
   }}
-  location ~ \.php$ {{
-    include {fcgi};
-    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-    fastcgi_pass {fastcgi};
-    fastcgi_read_timeout 3600s;
-    fastcgi_send_timeout 3600s;
-  }}
-}}
+{php_ssl}}}
 "#,
             domain = site.domain,
             root = crate::paths_util::quoted_conf_path(&root),
             cert = crate::paths_util::quoted_conf_path(&certs.site_cert),
             key = crate::paths_util::quoted_conf_path(&certs.site_key),
-            fastcgi = fastcgi_pass_value(&fastcgi),
-            fcgi = crate::paths_util::quoted_conf_path(
-                &paths.nginx_conf_dir().join("fastcgi_params"),
-            ),
+            php_ssl = php_ssl,
         ));
     }
 
