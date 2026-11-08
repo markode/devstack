@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DevStack macOS shell fixture</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell platform-macos" data-platform="macos" data-testid="app-shell">
+      <aside class="sidebar platform-macos" data-testid="sidebar">
+        <div class="sidebar-top" data-tauri-drag-region data-testid="sidebar-drag">
+          <div class="traffic-light-spacer" aria-hidden></div>
+          <div class="brand" data-tauri-drag-region>
+            <div class="brand-mark">DS</div>
+            <div class="brand-name">DevStack</div>
+          </div>
+        </div>
+        <nav class="sidebar-nav" aria-label="Main">
+          <button type="button" class="nav-item active">
+            <span class="nav-icon" style="background:#007aff">W</span>
+            <span class="nav-label">Sites</span>
+          </button>
+          <button type="button" class="nav-item">
+            <span class="nav-icon" style="background:#777BB4">P</span>
+            <span class="nav-label">PHP</span>
+          </button>
+        </nav>
+      </aside>
+      <main class="content">
+        <header
+          class="content-header platform-macos"
+          data-testid="page-header"
+          data-tauri-drag-region
+        >
+          <div class="content-header-drag" data-tauri-drag-region aria-hidden></div>
+          <div class="content-title" data-testid="page-header-title">Sites</div>
+          <div class="content-header-meta">2 sites</div>
+        </header>
+        <div class="content-body">
+          <div class="section-head" data-testid="section-header">
+            <h2>Sites</h2>
+            <p>Local projects on .test domains.</p>
+          </div>
+          <div class="sites-grid" data-testid="sites-grid">
+            <button type="button" class="site-tile">
+              <div class="site-tile-top">
+                <span class="fw-icon fw-wordpress">WP</span>
+                <span class="status-dot on"></span>
+              </div>
+              <div class="site-tile-name">demo</div>
+              <div class="site-tile-domain">demo.test</div>
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

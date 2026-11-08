@@ -49,6 +49,10 @@ let mockPorts: import("./types").PortsConfig = {
   postgresql: 5432,
   mongodb: 27017,
   phpFpm: 9000,
+  redis: 6379,
+  mailpitSmtp: 1025,
+  mailpitUi: 8025,
+  dns: 5353,
   phpmyadmin: 443,
 };
 
@@ -74,6 +78,10 @@ export function mockSetCoexistenceMode(enabled: boolean) {
       postgresql: 5433,
       mongodb: 27018,
       phpFpm: 9001,
+      redis: 6380,
+      mailpitSmtp: 1026,
+      mailpitUi: 8026,
+      dns: 5354,
       phpmyadmin: 8443,
     };
   } else {
@@ -88,6 +96,10 @@ export function mockSetCoexistenceMode(enabled: boolean) {
       postgresql: 5432,
       mongodb: 27017,
       phpFpm: 9000,
+      redis: 6379,
+      mailpitSmtp: 1025,
+      mailpitUi: 8025,
+      dns: 5353,
       phpmyadmin: 443,
     };
   }

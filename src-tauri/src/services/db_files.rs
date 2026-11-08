@@ -848,7 +848,6 @@ pub async fn post_import_url_rewrite(
 ) -> Result<()> {
     let abs = expand_home(&site.path);
     let is_wp = site.framework.as_deref() == Some("wordpress") || abs.join("wp-config.php").exists();
-    let new_url = site_https_url(state, site);
 
     if is_wp {
         emit(
@@ -874,13 +873,21 @@ pub async fn post_import_url_rewrite(
         )
         .unwrap_or_default();
         let old_url = old_url.trim().to_string();
-        if !old_url.is_empty() && old_url != new_url {
+        let (http_url, https_url) =
+            crate::services::ports::site_http_https_urls(site, state);
+        let target = if site.https {
+            https_url.clone()
+        } else {
+            http_url.clone()
+        };
+        if !old_url.is_empty() && old_url != target {
             wp_search_replace_urls(
                 &php_rt.php_bin,
                 &wp_cli,
                 &abs,
                 &old_url,
-                &new_url,
+                &https_url,
+                &http_url,
                 &site.domain,
             )?;
         }
@@ -903,21 +910,13 @@ pub async fn post_import_url_rewrite(
     Ok(())
 }
 
-fn site_https_url(state: &AppState, site: &SiteRecord) -> String {
-    let port = if crate::services::httpd::site_uses_apache(site) {
-        state.stack.apache_https_port
-    } else {
-        state.stack.https_port
-    };
-    crate::services::ports::format_url("https", &site.domain, port)
-}
-
 pub fn wp_search_replace_urls(
     php: &Path,
     wp_cli: &Path,
     cwd: &Path,
     old_url: &str,
-    new_url: &str,
+    new_https_url: &str,
+    new_http_url: &str,
     new_domain: &str,
 ) -> Result<()> {
     let old_domain = url::Url::parse(old_url)
@@ -932,20 +931,17 @@ pub fn wp_search_replace_urls(
                 .unwrap_or("")
                 .to_string()
         });
+    // Never flip scheme while keeping an SSL listen port (→ http://host:8444).
+    let old_http = old_url.replace("https://", "http://");
+    let old_https = old_url.replace("http://", "https://");
     let replacements = [
-        (old_url.to_string(), new_url.to_string()),
-        (
-            old_url.replace("https://", "http://"),
-            new_url.replace("https://", "http://"),
-        ),
-        (
-            old_url.replace("http://", "https://"),
-            new_url.to_string(),
-        ),
-        (format!("https://{old_domain}"), new_url.to_string()),
+        (old_url.to_string(), new_https_url.to_string()),
+        (old_http, new_http_url.to_string()),
+        (old_https, new_https_url.to_string()),
+        (format!("https://{old_domain}"), new_https_url.to_string()),
         (
             format!("http://{old_domain}"),
-            format!("http://{new_domain}"),
+            new_http_url.to_string(),
         ),
         (old_domain.clone(), new_domain.to_string()),
     ];

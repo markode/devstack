@@ -213,8 +213,23 @@ fn write_site_conf(
     } else {
         String::new()
     };
-    let mut server = format!(
-        r#"server {{
+    let http_block = if site.https {
+        // Redirect plain HTTP → canonical HTTPS (correct listen port).
+        let dest = crate::services::ports::format_url("https", &site.domain, https_port);
+        format!(
+            r#"server {{
+  listen {http_port};
+  listen [::]:{http_port};
+  server_name {domain};
+  return 301 {dest}$request_uri;
+}}
+"#,
+            domain = site.domain,
+            dest = dest,
+        )
+    } else {
+        format!(
+            r#"server {{
   listen {http_port};
   listen [::]:{http_port};
   server_name {domain};
@@ -226,10 +241,12 @@ fn write_site_conf(
   }}
 {php_block}}}
 "#,
-        domain = site.domain,
-        root = crate::paths_util::quoted_conf_path(&root),
-        php_block = php_block,
-    );
+            domain = site.domain,
+            root = crate::paths_util::quoted_conf_path(&root),
+            php_block = php_block,
+        )
+    };
+    let mut server = http_block;
 
     if site.https {
         let certs = ensure_site_cert(paths, &site.domain)?;

@@ -1,4 +1,5 @@
-import { Hero, VersionTable } from "../components/VersionTable";
+import { SectionHeader } from "../components/SectionHeader";
+import { VersionTable } from "../components/VersionTable";
 import { usePackageVersions } from "../hooks/usePackageVersions";
 
 export function JavaScriptPage() {
@@ -6,16 +7,10 @@ export function JavaScriptPage() {
 
   return (
     <div>
-      <Hero
-        title="JavaScript"
-        description="Install and switch between Node.js versions from the official Node.js distributions — no nvm required."
-        color="#3C873A"
-        glyph="JS"
+      <SectionHeader
+        title="Node.js versions"
+        description="Install and update Node.js from the official distributions."
       />
-      <div className="section-head">
-        <h2>Node.js Versions</h2>
-        <p>Install and Update Node.js</p>
-      </div>
       {pkg.error ? <div className="error-banner">{pkg.error}</div> : null}
       {pkg.loading && pkg.versions.length === 0 ? (
         <div className="loading">Loading versions…</div>

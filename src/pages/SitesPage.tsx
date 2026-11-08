@@ -66,6 +66,8 @@ export function SitesPage({
   const [patching, setPatching] = useState(false);
   const [logOpenId, setLogOpenId] = useState<string | null>(null);
   const wasActive = useRef(active);
+  /** Sync guard — `busy` state alone can race before the next render. */
+  const stackOpInflight = useRef(false);
 
   const refresh = async () => {
     try {
@@ -179,6 +181,8 @@ export function SitesPage({
   const stackRunning = Boolean(stack?.nginx || stack?.apache);
 
   const toggleStack = async () => {
+    if (stackOpInflight.current || busy) return;
+    stackOpInflight.current = true;
     setBusy(true);
     setError(null);
     setPortConflict(null);
@@ -202,6 +206,7 @@ export function SitesPage({
       }
       await refresh();
     } finally {
+      stackOpInflight.current = false;
       setBusy(false);
     }
   };
@@ -1537,6 +1542,30 @@ function SiteDetail({
               </span>
             )}
           </div>
+          {details.hasWpConfig ? (
+            <div className="settings-row">
+              <label>
+                Site URL
+                <span className="hint">
+                  Sync WordPress siteurl/home to {site.https ? details.httpsUrl : details.url}
+                </span>
+              </label>
+              <button
+                type="button"
+                className="btn btn-install"
+                disabled={busy}
+                data-testid="repair-site-url"
+                onClick={() =>
+                  runOpen(async () => {
+                    const msg = await client.repairSiteUrl(site.id);
+                    onToast(msg);
+                  })
+                }
+              >
+                Repair site URL
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Hero, VersionTable } from "../components/VersionTable";
+import { SectionHeader } from "../components/SectionHeader";
+import { VersionTable } from "../components/VersionTable";
 import { usePackageVersions } from "../hooks/usePackageVersions";
 import * as client from "../client";
 import type { PhpExtensionView } from "../types";
@@ -22,16 +23,10 @@ export function PhpPage() {
 
   return (
     <div>
-      <Hero
-        title="PHP"
-        description="Install and switch between PHP versions, and manage the PHP configuration used across your sites."
-        color="#777BB4"
-        glyph="P"
+      <SectionHeader
+        title="Available versions"
+        description="Install, update, and manage PHP runtimes used by your sites."
       />
-      <div className="section-head">
-        <h2>Available Versions</h2>
-        <p>Install, update and manage PHP.</p>
-      </div>
       {pkg.error ? <div className="error-banner">{pkg.error}</div> : null}
       {pkg.loading && pkg.versions.length === 0 ? (
         <div className="loading">Loading versions…</div>

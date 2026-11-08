@@ -324,15 +324,44 @@ pub fn stop_database(paths: &Paths, state: &mut AppState) -> Result<()> {
             "export-on-stop",
         );
     }
-    if let Some(pid) = state.runtime.database_pid.take() {
-        stop_pid(pid)?;
+    // Prefer graceful shutdown so InnoDB flushes cleanly (never kill foreign PIDs).
+    let engine = state.runtime.database_engine.clone();
+    if let Some(ref eng) = engine {
+        let _ = mysqladmin_shutdown(paths, state, eng);
     }
-    for engine in ["mariadb", "mysql"] {
-        if let Some(pid) = read_pid(&paths.pid_file(engine)) {
+    if let Some(pid) = state.runtime.database_pid.take() {
+        // Give mysqld a moment after mysqladmin; force only if still alive.
+        for _ in 0..20 {
+            if !is_running(pid) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        if is_running(pid) {
             let _ = stop_pid(pid);
         }
     }
+    for eng in ["mariadb", "mysql"] {
+        if let Some(pid) = read_pid(&paths.pid_file(eng)) {
+            if is_running(pid) {
+                let _ = stop_pid(pid);
+            }
+        }
+    }
     state.runtime.database_engine = None;
+    Ok(())
+}
+
+fn mysqladmin_shutdown(paths: &Paths, state: &AppState, engine: &str) -> Result<()> {
+    let root = engine_install_dir(state, engine)?;
+    let admin = find_bin(
+        &root,
+        &["mysqladmin", "mariadb-admin", "mysqladmin.exe", "mariadb-admin.exe"],
+    )
+    .ok_or_else(|| DevStackError::Message("mysqladmin not found".into()))?;
+    let mut args = mysql_root_args(paths, state, engine);
+    args.push("shutdown".into());
+    let _ = crate::services::process::command(&admin).args(&args).status();
     Ok(())
 }
 

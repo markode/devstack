@@ -126,6 +126,10 @@ export interface PortsConfig {
   postgresql: number;
   mongodb: number;
   phpFpm: number;
+  redis: number;
+  mailpitSmtp: number;
+  mailpitUi: number;
+  dns: number;
   phpmyadmin: number;
 }
 
@@ -134,6 +138,7 @@ export interface PortOccupant {
   pid?: number | null;
   processName?: string | null;
   hint?: string | null;
+  windowsService?: string | null;
 }
 
 export interface PortCheckResult {

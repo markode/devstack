@@ -142,24 +142,5 @@ export function VersionTable({
   );
 }
 
-export function Hero({
-  title,
-  description,
-  color,
-  glyph,
-}: {
-  title: string;
-  description: string;
-  color: string;
-  glyph: string;
-}) {
-  return (
-    <div className="hero-card">
-      <div className="hero-icon" style={{ background: color }}>
-        {glyph}
-      </div>
-      <h1>{title}</h1>
-      <p>{description}</p>
-    </div>
-  );
-}
+/** @deprecated Use SectionHeader — kept as alias for older imports. */
+export { SectionHeader as Hero } from "./SectionHeader";

@@ -34,8 +34,8 @@ pub fn default_ports(id: &str) -> Vec<u16> {
     match id {
         "mongodb" => vec![d.mongodb_port],
         "postgresql" => vec![d.postgresql_port],
-        "redis" => vec![6379],
-        "mailpit" => vec![1025, 8025],
+        "redis" => vec![d.redis_port],
+        "mailpit" => vec![d.mailpit_smtp_port, d.mailpit_ui_port],
         "mariadb" => vec![d.mariadb_port],
         "mysql" => vec![d.mysql_port],
         "nginx" => vec![d.http_port, d.https_port],
@@ -68,11 +68,19 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
             vec![state.stack.postgresql_port],
             None,
         ),
-        "redis" => ("Redis", state.runtime.redis_pid, vec![6379], None),
+        "redis" => (
+            "Redis",
+            state.runtime.redis_pid,
+            vec![state.stack.redis_port],
+            None,
+        ),
         "mailpit" => (
             "Mailpit",
             state.runtime.mailpit_pid,
-            vec![1025, 8025],
+            vec![
+                state.stack.mailpit_smtp_port,
+                state.stack.mailpit_ui_port,
+            ],
             Some(mailpit_url),
         ),
         "mariadb" => (
@@ -126,8 +134,14 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
         log_path,
         ui_url: ui,
         notes: match id {
-            "mailpit" => Some("SMTP :1025 · UI :8025 / mailpit.test".into()),
-            "redis" => Some("Use as PHP session / cache backend".into()),
+            "mailpit" => Some(format!(
+                "SMTP :{} · UI :{} / mailpit.test",
+                state.stack.mailpit_smtp_port, state.stack.mailpit_ui_port
+            )),
+            "redis" => Some(format!(
+                "TCP :{} — PHP session / cache backend",
+                state.stack.redis_port
+            )),
             "apache" => Some(format!(
                 "HTTP :{} · HTTPS :{} (alongside Nginx :{}/:{})",
                 state.stack.apache_http_port,
@@ -461,9 +475,12 @@ fn start_redis(paths: &Paths, state: &mut AppState) -> Result<()> {
     let conf_dir = paths.databases.join("redis");
     fs::create_dir_all(&conf_dir)?;
     let conf = conf_dir.join("redis.conf");
+    let port = state.stack.redis_port;
     fs::write(
         &conf,
-        "bind 127.0.0.1\nport 6379\nprotected-mode yes\ndir .\ndaemonize no\n",
+        format!(
+            "bind 127.0.0.1\nport {port}\nprotected-mode yes\ndir .\ndaemonize no\n"
+        ),
     )?;
     let child = spawn_logged(
         &server,
@@ -476,7 +493,7 @@ fn start_redis(paths: &Paths, state: &mut AppState) -> Result<()> {
     std::mem::forget(child);
     write_pid(&paths.pid_file("redis"), pid)?;
     state.runtime.redis_pid = Some(pid);
-    wait_port(6379, 40)?;
+    wait_port(port, 40)?;
     Ok(())
 }
 
@@ -490,8 +507,8 @@ fn start_mailpit(paths: &Paths, state: &mut AppState) -> Result<()> {
         .ok_or_else(|| DevStackError::Message("Mailpit is not installed".into()))?;
     let bin = find_bin(&root, &["mailpit", "mailpit.exe"])
         .ok_or_else(|| DevStackError::Message("mailpit binary not found".into()))?;
-    let ui = "8025";
-    let smtp = "1025";
+    let ui = state.stack.mailpit_ui_port;
+    let smtp = state.stack.mailpit_smtp_port;
     let child = spawn_logged(
         &bin,
         &[
@@ -508,7 +525,7 @@ fn start_mailpit(paths: &Paths, state: &mut AppState) -> Result<()> {
     std::mem::forget(child);
     write_pid(&paths.pid_file("mailpit"), pid)?;
     state.runtime.mailpit_pid = Some(pid);
-    wait_port(8025, 40)?;
+    wait_port(ui, 40)?;
 
     // Ensure mailpit.test nginx reverse-proxy exists when nginx is up
     let _ = write_mailpit_nginx(paths, state);
@@ -516,10 +533,12 @@ fn start_mailpit(paths: &Paths, state: &mut AppState) -> Result<()> {
     let hint = paths.php.join("mailpit-sendmail.ini");
     let _ = fs::write(
         hint,
-        "; DevStack Mailpit — point PHP SMTP here\n\
-         SMTP = 127.0.0.1\n\
-         smtp_port = 1025\n\
-         sendmail_path = \"\"\n",
+        format!(
+            "; DevStack Mailpit — point PHP SMTP here\n\
+             SMTP = 127.0.0.1\n\
+             smtp_port = {smtp}\n\
+             sendmail_path = \"\"\n"
+        ),
     );
     Ok(())
 }
@@ -538,7 +557,7 @@ pub fn write_mailpit_nginx(paths: &Paths, state: &AppState) -> Result<()> {
   ssl_certificate {cert};
   ssl_certificate_key {key};
   location / {{
-    proxy_pass http://127.0.0.1:8025;
+    proxy_pass http://127.0.0.1:{ui};
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -546,6 +565,7 @@ pub fn write_mailpit_nginx(paths: &Paths, state: &AppState) -> Result<()> {
   }}
 }}
 "#,
+        ui = state.stack.mailpit_ui_port,
         cert = crate::paths_util::quoted_conf_path(&certs.site_cert),
         key = crate::paths_util::quoted_conf_path(&certs.site_key),
     );

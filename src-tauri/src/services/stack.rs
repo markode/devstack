@@ -10,7 +10,8 @@ use crate::services::httpd::{reload_apache, start_apache, stop_apache};
 use crate::services::nginx::{reload_nginx, start_nginx, stop_nginx};
 use crate::services::php_runtime::register_system_php;
 use crate::services::ports::{
-    auto_separate_busy_ports, owned_runtime_pids, PortRemapNotice, PortSnapshot,
+    auto_separate_busy_ports, classic_web_port_notice, owned_runtime_pids_with_files,
+    PortRemapNotice, PortSnapshot,
 };
 use crate::services::process::is_running;
 use crate::services::sites::refresh_site_metadata;
@@ -117,15 +118,16 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     state.runtime.last_start_at = Some(chrono::Utc::now().to_rfc3339());
     state.runtime.last_start_error = None;
 
-    // Auto-pick free ports when WAMP/MAMP/IIS hold 80/443/3306 — no modal required.
-    // Ignore our own nginx/httpd/mysqld PIDs so a live stack never remaps onto itself.
+    // Mandatory busy-port fallback: never stop foreign listeners; remap ours.
     let before = PortSnapshot::from_stack(&state.stack);
-    let owned = owned_runtime_pids(&state.runtime);
+    let owned = owned_runtime_pids_with_files(paths, &state.runtime);
     let runtime_snap = state.runtime.clone();
     let remap: PortRemapNotice =
         auto_separate_busy_ports(&mut state.stack, &owned, &runtime_snap);
+    let mut notice = remap.messages.clone();
+    notice.extend(classic_web_port_notice(&state.stack));
+    state.runtime.port_notice = notice;
     if remap.changed {
-        state.runtime.port_notice = remap.messages.clone();
         for msg in &remap.messages {
             crate::applog::info("ports", msg);
         }
@@ -136,7 +138,16 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     // Single UAC on Windows for hosts + CA trust; unix uses helper/sudo separately.
     let _ = sync_hosts_and_trust_ca(paths, state);
 
-    let _ = start_dns(paths, state, 5353);
+    match start_dns(paths, state, state.stack.dns_port) {
+        Ok(()) => {}
+        Err(e) => {
+            crate::applog::warn(
+                "dns",
+                &format!("{e} — continuing with hosts-file resolution only"),
+            );
+            state.runtime.dns_pid = None;
+        }
+    }
 
     let engine = state.active_database.clone().or_else(|| {
         if state.installed.contains_key("mariadb") {
@@ -160,13 +171,16 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     if remap.changed {
         rewrite_all_wp_urls_for_port_remap(paths, state, before)?;
     }
+    // Catch install/toggle mismatches even when ports did not remap this start.
+    let _ = crate::services::wp_url::repair_mismatched_wp_urls(paths, state);
 
     if !state.installed.contains_key("php") {
         let _ = register_system_php(state, paths);
     }
 
     // Both front-ends can run together on different ports (see docs/apache.md).
-    // Surface the first hard failure so PortConflict / UI dialogs can react.
+    // Start Nginx then Apache sequentially but without blocking the UI event
+    // loop longer than necessary — callers already hold the stack mutex.
     // Never auto-open a browser from Start stack — the Sites UI owns that.
     let nginx_err = start_nginx(paths, state).err();
     let apache_err = start_apache(paths, state).err();
@@ -286,36 +300,14 @@ fn rewrite_wp_urls_for_server_switch(
     paths: &Paths,
     state: &AppState,
     site: &crate::config::SiteRecord,
-    was_apache: bool,
-    now_apache: bool,
+    _was_apache: bool,
+    _now_apache: bool,
 ) -> Result<()> {
-    let Some(db) = site.database_name.as_deref() else {
-        return Ok(());
-    };
-    let engine = site
-        .database_engine
-        .clone()
-        .or_else(|| state.active_database.clone())
-        .unwrap_or_else(|| "mariadb".into());
-    if !matches!(engine.as_str(), "mysql" | "mariadb") {
-        return Ok(());
+    // Full canonical repair (scheme + port + serialized) via managed PHP.
+    match crate::services::wp_url::repair_site_url(paths, state, site) {
+        Ok(msg) => crate::applog::info("wordpress", &msg),
+        Err(e) => crate::applog::warn("wordpress", &format!("server-switch URL repair: {e}")),
     }
-    let old_port = if was_apache {
-        state.stack.apache_https_port
-    } else {
-        state.stack.https_port
-    };
-    let new_port = if now_apache {
-        state.stack.apache_https_port
-    } else {
-        state.stack.https_port
-    };
-    if old_port == new_port {
-        return Ok(());
-    }
-    let from = format!(":{old_port}");
-    let to = format!(":{new_port}");
-    let _ = crate::services::db_files::mysql_simple_replace_pub(paths, state, &engine, db, &from, &to);
     Ok(())
 }
 
@@ -391,37 +383,11 @@ fn rewrite_wp_urls_for_https_toggle(
     paths: &Paths,
     state: &AppState,
     site: &crate::config::SiteRecord,
-    prev_https: bool,
+    _prev_https: bool,
 ) -> Result<()> {
-    let Some(db) = site.database_name.as_deref() else {
-        return Ok(());
-    };
-    let engine = site
-        .database_engine
-        .clone()
-        .or_else(|| state.active_database.clone())
-        .unwrap_or_else(|| "mariadb".into());
-    if !matches!(engine.as_str(), "mysql" | "mariadb") {
-        return Ok(());
+    match crate::services::wp_url::repair_site_url(paths, state, site) {
+        Ok(msg) => crate::applog::info("wordpress", &msg),
+        Err(e) => crate::applog::warn("wordpress", &format!("https-toggle URL repair: {e}")),
     }
-    let (https_port, http_port) = if crate::services::httpd::site_uses_apache(site) {
-        (state.stack.apache_https_port, state.stack.apache_http_port)
-    } else {
-        (state.stack.https_port, state.stack.http_port)
-    };
-    let https_url = crate::services::ports::format_url("https", &site.domain, https_port);
-    let http_url = crate::services::ports::format_url("http", &site.domain, http_port);
-    let (from, to) = if site.https && !prev_https {
-        (http_url, https_url)
-    } else if !site.https && prev_https {
-        (https_url, http_url)
-    } else {
-        return Ok(());
-    };
-    // Options-only — full-table REPLACE scans seeded demo tables and blew the
-    // <3s toggle budget on Windows. siteurl/home is what the app Open URL uses.
-    let _ = crate::services::db_files::mysql_wp_options_url_replace(
-        paths, state, &engine, db, &from, &to,
-    );
     Ok(())
 }

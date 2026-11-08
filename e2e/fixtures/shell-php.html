@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DevStack PHP shell fixture</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell platform-windows" data-platform="windows" data-testid="app-shell">
+      <aside class="sidebar platform-windows" data-testid="sidebar">
+        <div class="sidebar-top" data-tauri-drag-region>
+          <div class="brand" data-tauri-drag-region>
+            <div class="brand-mark">DS</div>
+            <div class="brand-name">DevStack</div>
+          </div>
+        </div>
+        <nav class="sidebar-nav">
+          <button type="button" class="nav-item active">
+            <span class="nav-icon" style="background:#777BB4">P</span>
+            <span class="nav-label">PHP</span>
+          </button>
+        </nav>
+      </aside>
+      <main class="content">
+        <header class="content-header platform-windows" data-testid="page-header" data-tauri-drag-region>
+          <div class="content-title" data-testid="page-header-title">PHP</div>
+          <div class="window-controls" data-testid="window-controls">
+            <button type="button" class="win-btn win-min" aria-label="Minimize"></button>
+            <button type="button" class="win-btn win-max" aria-label="Maximize"></button>
+            <button type="button" class="win-btn win-close" aria-label="Close"></button>
+          </div>
+        </header>
+        <div class="content-body">
+          <div class="section-head" data-testid="section-header">
+            <h2>Available versions</h2>
+            <p>Install, update, and manage PHP runtimes used by your sites.</p>
+          </div>
+          <div class="panel-card version-table" data-testid="php-version-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Version</th>
+                  <th style="width:160px">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>8.3.21</td>
+                  <td>
+                    <div class="row-actions">
+                      <span class="status-installed">Installed</span>
+                      <button type="button" class="btn btn-danger">Uninstall</button>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td>8.2.28</td>
+                  <td>
+                    <div class="row-actions">
+                      <button type="button" class="btn btn-install">Install</button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

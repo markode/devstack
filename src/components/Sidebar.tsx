@@ -1,4 +1,5 @@
 import type { SectionId } from "../types";
+import type { AppPlatform } from "../platform";
 
 interface NavItem {
   id: SectionId;
@@ -39,38 +40,57 @@ export function Sidebar({
   onSelect,
   showLogsTab = true,
   logErrorCount = 0,
+  platform = "web",
 }: {
   active: SectionId;
   onSelect: (id: SectionId) => void;
   showLogsTab?: boolean;
   logErrorCount?: number;
+  platform?: AppPlatform;
 }) {
   return (
-    <aside className="sidebar">
-      <div className="brand">
-        <div className="brand-mark">DS</div>
-        <div className="brand-name">DevStack</div>
+    <aside
+      className={`sidebar platform-${platform}`}
+      data-testid="sidebar"
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <div
+        className="sidebar-top"
+        data-tauri-drag-region
+        data-testid="sidebar-drag"
+      >
+        {platform === "macos" ? (
+          <div className="traffic-light-spacer" aria-hidden />
+        ) : null}
+        <div className="brand" data-tauri-drag-region>
+          <div className="brand-mark">DS</div>
+          <div className="brand-name">DevStack</div>
+        </div>
       </div>
-      {ITEMS.filter((item) => item.id !== "logs" || showLogsTab).map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={`nav-item ${active === item.id ? "active" : ""} ${
-            item.placeholder ? "muted" : ""
-          }`}
-          onClick={() => onSelect(item.id)}
-        >
-          <span className="nav-icon" style={{ background: item.color }}>
-            {item.glyph}
-          </span>
-          <span className="nav-label">{item.label}</span>
-          {item.id === "logs" && logErrorCount > 0 ? (
-            <span className="nav-badge" data-testid="logs-error-badge">
-              {logErrorCount > 99 ? "99+" : logErrorCount}
-            </span>
-          ) : null}
-        </button>
-      ))}
+      <nav className="sidebar-nav" aria-label="Main">
+        {ITEMS.filter((item) => item.id !== "logs" || showLogsTab).map(
+          (item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`nav-item ${active === item.id ? "active" : ""} ${
+                item.placeholder ? "muted" : ""
+              }`}
+              onClick={() => onSelect(item.id)}
+            >
+              <span className="nav-icon" style={{ background: item.color }}>
+                {item.glyph}
+              </span>
+              <span className="nav-label">{item.label}</span>
+              {item.id === "logs" && logErrorCount > 0 ? (
+                <span className="nav-badge" data-testid="logs-error-badge">
+                  {logErrorCount > 99 ? "99+" : logErrorCount}
+                </span>
+              ) : null}
+            </button>
+          ),
+        )}
+      </nav>
     </aside>
   );
 }

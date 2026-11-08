@@ -302,13 +302,16 @@ pub async fn duplicate_from_source(
     let sock = paths.databases.join(format!("{engine}.sock"));
     update_wp_config_credentials(&dest, &db_name, &db_user, &db_pass, &db_host, &sock)?;
 
-    // WordPress defaults to Apache — match create_wordpress_site URL port.
-    let https_port = if framework == "wordpress" || dest.join("wp-config.php").exists() {
-        state.stack.apache_https_port
+    // Build both scheme URLs with the correct listen ports (never flip scheme
+    // while keeping an SSL port — that produced http://domain:8444).
+    let apache = framework == "wordpress" || dest.join("wp-config.php").exists();
+    let (http_port, https_port) = if apache {
+        (state.stack.apache_http_port, state.stack.apache_https_port)
     } else {
-        state.stack.https_port
+        (state.stack.http_port, state.stack.https_port)
     };
-    let new_url = crate::services::ports::format_url("https", &domain, https_port);
+    let new_https = crate::services::ports::format_url("https", &domain, https_port);
+    let new_http = crate::services::ports::format_url("http", &domain, http_port);
     if framework == "wordpress" || dest.join("wp-config.php").exists() {
         emit(
             progress,
@@ -321,15 +324,14 @@ pub async fn duplicate_from_source(
         let php_rt = resolve_php(paths, state, &php_version)?;
         let wp_cli = ensure_wp_cli(paths, progress, job_id).await?;
 
-        // Replace both https and http variants + domain-only
         let replacements = [
-            (old_url.clone(), new_url.clone()),
+            (old_url.clone(), new_https.clone()),
             (
                 old_url.replace("https://", "http://"),
-                new_url.replace("https://", "http://"),
+                new_http.clone(),
             ),
-            (format!("https://{old_domain}"), new_url.clone()),
-            (format!("http://{old_domain}"), format!("http://{domain}")),
+            (format!("https://{old_domain}"), new_https.clone()),
+            (format!("http://{old_domain}"), new_http.clone()),
             (old_domain.clone(), domain.clone()),
         ];
         for (from, to) in replacements {
@@ -388,7 +390,7 @@ pub async fn duplicate_from_source(
 
     Ok(DuplicateResult {
         site,
-        url: new_url,
+        url: new_https,
     })
 }
 

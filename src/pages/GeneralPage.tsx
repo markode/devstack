@@ -167,19 +167,11 @@ export function GeneralPage({
 
   return (
     <div className="stack">
-      <div className="hero-card">
-        <div
-          className="hero-icon"
-          style={{
-            background: "linear-gradient(145deg, #2f6bff, #0a84ff 55%, #64d2ff)",
-          }}
-        >
-          DS
-        </div>
-        <h1>DevStack</h1>
+      <div className="section-head">
+        <h2>General</h2>
         <p>
-          Local PHP development environment for macOS and Windows — runtimes,
-          databases, and sites in one place.
+          Stack preferences, ports, hosts, and developer options for this
+          machine.
         </p>
       </div>
 
@@ -504,9 +496,11 @@ export function PlaceholderPage({
   blurb: string;
 }) {
   return (
-    <div className="hero-card">
-      <h1>{title}</h1>
-      <p>{blurb}</p>
+    <div className="placeholder-page">
+      <div className="section-head">
+        <h2>{title}</h2>
+        <p>{blurb}</p>
+      </div>
     </div>
   );
 }
