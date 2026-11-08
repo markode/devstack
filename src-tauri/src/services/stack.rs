@@ -117,7 +117,9 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     // Ignore our own nginx/httpd/mysqld PIDs so a live stack never remaps onto itself.
     let before = PortSnapshot::from_stack(&state.stack);
     let owned = owned_runtime_pids(&state.runtime);
-    let remap: PortRemapNotice = auto_separate_busy_ports(&mut state.stack, &owned);
+    let runtime_snap = state.runtime.clone();
+    let remap: PortRemapNotice =
+        auto_separate_busy_ports(&mut state.stack, &owned, &runtime_snap);
     if remap.changed {
         state.runtime.port_notice = remap.messages.clone();
         save_state(&paths.state_file, state)?;

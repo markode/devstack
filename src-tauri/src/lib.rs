@@ -63,9 +63,11 @@ pub fn run() {
                 // Persist free ports beside WAMP/MAMP/IIS before the UI opens.
                 let before = crate::services::ports::PortSnapshot::from_stack(&state.stack);
                 let owned = crate::services::ports::owned_runtime_pids(&state.runtime);
+                let runtime_snap = state.runtime.clone();
                 let remap = crate::services::ports::auto_separate_busy_ports(
                     &mut state.stack,
                     &owned,
+                    &runtime_snap,
                 );
                 if remap.changed {
                     state.runtime.port_notice = remap.messages.clone();
