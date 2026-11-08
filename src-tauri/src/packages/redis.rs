@@ -75,6 +75,28 @@ impl RedisProvider {
         Ok(slim)
     }
 
+    fn windows_fallback_versions() -> Vec<PackageVersion> {
+        // Curated tporadowski tags — used when GitHub API returns 429/5xx.
+        const FALLBACK: &[&str] = &["5.0.14.1", "5.0.10"];
+        FALLBACK
+            .iter()
+            .map(|version| {
+                let url = format!(
+                    "https://github.com/tporadowski/redis/releases/download/v{version}/Redis-x64-{version}.zip"
+                );
+                PackageVersion {
+                    label: format!("Redis {version}"),
+                    version: (*version).to_string(),
+                    channel: version.split('.').take(2).collect::<Vec<_>>().join("."),
+                    lts: true,
+                    download_url: Some(url),
+                    sha256: None,
+                    notes: Some("tporadowski Windows build (fallback)".into()),
+                }
+            })
+            .collect()
+    }
+
     async fn list_windows(&self) -> Result<Vec<PackageVersion>> {
         #[derive(serde::Deserialize)]
         struct Rel {
@@ -90,15 +112,27 @@ impl RedisProvider {
             name: String,
             browser_download_url: String,
         }
-        let releases: Vec<Rel> = self
+        let releases: Vec<Rel> = match self
             .client
             .get(WIN_RELEASES)
             .header("User-Agent", "DevStack")
             .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            .await
+        {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(ok) => ok.json().await.map_err(|e| {
+                    DevStackError::Message(format!("Failed to parse Redis Windows releases: {e}"))
+                })?,
+                Err(e) => {
+                    eprintln!("[redis] Windows releases API failed ({e}); using curated fallback");
+                    return Ok(Self::windows_fallback_versions());
+                }
+            },
+            Err(e) => {
+                eprintln!("[redis] Windows releases API unreachable ({e}); using curated fallback");
+                return Ok(Self::windows_fallback_versions());
+            }
+        };
         let mut out = Vec::new();
         for r in releases {
             if r.draft || r.prerelease {
@@ -124,6 +158,9 @@ impl RedisProvider {
             if out.len() >= 10 {
                 break;
             }
+        }
+        if out.is_empty() {
+            return Ok(Self::windows_fallback_versions());
         }
         Ok(out)
     }
@@ -160,6 +197,32 @@ impl PackageProvider for RedisProvider {
         let meta = versions
             .into_iter()
             .find(|v| v.version == version || v.channel == version)
+            .or_else(|| {
+                if current_os() == "windows" {
+                    Self::windows_fallback_versions()
+                        .into_iter()
+                        .find(|v| v.version == version || v.channel == version)
+                        .or_else(|| {
+                            Some(PackageVersion {
+                                label: format!("Redis {version}"),
+                                version: version.to_string(),
+                                channel: version
+                                    .split('.')
+                                    .take(2)
+                                    .collect::<Vec<_>>()
+                                    .join("."),
+                                lts: true,
+                                download_url: Some(format!(
+                                    "https://github.com/tporadowski/redis/releases/download/v{version}/Redis-x64-{version}.zip"
+                                )),
+                                sha256: None,
+                                notes: Some("tporadowski Windows build (direct)".into()),
+                            })
+                        })
+                } else {
+                    None
+                }
+            })
             .ok_or_else(|| DevStackError::VersionNotFound(version.into()))?;
         let url = meta
             .download_url

@@ -1060,11 +1060,18 @@ async fn run_db_files_smoke(
 async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Milestone 4 services smoke (Postgres / Mongo / Redis / Mailpit) ===");
 
-    // Prefer smaller/recent installable versions
-    // Prefer Redis 7.4.x — builds cleanly with MALLOC=libc on CI Linux.
-    let redis_ver = pick_version(ctx, "redis", |v| v.starts_with("7.4.") || v.starts_with("7.")).await?;
+    // Prefer Redis 7.4.x on Unix (source build); Windows uses tporadowski 5.x zips.
+    let redis_ver = pick_version(ctx, "redis", |v| {
+        v.starts_with("7.4.") || v.starts_with("7.") || v.starts_with("5.0.")
+    })
+    .await?;
     println!("Installing Redis {redis_ver}…");
-    install_pkg(ctx, "redis", &redis_ver).await?;
+    if let Err(e) = install_pkg(ctx, "redis", &redis_ver).await {
+        println!("[redis] install {redis_ver} failed ({e}); retrying latest listed…");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let alt = pick_version(ctx, "redis", |_| true).await?;
+        install_pkg(ctx, "redis", &alt).await?;
+    }
 
     let mailpit_ver = pick_version(ctx, "mailpit", |_| true).await?;
     println!("Installing Mailpit {mailpit_ver}…");

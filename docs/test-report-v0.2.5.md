@@ -59,12 +59,12 @@ Ship only after windows-latest + macos-latest E2E (real downloads, real backend)
 
 | Platform | https=false | https=true | server=nginx | server=apache | php switch |
 | --- | --- | --- | --- | --- | --- |
-| windows-latest | _pending_ (was 4898ms; Apache FOREGROUND stop/start) | _pending_ | _pending_ | _pending_ | _pending_ |
-| macos-latest | **105ms** | **146ms** | **165ms** | **173ms** | skipped (1 PHP on that runner) |
+| windows-latest | ~4679ms | ~4669ms | ~4855ms | ~4828ms | skipped (1 PHP) |
+| macos-latest | **160ms** | **71ms** | **222ms** | **164ms** | skipped (1 PHP) |
 
 CI budgets: macOS/Linux &lt;3s; Windows &lt;8s (Lounge FOREGROUND stop/start ≈4.5–5s on GHA).
 
 ## CI runs
 
-- macOS `42473293316`: through db-files + PERF green; Mailpit GitHub API 403 rate limit (fallback added).
-- Windows `42473293313`: through Mongo install + ports; redis-cli path NotFound on Windows package layout (find_bin fix).
+- macOS `42474762228` (**green**): full E2E — WP http/https Apache+Nginx, permalinks, db-files, Postgres/Mongo/Redis/Mailpit, persistence/PMA.
+- Windows `42474762315`: through db-files; Redis Windows releases API 504 (fallback added).
