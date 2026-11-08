@@ -217,9 +217,11 @@ fn command_id_gn() -> Result<String> {
 pub fn start_php(paths: &Paths, state: &mut AppState, version: &str) -> Result<PhpRuntime> {
     let runtime = resolve_php(paths, state, version)?;
     if let Some(pid) = state.runtime.php_pids.get(&runtime.version).copied() {
-        if is_running(pid) {
+        if is_running(pid) && php_listen_ready(&runtime) {
             return Ok(runtime);
         }
+        // Stale pid or dead listener — restart.
+        let _ = stop_php(paths, state, &runtime.version);
     }
 
     if cfg!(windows) {
@@ -228,6 +230,18 @@ pub fn start_php(paths: &Paths, state: &mut AppState, version: &str) -> Result<P
         start_php_fpm(paths, state, &runtime)?;
     }
     Ok(runtime)
+}
+
+fn php_listen_ready(runtime: &PhpRuntime) -> bool {
+    if runtime.listen.starts_with("unix:") {
+        return Path::new(runtime.listen.trim_start_matches("unix:")).exists();
+    }
+    parse_tcp_listen(&runtime.listen)
+        .map(|addr| {
+            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100))
+                .is_ok()
+        })
+        .unwrap_or(false)
 }
 
 fn start_php_fpm(paths: &Paths, state: &mut AppState, runtime: &PhpRuntime) -> Result<()> {
@@ -268,6 +282,45 @@ fn start_php_fpm(paths: &Paths, state: &mut AppState, runtime: &PhpRuntime) -> R
     Ok(())
 }
 
+fn parse_tcp_listen(listen: &str) -> Option<std::net::SocketAddr> {
+    listen.parse().ok().or_else(|| {
+        // Accept "127.0.0.1:9083" already; also bare ":9083" is invalid.
+        None
+    })
+}
+
+/// Wait until php-cgi / FPM accepts TCP (or unix socket exists).
+fn wait_php_listen(runtime: &PhpRuntime, pid: u32, log_err: &Path) -> Result<()> {
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    for _ in 0..40 {
+        if !is_running(pid) {
+            let err = fs::read_to_string(log_err).unwrap_or_default();
+            return Err(DevStackError::Message(format!(
+                "php-cgi {} exited before becoming ready.\n--- stderr ---\n{err}",
+                runtime.version
+            )));
+        }
+        if runtime.listen.starts_with("unix:") {
+            let sock = runtime.listen.trim_start_matches("unix:");
+            if Path::new(sock).exists() {
+                return Ok(());
+            }
+        } else if let Some(addr) = parse_tcp_listen(&runtime.listen) {
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let err = fs::read_to_string(log_err).unwrap_or_default();
+    Err(DevStackError::Message(format!(
+        "php-cgi {} started (pid {pid}) but {} never accepted connections.\n--- stderr ---\n{err}",
+        runtime.version, runtime.listen
+    )))
+}
+
 fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRuntime) -> Result<()> {
     let cgi = runtime
         .cgi_bin
@@ -288,6 +341,15 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
     if let Some(pid) = read_pid(&pid_file) {
         let _ = stop_pid(pid);
     }
+    // Free the listen port if a zombie worker still holds it.
+    if let Some(addr) = parse_tcp_listen(&listen) {
+        for _ in 0..20 {
+            if TcpListener::bind(addr).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
     let ini_s = ini.to_string_lossy().to_string();
     let args: Vec<&str> = if ini.exists() {
         vec!["-c", ini_s.as_str(), "-b", listen.as_str()]
@@ -298,11 +360,12 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
         .parent()
         .map(|p| p.as_os_str())
         .unwrap_or_else(|| std::ffi::OsStr::new(""));
-    let envs: Vec<(&str, &std::ffi::OsStr)> = if ini.exists() {
-        vec![("PHPRC", phprc)]
-    } else {
-        vec![]
-    };
+    // PHP_FCGI_MAX_REQUESTS=0 → never self-exit after N requests (Windows default is 500).
+    let max_req = std::ffi::OsString::from("0");
+    let mut envs: Vec<(&str, &std::ffi::OsStr)> = vec![("PHP_FCGI_MAX_REQUESTS", max_req.as_os_str())];
+    if ini.exists() {
+        envs.push(("PHPRC", phprc));
+    }
     let child = crate::services::process::spawn_logged_env(
         cgi,
         &args,
@@ -310,13 +373,97 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
         &log_out,
         &log_err,
         &envs,
-        true,
+        // Attached: we own the FOREGROUND pid for restart/stop; DETACHED orphans
+        // workers that die after PHP_FCGI_MAX_REQUESTS with no supervisor.
+        false,
     )?;
     let pid = child.id();
     std::mem::forget(child);
     write_pid(&pid_file, pid)?;
+    wait_php_listen(runtime, pid, &log_err)?;
     state.runtime.php_pids.insert(runtime.version.clone(), pid);
+
+    // Lightweight supervisor: if the worker dies, respawn once the port frees.
+    spawn_php_cgi_supervisor(
+        paths.clone(),
+        runtime.clone(),
+        ini.clone(),
+        cgi.clone(),
+        log_out,
+        log_err,
+        pid_file,
+    );
     Ok(())
+}
+
+/// Background respawn for Windows php-cgi (single listener per version).
+fn spawn_php_cgi_supervisor(
+    paths: Paths,
+    runtime: PhpRuntime,
+    ini: PathBuf,
+    cgi: PathBuf,
+    log_out: PathBuf,
+    log_err: PathBuf,
+    pid_file: PathBuf,
+) {
+    std::thread::Builder::new()
+        .name(format!("php-cgi-supervise-{}", runtime.version))
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let pid = read_pid(&pid_file);
+                let alive = pid.map(is_running).unwrap_or(false);
+                let listening = if let Some(addr) = parse_tcp_listen(&runtime.listen) {
+                    std::net::TcpStream::connect_timeout(
+                        &addr,
+                        std::time::Duration::from_millis(80),
+                    )
+                    .is_ok()
+                } else {
+                    true
+                };
+                if alive && listening {
+                    continue;
+                }
+                // Worker gone or port dead — respawn.
+                if let Some(p) = pid {
+                    let _ = stop_pid(p);
+                }
+                let ini_s = ini.to_string_lossy().to_string();
+                let listen = runtime.listen.clone();
+                let args: Vec<&str> = if ini.exists() {
+                    vec!["-c", ini_s.as_str(), "-b", listen.as_str()]
+                } else {
+                    vec!["-b", listen.as_str()]
+                };
+                let max_req = std::ffi::OsString::from("0");
+                let phprc = ini
+                    .parent()
+                    .map(|p| p.as_os_str())
+                    .unwrap_or_else(|| std::ffi::OsStr::new(""));
+                let mut envs: Vec<(&str, &std::ffi::OsStr)> =
+                    vec![("PHP_FCGI_MAX_REQUESTS", max_req.as_os_str())];
+                if ini.exists() {
+                    envs.push(("PHPRC", phprc));
+                }
+                let Ok(child) = crate::services::process::spawn_logged_env(
+                    &cgi,
+                    &args,
+                    Some(&runtime.root),
+                    &log_out,
+                    &log_err,
+                    &envs,
+                    false,
+                ) else {
+                    continue;
+                };
+                let new_pid = child.id();
+                std::mem::forget(child);
+                let _ = write_pid(&pid_file, new_pid);
+                let _ = paths; // keep Paths alive for pid_file path consistency
+            }
+        })
+        .ok();
 }
 
 pub fn stop_php(paths: &Paths, state: &mut AppState, version: &str) -> Result<()> {

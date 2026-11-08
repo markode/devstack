@@ -370,7 +370,7 @@ export function SitesPage({
                   ]
                     .filter(Boolean)
                     .join(" · ") || "Running"
-                : "Stack stopped — click Start stack"
+                : "Stack stopped — Start"
             }
           >
             <span

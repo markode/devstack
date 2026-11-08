@@ -133,8 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if e2e {
         run_persistence_and_sites_smoke(&ctx, skip_mariadb).await?;
+        run_dual_frontend_routing_smoke(&ctx).await?;
         run_wamp_coexist_smoke(&ctx, skip_mariadb).await?;
         run_status_error_smoke(&ctx).await?;
+        run_stopped_status_smoke(&ctx).await?;
     }
 
     Ok(())
@@ -1540,7 +1542,168 @@ async fn run_persistence_and_sites_smoke(
     Ok(())
 }
 
-/// Occupy 80/443/3306 like WAMP, then start stack and assert auto-picked ports + WP fetch.
+/// Nginx site + Apache WP on a clean machine — both must return HTML 200 (not just open ports).
+async fn run_dual_frontend_routing_smoke(
+    ctx: &DevStackCtx,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::sites::{detect_site, enrich_site_details};
+
+    println!("=== Dual frontend routing (nginx + apache, clean ports) ===");
+    {
+        let mut state = ctx.state.lock().await;
+        state.stack.http_port = 8080;
+        state.stack.https_port = 8443;
+        state.stack.apache_http_port = 8088;
+        state.stack.apache_https_port = 8444;
+        let _ = apply_stack(&ctx.paths, &mut state)?;
+    }
+
+    let nginx_id = {
+        let mut state = ctx.state.lock().await;
+        let php_ver = state
+            .installed
+            .get("php")
+            .and_then(|v| v.first())
+            .map(|r| r.version.clone())
+            .unwrap_or_else(|| "8.3".into());
+        let path = ctx.paths.root.join("sites/nginxdash");
+        let _ = std::fs::create_dir_all(&path);
+        std::fs::write(path.join("index.php"), "<?php echo 'NGINX_DASH_OK';\n")?;
+        let site = create_site(&mut state, &ctx.paths, "nginxdash", path, Some(php_ver))?;
+        if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+            s.web_server = Some("nginx".into());
+            s.https = false;
+            s.domain = "nginxdash.test".into();
+        }
+        apply_stack(&ctx.paths, &mut state)?;
+        site.id
+    };
+
+    let (nginx_port, apache_port) = {
+        let mut state = ctx.state.lock().await;
+        let _ = apply_stack(&ctx.paths, &mut state)?;
+        let sites_dir = ctx.paths.nginx_sites_dir();
+        let dash_conf = sites_dir.join("nginxdash.conf");
+        if !dash_conf.exists() {
+            return Err("nginxdash.conf missing — site vhost not generated".into());
+        }
+        let conf = std::fs::read_to_string(&dash_conf)?;
+        if !conf.contains("server_name nginxdash.test") {
+            return Err("nginxdash.conf missing server_name".into());
+        }
+        if let Ok(mailpit) = std::fs::read_to_string(sites_dir.join("mailpit.conf")) {
+            if mailpit.contains("default_server") {
+                return Err("mailpit.conf must not be default_server".into());
+            }
+            if !mailpit.contains("server_name mailpit.test") {
+                return Err("mailpit.conf must only serve mailpit.test".into());
+            }
+        }
+        let default = sites_dir.join("00-default.conf");
+        if default.exists() {
+            let d = std::fs::read_to_string(&default)?;
+            if d.contains("proxy_pass") {
+                return Err("default catch-all must not proxy".into());
+            }
+        }
+        (state.stack.http_port, state.stack.apache_https_port)
+    };
+
+    let body = http_get_scheme_opts("nginxdash.test", nginx_port, "/", "http", false)?;
+    if !body.contains("NGINX_DASH_OK") {
+        return Err(format!("nginx site wrong body (mailpit steal?): {body}").into());
+    }
+    println!("nginxdash.test:{nginx_port} → NGINX_DASH_OK");
+
+    let apache_host = {
+        let state = ctx.state.lock().await;
+        state
+            .sites
+            .iter()
+            .find(|s| {
+                devstack_lib::services::httpd::site_uses_apache(s)
+                    && (s.domain.contains("demo")
+                        || s.domain.contains("apache")
+                        || s.domain.contains("wampco"))
+            })
+            .map(|s| s.domain.clone())
+    };
+    if let Some(host) = apache_host {
+        let body = http_get_scheme(&host, apache_port, "/", "https")?;
+        if body.len() < 32 {
+            return Err(format!("apache site too small (503?): {} bytes", body.len()).into());
+        }
+        if body.to_ascii_lowercase().contains("service unavailable") {
+            return Err(
+                "apache returned 503 Service Unavailable — php-cgi backend down".into(),
+            );
+        }
+        println!("{host}:{apache_port} → HTML {} bytes", body.len());
+    } else {
+        println!("no apache WP site yet — nginx routing check only");
+    }
+
+    {
+        let mut state = ctx.state.lock().await;
+        let site = state
+            .sites
+            .iter()
+            .find(|s| s.id == nginx_id)
+            .cloned()
+            .ok_or("nginxdash missing")?;
+        let mut details = detect_site(&site);
+        enrich_site_details(&ctx.paths, &mut state, &mut details);
+        let reach = details.reachability.ok_or("no reachability")?;
+        if reach.state != "running" || !reach.http_ok {
+            return Err(format!("nginxdash reachability not running: {reach:?}").into());
+        }
+    }
+    println!("SMOKE PASS: dual frontend routing");
+    Ok(())
+}
+
+/// After stop_stack, site status must be stopped (grey) — not error with stale logs.
+async fn run_stopped_status_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::sites::{detect_site, enrich_site_details};
+
+    println!("=== Stopped-status smoke ===");
+    {
+        let mut state = ctx.state.lock().await;
+        let _ = stop_stack(&ctx.paths, &mut state)?;
+    }
+    let mut saw = false;
+    {
+        let mut state = ctx.state.lock().await;
+        let sites: Vec<_> = state.sites.clone();
+        for site in sites {
+            let mut details = detect_site(&site);
+            enrich_site_details(&ctx.paths, &mut state, &mut details);
+            let reach = details.reachability.ok_or("no reachability")?;
+            if reach.state != "stopped" {
+                return Err(format!(
+                    "expected stopped after stop_stack, got {} ({:?})",
+                    reach.state, reach.message
+                )
+                .into());
+            }
+            let msg = reach.message.unwrap_or_default();
+            if msg.contains("error.log") || msg.contains("AH00418") || msg.contains("AH00354") {
+                return Err(format!("stale log leaked into stopped message: {msg}").into());
+            }
+            if !msg.contains("Stack stopped") {
+                return Err(format!("expected 'Stack stopped — Start', got {msg}").into());
+            }
+            saw = true;
+        }
+    }
+    if !saw {
+        return Err("no sites to assert stopped status".into());
+    }
+    println!("SMOKE PASS: stopped status is neutral");
+    Ok(())
+}
+
+/// Occupy 80/443/3306/8025 like WAMP+Mailpit, then start stack and assert auto-picked ports + WP fetch.
 async fn run_wamp_coexist_smoke(
     ctx: &DevStackCtx,
     skip_mariadb: bool,
@@ -1549,15 +1712,15 @@ async fn run_wamp_coexist_smoke(
     use devstack_lib::services::sites::{detect_site, enrich_site_details};
     use std::net::TcpListener;
 
-    println!("=== WAMP coexistence smoke (busy 80/443/3306) ===");
+    println!("=== WAMP coexistence smoke (busy 80/443/3306/8025) ===");
     {
         let mut state = ctx.state.lock().await;
         let _ = stop_stack(&ctx.paths, &mut state);
     }
 
-    // Hold classic ports the way WAMP/IIS would.
+    // Hold classic ports the way WAMP/IIS would (+ mailpit UI).
     let mut holders = Vec::new();
-    for port in [80u16, 443, 3306] {
+    for port in [80u16, 443, 3306, 8025] {
         match TcpListener::bind(("127.0.0.1", port)) {
             Ok(l) => {
                 println!("holding 127.0.0.1:{port}");

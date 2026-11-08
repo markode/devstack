@@ -19,7 +19,11 @@ use crate::services::process::is_running;
 pub struct SiteReachability {
     /// `running` | `stopped` | `error` | `warning`
     pub state: String,
+    /// Short human-facing summary (never a raw log dump).
     pub message: Option<String>,
+    /// Fresh error log excerpt for a "Show log" expander (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_excerpt: Option<String>,
     pub tcp_ok: bool,
     pub http_ok: bool,
     pub probed_url: String,
@@ -213,7 +217,45 @@ fn tail_log(path: &Path, max: usize) -> String {
     suffix
 }
 
-fn server_log_hint(paths: &Paths, apache: bool) -> Option<String> {
+/// Apache mpm_winnt lifecycle notices are not failures.
+fn is_benign_log_line(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    if l.contains("ah00418") || l.contains("ah00354") || l.contains("ah00489") || l.contains("ah00094")
+    {
+        return true;
+    }
+    if l.contains("resuming normal operations") || l.contains("created child process") {
+        return true;
+    }
+    if l.contains("starting ") && l.contains("worker threads") {
+        return true;
+    }
+    if l.contains("sigusr1 received") || l.contains("graceful restart") {
+        return true;
+    }
+    false
+}
+
+fn is_errorish_log_line(line: &str) -> bool {
+    if is_benign_log_line(line) {
+        return false;
+    }
+    let l = line.to_ascii_lowercase();
+    l.contains("error")
+        || l.contains("emerg")
+        || l.contains("crit")
+        || l.contains("alert")
+        || l.contains("fatal")
+        || l.contains("failed")
+        || l.contains("refused")
+        || l.contains("cannot")
+        || l.contains("unable")
+        || l.contains("bind() to")
+        || l.contains("no listening sockets")
+}
+
+/// Fresh, non-benign log lines since `last_start_at` (best-effort).
+fn fresh_error_log_excerpt(paths: &Paths, apache: bool, since: Option<&str>) -> Option<String> {
     let candidates = if apache {
         vec![
             paths.logs.join("apache.err"),
@@ -226,12 +268,47 @@ fn server_log_hint(paths: &Paths, apache: bool) -> Option<String> {
         ]
     };
     for p in candidates {
-        let t = tail_log(&p, 240);
-        if !t.is_empty() {
-            return Some(format!("{}: {t}", p.file_name()?.to_string_lossy()));
+        let Ok(raw) = fs::read_to_string(&p) else {
+            continue;
+        };
+        let mut lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        if let Some(since) = since {
+            // Keep lines that appear after the start marker / timestamp substring when present.
+            if let Some(idx) = lines.iter().rposition(|l| l.contains(since)) {
+                lines = lines.split_off(idx.saturating_add(1));
+            }
+        }
+        let errors: Vec<&str> = lines
+            .into_iter()
+            .filter(|l| is_errorish_log_line(l))
+            .collect();
+        if errors.is_empty() {
+            continue;
+        }
+        let take = errors.len().saturating_sub(12);
+        let excerpt = errors[take..].join("\n");
+        if !excerpt.is_empty() {
+            return Some(excerpt);
         }
     }
     None
+}
+
+fn humanize_start_failure(server: &str, raw: &str) -> String {
+    let l = raw.to_ascii_lowercase();
+    if l.contains("port") && (l.contains("busy") || l.contains("in use") || l.contains("bind")) {
+        return format!("{server} could not bind — a port is already in use");
+    }
+    if l.contains("configtest") || l.contains("emerg") || l.contains("syntax") {
+        return format!("{server} failed to start due to a configuration error");
+    }
+    if l.contains("vcruntime") || l.contains("dll") || l.contains("not found") {
+        return format!("{server} failed to start — missing dependency or binary");
+    }
+    if l.contains("exited immediately") {
+        return format!("{server} exited immediately after start");
+    }
+    format!("{server} failed to start")
 }
 
 fn http_probe_ok(host: &str, port: u16, https: bool) -> bool {
@@ -247,8 +324,6 @@ fn http_probe_ok(host: &str, port: u16, https: bool) -> bool {
             "-k",
             "-sS",
             "--max-time",
-            "1",
-            "--connect-timeout",
             "1",
             "--resolve",
             &format!("{host}:{port}:127.0.0.1"),
@@ -292,6 +367,9 @@ fn http_probe_ok(host: &str, port: u16, https: bool) -> bool {
 
 /// TCP-connect the site's listen port and HTTP-probe the actual Open URL.
 /// Updates `site.status` to match (`running` / `error` / `stopped`).
+///
+/// When the stack is stopped (intentionally or never started), returns neutral
+/// `stopped` — never red with stale log tails. Errors only after a failed start.
 pub fn probe_site_reachability(
     paths: &Paths,
     state: &AppState,
@@ -318,17 +396,48 @@ pub fn probe_site_reachability(
             .unwrap_or(false)
     };
     let server_name = if apache { "Apache" } else { "Nginx" };
+    let stack_web_up = state
+        .runtime
+        .nginx_pid
+        .map(is_running)
+        .unwrap_or(false)
+        || state
+            .runtime
+            .apache_pid
+            .map(is_running)
+            .unwrap_or(false);
 
-    if !server_up {
-        let log = server_log_hint(paths, apache);
-        let message = match log {
-            Some(l) => format!("{server_name} is not running. {l}"),
-            None => format!("{server_name} process is not running"),
-        };
-        details.site.status = "error".into();
+    // Stopped stack → grey / neutral. Never surface stale apache.err / nginx error.log.
+    if !stack_web_up || !server_up {
+        if let Some(err) = state.runtime.last_start_error.as_deref() {
+            let excerpt = fresh_error_log_excerpt(
+                paths,
+                apache,
+                state.runtime.last_start_at.as_deref(),
+            );
+            details.site.status = "error".into();
+            return SiteReachability {
+                state: "error".into(),
+                message: Some(humanize_start_failure(server_name, err)),
+                log_excerpt: excerpt.or_else(|| {
+                    let t = err.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.chars().rev().take(800).collect::<String>().chars().rev().collect())
+                    }
+                }),
+                tcp_ok: false,
+                http_ok: false,
+                probed_url,
+                probed_port: port,
+            };
+        }
+        details.site.status = "stopped".into();
         return SiteReachability {
-            state: "error".into(),
-            message: Some(message),
+            state: "stopped".into(),
+            message: Some("Stack stopped — Start".into()),
+            log_excerpt: None,
             tcp_ok: false,
             http_ok: false,
             probed_url,
@@ -340,19 +449,18 @@ pub fn probe_site_reachability(
         TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(350))
             .is_ok();
     if !tcp_ok {
-        let log = server_log_hint(paths, apache);
-        let message = match log {
-            Some(l) => format!(
-                "{server_name} is up but nothing listens on :{port}. {l}"
-            ),
-            None => format!(
-                "{server_name} is up but nothing listens on 127.0.0.1:{port}"
-            ),
-        };
+        let excerpt = fresh_error_log_excerpt(
+            paths,
+            apache,
+            state.runtime.last_start_at.as_deref(),
+        );
         details.site.status = "error".into();
         return SiteReachability {
             state: "error".into(),
-            message: Some(message),
+            message: Some(format!(
+                "{server_name} is running but nothing listens on :{port}"
+            )),
+            log_excerpt: excerpt,
             tcp_ok: false,
             http_ok: false,
             probed_url,
@@ -368,6 +476,11 @@ pub fn probe_site_reachability(
             message: Some(format!(
                 "Port :{port} is open but {probed_url} did not return a valid HTTP response"
             )),
+            log_excerpt: fresh_error_log_excerpt(
+                paths,
+                apache,
+                state.runtime.last_start_at.as_deref(),
+            ),
             tcp_ok: true,
             http_ok: false,
             probed_url,
@@ -379,6 +492,7 @@ pub fn probe_site_reachability(
     SiteReachability {
         state: "running".into(),
         message: None,
+        log_excerpt: None,
         tcp_ok: true,
         http_ok: true,
         probed_url,

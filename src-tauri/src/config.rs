@@ -129,6 +129,15 @@ pub struct RuntimeState {
     /// Ephemeral banner after auto port remap (not required across restarts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_notice: Vec<String>,
+    /// True after a successful stop_stack until the next start attempt.
+    #[serde(default)]
+    pub stack_intentionally_stopped: bool,
+    /// ISO timestamp of the last start attempt (used to filter fresh log lines).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_start_at: Option<String>,
+    /// Human-readable last start failure (cleared on successful start/stop).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_start_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
