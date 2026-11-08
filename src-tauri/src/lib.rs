@@ -1,3 +1,4 @@
+pub mod applog;
 pub mod commands;
 pub mod config;
 pub mod downloads;
@@ -10,21 +11,22 @@ pub mod services;
 use std::sync::Arc;
 
 use commands::{
-    apply_dev_stack, apply_next_free_ports, backup_site_database, bootstrap_ctx,
-    check_service_ports_cmd, create_site_cmd, create_wordpress, download_site_database,
-    duplicate_site, export_all_databases_to_folder, export_database_to_folder, get_app_info,
-    get_backups_dir, get_databases_folder, get_db_files_settings, get_hosts_status, get_ports_config,
-    get_service_log, get_site_details, get_sites, get_stack_status, get_templates,
-    import_database_from_folder, import_site_database_file, install_package, list_database_files,
-    list_installed, list_managed_services_cmd, list_package_versions, list_packages,
-    delete_site_cmd, list_php_extension_settings, list_site_details,
-    list_site_details_probed, mark_template, probe_all_site_reachability,
-    mint_phpmyadmin_signon_url, open_path_cmd, prefetch_version_lists,
+    append_app_log, apply_dev_stack, apply_next_free_ports, backup_site_database, bootstrap_ctx,
+    check_service_ports_cmd, clear_app_log_error_count, clear_app_logs, create_site_cmd,
+    create_wordpress, delete_site_cmd, download_site_database, duplicate_site,
+    export_all_databases_to_folder, export_database_to_folder, get_app_info, get_app_log_error_count,
+    get_app_logs, get_backups_dir, get_databases_folder, get_db_files_settings,
+    get_developer_settings, get_hosts_status, get_ports_config, get_service_log, get_site_details,
+    get_sites, get_stack_status, get_templates, import_database_from_folder,
+    import_site_database_file, install_package, list_database_files, list_installed,
+    list_managed_services_cmd, list_package_versions, list_packages, list_php_extension_settings,
+    list_site_details, list_site_details_probed, mark_template, mint_phpmyadmin_signon_url,
+    open_app_log_folder, open_path_cmd, prefetch_version_lists, probe_all_site_reachability,
     register_system_php_cmd, repair_hosts, restore_site_database, reveal_path_cmd,
     seed_site_large_table, set_coexistence_mode, set_php_manifest_url, set_php_xdebug,
     start_dev_stack, start_managed_service, stop_dev_stack, stop_managed_service,
-    uninstall_package, update_db_files_settings, update_package, update_ports_config,
-    update_site_environment,
+    uninstall_package, update_db_files_settings, update_developer_settings, update_package,
+    update_ports_config, update_site_environment,
 };
 use config::default_data_root;
 use services::db_files::{
@@ -170,6 +172,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(ctx)
+        .setup(|app| {
+            crate::applog::attach_app(app.handle().clone());
+            crate::applog::info("app", "Tauri setup complete");
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             get_backups_dir,
@@ -225,6 +232,14 @@ pub fn run() {
             delete_site_cmd,
             open_path_cmd,
             reveal_path_cmd,
+            get_app_logs,
+            get_app_log_error_count,
+            clear_app_logs,
+            clear_app_log_error_count,
+            open_app_log_folder,
+            append_app_log,
+            get_developer_settings,
+            update_developer_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");

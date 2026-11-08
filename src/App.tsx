@@ -6,9 +6,11 @@ import { PhpPage } from "./pages/PhpPage";
 import { JavaScriptPage } from "./pages/JavaScriptPage";
 import { ServicesPage } from "./pages/ServicesPage";
 import { SitesPage } from "./pages/SitesPage";
+import { LogsPage } from "./pages/LogsPage";
 import { AboutPage } from "./pages/AboutPage";
 import { AppDataProvider, useAppData } from "./store/AppData";
-import type { SectionId } from "./types";
+import * as client from "./client";
+import type { DeveloperSettings, SectionId } from "./types";
 
 const TITLES: Record<SectionId, string> = {
   general: "General",
@@ -16,6 +18,7 @@ const TITLES: Record<SectionId, string> = {
   javascript: "JavaScript",
   services: "Services",
   sites: "Sites",
+  logs: "Logs",
   ai: "AI",
   pro: "Pro",
   sharing: "Sharing",
@@ -24,7 +27,7 @@ const TITLES: Record<SectionId, string> = {
 };
 
 /** Sections kept mounted (hidden) after first visit so local + cached state survives. */
-const KEEP_ALIVE: SectionId[] = ["sites", "services", "php", "javascript"];
+const KEEP_ALIVE: SectionId[] = ["sites", "services", "php", "javascript", "logs"];
 
 const SECTIONS = Object.keys(TITLES) as SectionId[];
 
@@ -74,8 +77,29 @@ function AppShell() {
   const [visited, setVisited] = useState<Set<SectionId>>(
     () => new Set<SectionId>([sectionFromHash()]),
   );
+  const [developer, setDeveloper] = useState<DeveloperSettings>({
+    showLogsTab: true,
+    redactSecrets: false,
+  });
+  const [logErrors, setLogErrors] = useState(0);
   const { sites } = useAppData();
   const sitesBusy = sites.refreshing || sites.probing;
+
+  useEffect(() => {
+    void client.getDeveloperSettings().then(setDeveloper).catch(() => {});
+    void client.getAppLogErrorCount().then(setLogErrors).catch(() => {});
+    let unlisten = () => {};
+    void client
+      .onAppLog((entry) => {
+        if (entry.level === "error") {
+          setLogErrors((n) => n + 1);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => unlisten();
+  }, []);
 
   useEffect(() => {
     const onHash = () => {
@@ -118,9 +142,22 @@ function AppShell() {
 
   const ephemeral = !KEEP_ALIVE.includes(section);
 
+  const selectLogged = (id: SectionId) => {
+    void client
+      .appendAppLog("info", "ui", `sidebar select ${id}`)
+      .catch(() => {});
+    if (id === "logs") setLogErrors(0);
+    select(id);
+  };
+
   return (
     <div className="app-shell">
-      <Sidebar active={section} onSelect={select} />
+      <Sidebar
+        active={section}
+        onSelect={selectLogged}
+        showLogsTab={developer.showLogsTab}
+        logErrorCount={section === "logs" ? 0 : logErrors}
+      />
       <main className="content">
         <PageHeader
           title={TITLES[section]}
@@ -149,9 +186,14 @@ function AppShell() {
           <KeepAlivePane id="javascript" active={section} visited={visited}>
             <JavaScriptPage />
           </KeepAlivePane>
+          <KeepAlivePane id="logs" active={section} visited={visited}>
+            <LogsPage active={section === "logs"} />
+          </KeepAlivePane>
           {ephemeral ? (
             <>
-              {section === "general" && <GeneralPage />}
+              {section === "general" && (
+                <GeneralPage onDeveloperChange={setDeveloper} />
+              )}
               {section === "ai" && (
                 <PlaceholderPage
                   title="AI"

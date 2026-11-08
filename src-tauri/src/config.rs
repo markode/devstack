@@ -31,9 +31,30 @@ pub struct AppState {
     pub runtime: RuntimeState,
     /// Plain-file database exports (Databases folder)
     pub db_files: DatabaseFilesSettings,
+    /// Developer / diagnostics preferences (Logs tab, redaction).
+    pub developer: DeveloperSettings,
     /// Set after the first-launch `welcome.test` site has been seeded (or
     /// skipped). Prevents recreating the site after the user deletes it.
     pub welcome_site_seeded: bool,
+}
+
+/// Developer diagnostics — full-fidelity Logs during development.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DeveloperSettings {
+    /// Show the Logs sidebar tab (default ON for development).
+    pub show_logs_tab: bool,
+    /// When true, scrub passwords/tokens from log lines (default OFF for development).
+    pub redact_secrets: bool,
+}
+
+impl Default for DeveloperSettings {
+    fn default() -> Self {
+        Self {
+            show_logs_tab: true,
+            redact_secrets: false,
+        }
+    }
 }
 
 /// Settings for the user-facing Databases folder (portable dumps, not raw datadirs).

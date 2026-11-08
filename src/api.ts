@@ -1,15 +1,18 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
   BackupResult,
   CreateWordPressRequest,
   CreateWordPressResult,
+  DeveloperSettings,
   DuplicateRequest,
   DuplicateResult,
   InstalledPackage,
   JobProgress,
   HostsStatus,
+  LogEntry,
+  LogLevel,
   PackageInfo,
   PhpExtensionView,
   ProgressEvent,
@@ -26,6 +29,58 @@ export const isTauri = (): boolean =>
   typeof window !== "undefined" &&
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Boolean((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__);
+
+const SILENT = new Set(["append_app_log", "get_app_logs", "get_app_log_error_count"]);
+
+/** Log every Tauri command call + full args/result/error (dev default: no redaction). */
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const silent = SILENT.has(cmd);
+  if (!silent) {
+    try {
+      await tauriInvoke("append_app_log", {
+        level: "info",
+        source: "command",
+        message: `→ ${cmd} ${JSON.stringify(args ?? {})}`,
+      });
+    } catch {
+      /* logger not ready */
+    }
+  }
+  try {
+    const result = await tauriInvoke<T>(cmd, args);
+    if (!silent) {
+      try {
+        const summary =
+          result === undefined || result === null
+            ? "null"
+            : typeof result === "object"
+              ? JSON.stringify(result).slice(0, 2000)
+              : String(result).slice(0, 2000);
+        await tauriInvoke("append_app_log", {
+          level: "info",
+          source: "command",
+          message: `← ${cmd} ok ${summary}`,
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+    return result;
+  } catch (e) {
+    if (!silent) {
+      try {
+        await tauriInvoke("append_app_log", {
+          level: "error",
+          source: "command",
+          message: `← ${cmd} error ${e instanceof Error ? e.stack ?? e.message : String(e)}`,
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+    throw e;
+  }
+}
 
 export async function getAppInfo(): Promise<AppInfo> {
   return invoke<AppInfo>("get_app_info");
@@ -340,4 +395,52 @@ export async function mintPhpmyadminSignonUrl(
   siteId: string,
 ): Promise<string> {
   return invoke<string>("mint_phpmyadmin_signon_url", { siteId });
+}
+
+export async function getAppLogs(limit?: number): Promise<LogEntry[]> {
+  return invoke<LogEntry[]>("get_app_logs", { limit: limit ?? null });
+}
+
+export async function getAppLogErrorCount(): Promise<number> {
+  return invoke<number>("get_app_log_error_count");
+}
+
+export async function clearAppLogs(): Promise<void> {
+  return invoke("clear_app_logs");
+}
+
+export async function clearAppLogErrorCount(): Promise<void> {
+  return invoke("clear_app_log_error_count");
+}
+
+export async function openAppLogFolder(): Promise<string> {
+  return invoke<string>("open_app_log_folder");
+}
+
+export async function appendAppLog(
+  level: LogLevel,
+  source: string,
+  message: string,
+): Promise<void> {
+  return tauriInvoke("append_app_log", { level, source, message });
+}
+
+export async function onAppLog(
+  handler: (entry: LogEntry) => void,
+): Promise<UnlistenFn> {
+  return listen<LogEntry>("app-log", (ev) => handler(ev.payload));
+}
+
+export async function getDeveloperSettings(): Promise<DeveloperSettings> {
+  return invoke<DeveloperSettings>("get_developer_settings");
+}
+
+export async function updateDeveloperSettings(patch: {
+  showLogsTab?: boolean;
+  redactSecrets?: boolean;
+}): Promise<DeveloperSettings> {
+  return invoke<DeveloperSettings>("update_developer_settings", {
+    showLogsTab: patch.showLogsTab ?? null,
+    redactSecrets: patch.redactSecrets ?? null,
+  });
 }

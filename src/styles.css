@@ -1237,3 +1237,134 @@ select.native {
   margin-top: 18px;
   font-size: 12px;
 }
+
+/* --- Logs tab --- */
+.logs-page {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: calc(100vh - 120px);
+}
+
+.logs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.logs-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.logs-filter select,
+.logs-search {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--card-border, #e5e5ea);
+  background: #fff;
+  min-width: 110px;
+}
+
+.logs-search {
+  flex: 1 1 160px;
+  min-width: 140px;
+}
+
+.logs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.logs-meta {
+  font-size: 11px;
+}
+
+.logs-viewport {
+  flex: 1;
+  min-height: 360px;
+  max-height: calc(100vh - 200px);
+  overflow: auto;
+  border: 1px solid var(--card-border, #e5e5ea);
+  border-radius: 8px;
+  background: #1e1e22;
+  color: #e8e8ed;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.logs-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.logs-window {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+}
+
+.logs-row {
+  display: grid;
+  grid-template-columns: 88px 48px 72px 1fr;
+  gap: 8px;
+  padding: 0 10px;
+  align-items: center;
+  white-space: nowrap;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.logs-row .logs-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.logs-row.level-info .logs-level {
+  color: #8e8e93;
+}
+
+.logs-row.level-warn {
+  background: rgba(255, 149, 0, 0.08);
+}
+
+.logs-row.level-warn .logs-level {
+  color: #ff9f0a;
+}
+
+.logs-row.level-error {
+  background: rgba(255, 59, 48, 0.12);
+}
+
+.logs-row.level-error .logs-level {
+  color: #ff453a;
+}
+
+.logs-ts {
+  color: #8e8e93;
+}
+
+.logs-source {
+  color: #64d2ff;
+}
+
+.nav-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ff3b30;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-grid;
+  place-items: center;
+}

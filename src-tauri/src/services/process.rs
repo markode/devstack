@@ -145,9 +145,20 @@ pub fn spawn_logged_env(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.spawn().map_err(|e| {
+    let child = cmd.spawn().map_err(|e| {
+        crate::applog::error(
+            "process",
+            format!("failed to spawn {}: {e:#}", program.display()),
+        );
         DevStackError::Message(format!("failed to spawn {}: {e}", program.display()))
-    })
+    })?;
+    let pid = child.id();
+    let source = crate::applog::source_from_log_path(log_err);
+    crate::applog::process_spawn(source, program, args, envs, pid);
+    // Stream raw stdout/stderr into the live log ring.
+    crate::applog::tail_file(log_out.to_path_buf(), source);
+    crate::applog::tail_file(log_err.to_path_buf(), source);
+    Ok(child)
 }
 
 pub fn run_capture(program: &Path, args: &[&str], cwd: Option<&Path>) -> Result<String> {

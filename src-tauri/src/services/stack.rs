@@ -126,6 +126,9 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
         auto_separate_busy_ports(&mut state.stack, &owned, &runtime_snap);
     if remap.changed {
         state.runtime.port_notice = remap.messages.clone();
+        for msg in &remap.messages {
+            crate::applog::info("ports", msg);
+        }
         save_state(&paths.state_file, state)?;
     }
 

@@ -382,3 +382,63 @@ export async function mintPhpmyadminSignonUrl(siteId: string): Promise<string> {
 }
 
 export { useMock };
+
+export async function getAppLogs(limit?: number) {
+  if (useMock()) return mock.mockGetAppLogs(limit);
+  return api.getAppLogs(limit);
+}
+
+export async function getAppLogErrorCount() {
+  if (useMock()) return mock.mockLogState.errorCount;
+  return api.getAppLogErrorCount();
+}
+
+export async function clearAppLogs() {
+  if (useMock()) return mock.mockClearAppLogs();
+  return api.clearAppLogs();
+}
+
+export async function clearAppLogErrorCount() {
+  if (useMock()) {
+    mock.mockLogState.errorCount = 0;
+    return;
+  }
+  return api.clearAppLogErrorCount();
+}
+
+export async function openAppLogFolder() {
+  if (useMock()) return "/tmp/DevStack/logs";
+  return api.openAppLogFolder();
+}
+
+export async function appendAppLog(
+  level: import("./types").LogLevel,
+  source: string,
+  message: string,
+) {
+  if (useMock()) return mock.mockAppendAppLog(level, source, message);
+  return api.appendAppLog(level, source, message);
+}
+
+export async function onAppLog(
+  handler: (entry: import("./types").LogEntry) => void,
+) {
+  if (useMock()) return () => {};
+  return api.onAppLog(handler);
+}
+
+export async function getDeveloperSettings() {
+  if (useMock()) return { ...mock.mockDeveloperSettingsState };
+  return api.getDeveloperSettings();
+}
+
+export async function updateDeveloperSettings(patch: {
+  showLogsTab?: boolean;
+  redactSecrets?: boolean;
+}) {
+  if (useMock()) {
+    Object.assign(mock.mockDeveloperSettingsState, patch);
+    return { ...mock.mockDeveloperSettingsState };
+  }
+  return api.updateDeveloperSettings(patch);
+}

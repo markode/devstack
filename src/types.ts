@@ -4,11 +4,27 @@ export type SectionId =
   | "javascript"
   | "services"
   | "sites"
+  | "logs"
   | "ai"
   | "pro"
   | "sharing"
   | "shortcuts"
   | "about";
+
+export type LogLevel = "info" | "warn" | "error";
+
+export interface LogEntry {
+  id: number;
+  ts: string;
+  level: LogLevel;
+  source: string;
+  message: string;
+}
+
+export interface DeveloperSettings {
+  showLogsTab: boolean;
+  redactSecrets: boolean;
+}
 
 export interface PackageInfo {
   id: string;
@@ -136,6 +152,7 @@ export interface AppInfo {
   arch: string;
   phpManifestUrl?: string | null;
   stack?: StackStatus;
+  developer?: DeveloperSettings;
 }
 
 export interface DatabaseFilesSettings {
