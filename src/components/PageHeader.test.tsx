@@ -7,7 +7,7 @@ describe("PageHeader", () => {
     render(
       <PageHeader title="Sites" meta="2 sites" refreshing />,
     );
-    expect(screen.getByTestId("page-header-title")).toHaveTextContent("Sites");
+    expect(screen.getByTestId("page-header-title").textContent).toBe("Sites");
     expect(screen.getByText("2 sites")).toBeTruthy();
     expect(screen.getByTestId("sites-header-loader")).toBeTruthy();
   });
