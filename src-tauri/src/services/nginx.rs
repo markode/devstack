@@ -385,8 +385,11 @@ pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
     std::mem::forget(child);
     write_pid(&paths.pid_file("nginx"), pid)?;
     state.runtime.nginx_pid = Some(pid);
+    // Only mark Nginx-backed sites running — Apache sites keep their own status.
     for site in &mut state.sites {
-        site.status = "running".into();
+        if !crate::services::httpd::site_uses_apache(site) {
+            site.status = "running".into();
+        }
     }
     Ok(())
 }
@@ -456,7 +459,9 @@ pub fn stop_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
         let _ = stop_pid(pid);
     }
     for site in &mut state.sites {
-        site.status = "stopped".into();
+        if !crate::services::httpd::site_uses_apache(site) {
+            site.status = "stopped".into();
+        }
     }
     Ok(())
 }

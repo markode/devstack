@@ -147,15 +147,20 @@ pub fn port_is_free(port: u16) -> bool {
 }
 
 pub fn find_next_free(start: u16, candidates: &[u16]) -> u16 {
+    find_next_free_excluding(start, candidates, &[])
+}
+
+pub fn find_next_free_excluding(start: u16, candidates: &[u16], reserved: &[u16]) -> u16 {
+    let ok = |p: u16| p != start && !reserved.contains(&p) && port_is_free(p);
     for &p in candidates {
-        if p != start && port_is_free(p) {
+        if ok(p) {
             return p;
         }
     }
     // Walk upward from start+1
     let mut p = start.saturating_add(1).max(1024);
     for _ in 0..200 {
-        if port_is_free(p) {
+        if ok(p) {
             return p;
         }
         p = p.saturating_add(1);
@@ -163,12 +168,34 @@ pub fn find_next_free(start: u16, candidates: &[u16]) -> u16 {
     start
 }
 
+/// Ports already claimed by other DevStack services — never steal these when remapping.
+fn stack_reserved_ports(stack: &StackPreferences, except: &[&str]) -> Vec<u16> {
+    let mut all = vec![
+        ("nginxHttp", stack.http_port),
+        ("nginxHttps", stack.https_port),
+        ("apacheHttp", stack.apache_http_port),
+        ("apacheHttps", stack.apache_https_port),
+        ("mysql", stack.mysql_port),
+        ("mariadb", stack.mariadb_port),
+        ("postgresql", stack.postgresql_port),
+        ("mongodb", stack.mongodb_port),
+        ("phpFpm", stack.php_fpm_port),
+    ];
+    all.retain(|(name, _)| !except.contains(name));
+    let mut ports: Vec<u16> = all.into_iter().map(|(_, p)| p).collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
 fn candidate_ports_for(field: &str, current: u16) -> Vec<u16> {
     let presets: &[u16] = match field {
         "nginxHttp" | "http" => &[8080, 8081, 8888, 8000, 9080],
-        "nginxHttps" | "https" => &[8443, 8444, 9443, 8445],
+        // Keep clear of Apache defaults (8088/8444).
+        "nginxHttps" | "https" => &[8443, 9443, 8445, 9445],
         "apacheHttp" => &[8088, 8089, 9088, 8008],
-        "apacheHttps" => &[8444, 8445, 9444, 8446],
+        // Keep clear of Nginx defaults (8080/8443).
+        "apacheHttps" => &[8444, 9444, 8446, 9446],
         "mysql" => &[3307, 3308, 3309, 3310],
         "mariadb" => &[3308, 3307, 3309, 3311],
         "postgresql" => &[5433, 5434, 5435],
@@ -459,6 +486,289 @@ pub fn ensure_ports_free(stack: &StackPreferences, service_id: &str) -> Result<(
     )))
 }
 
+/// Result of silently remapping ports that are held by WAMP/MAMP/IIS/etc.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PortRemapNotice {
+    pub changed: bool,
+    /// Short lines for the Sites banner, e.g. `WAMP detected on :80, DevStack uses :8080`.
+    pub messages: Vec<String>,
+    pub previous: Option<PortsConfig>,
+    pub current: Option<PortsConfig>,
+}
+
+/// Snapshot of ports used when rewriting WordPress siteurl/home after a remap.
+#[derive(Debug, Clone, Copy)]
+pub struct PortSnapshot {
+    pub nginx_http: u16,
+    pub nginx_https: u16,
+    pub apache_http: u16,
+    pub apache_https: u16,
+}
+
+impl PortSnapshot {
+    pub fn from_stack(stack: &StackPreferences) -> Self {
+        Self {
+            nginx_http: stack.http_port,
+            nginx_https: stack.https_port,
+            apache_http: stack.apache_http_port,
+            apache_https: stack.apache_https_port,
+        }
+    }
+}
+
+/// True when the occupant is a DevStack-owned listener (master **or** worker).
+///
+/// On Windows, nginx/httpd workers (not the stored master PID) often own the
+/// TCP listen socket — matching only `owned_pids` false-triggered remaps onto
+/// Apache's 8444 mid-stack.
+fn occupant_is_ours(occ: &PortOccupant, owned_pids: &[u32], runtime: &crate::config::RuntimeState) -> bool {
+    if let Some(pid) = occ.pid {
+        if owned_pids.contains(&pid) {
+            return true;
+        }
+    }
+    let name = occ
+        .process_name
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    if runtime.nginx_pid.is_some() && name.contains("nginx") {
+        return true;
+    }
+    if runtime.apache_pid.is_some()
+        && (name.contains("httpd") || name.contains("apache"))
+    {
+        return true;
+    }
+    if runtime.database_pid.is_some()
+        && (name.contains("mysqld")
+            || name.contains("mariadbd")
+            || name.contains("mariadb")
+            || name.contains("mysql"))
+    {
+        return true;
+    }
+    false
+}
+
+/// True when `port` is listening and the listener is **not** one of ours.
+fn foreign_occupant(
+    port: u16,
+    owned_pids: &[u32],
+    runtime: &crate::config::RuntimeState,
+) -> Option<PortOccupant> {
+    if port_is_free(port) {
+        return None;
+    }
+    let occ = inspect_port(port);
+    if occupant_is_ours(&occ, owned_pids, runtime) {
+        return None;
+    }
+    Some(occ)
+}
+
+fn who_label(occ: &PortOccupant) -> String {
+    occ.hint
+        .clone()
+        .or_else(|| occ.process_name.clone())
+        .unwrap_or_else(|| "another process".into())
+}
+
+/// On startup / start-stack: if ports we want are held by a **foreign** process
+/// (WAMP/MAMP/IIS/Skype/… — not our own nginx/httpd/mysqld), automatically pick
+/// free ports, persist coexistence, and return a banner notice.
+///
+/// `owned_pids` must include live DevStack service PIDs so a running stack is
+/// never treated as a conflict with itself (that previously remapped 8443→8444
+/// onto Apache mid-flight).
+///
+/// Does **not** fail when ports are busy — it remaps instead. Callers should
+/// rewrite WP URLs when `changed` is true.
+pub fn auto_separate_busy_ports(
+    stack: &mut StackPreferences,
+    owned_pids: &[u32],
+    runtime: &crate::config::RuntimeState,
+) -> PortRemapNotice {
+    let previous = PortsConfig::from_stack(stack);
+    let before = PortSnapshot::from_stack(stack);
+    let mut messages = Vec::new();
+
+    // --- Nginx ---
+    let nginx_http_foreign = foreign_occupant(stack.http_port, owned_pids, runtime);
+    let nginx_https_foreign = foreign_occupant(stack.https_port, owned_pids, runtime);
+    if nginx_http_foreign.is_some() || nginx_https_foreign.is_some() {
+        let prefer_alt = (stack.http_port == 80 || stack.https_port == 443)
+            && port_is_free(ALT_HTTP)
+            && port_is_free(ALT_HTTPS);
+        let reserved = stack_reserved_ports(stack, &["nginxHttp", "nginxHttps"]);
+        let new_http = if prefer_alt {
+            ALT_HTTP
+        } else if nginx_http_foreign.is_some() {
+            find_next_free_excluding(
+                stack.http_port,
+                &candidate_ports_for("nginxHttp", stack.http_port),
+                &reserved,
+            )
+        } else {
+            stack.http_port
+        };
+        let new_https = if prefer_alt {
+            ALT_HTTPS
+        } else if nginx_https_foreign.is_some() {
+            find_next_free_excluding(
+                stack.https_port,
+                &candidate_ports_for("nginxHttps", stack.https_port),
+                &reserved,
+            )
+        } else {
+            stack.https_port
+        };
+        if let Some(occ) = nginx_http_foreign {
+            messages.push(format!(
+                "{} detected on :{}, DevStack uses :{new_http}",
+                who_label(&occ),
+                occ.port
+            ));
+        }
+        if let Some(occ) = nginx_https_foreign {
+            messages.push(format!(
+                "{} detected on :{}, DevStack uses :{new_https}",
+                who_label(&occ),
+                occ.port
+            ));
+        }
+        stack.http_port = new_http;
+        stack.https_port = new_https;
+    }
+
+    // --- Apache ---
+    let apache_http_foreign =
+        foreign_occupant(stack.apache_http_port, owned_pids, runtime);
+    let apache_https_foreign =
+        foreign_occupant(stack.apache_https_port, owned_pids, runtime);
+    if apache_http_foreign.is_some() || apache_https_foreign.is_some() {
+        let reserved = stack_reserved_ports(stack, &["apacheHttp", "apacheHttps"]);
+        let new_http = if apache_http_foreign.is_some() {
+            find_next_free_excluding(
+                stack.apache_http_port,
+                &candidate_ports_for("apacheHttp", stack.apache_http_port),
+                &reserved,
+            )
+        } else {
+            stack.apache_http_port
+        };
+        let new_https = if apache_https_foreign.is_some() {
+            find_next_free_excluding(
+                stack.apache_https_port,
+                &candidate_ports_for("apacheHttps", stack.apache_https_port),
+                &reserved,
+            )
+        } else {
+            stack.apache_https_port
+        };
+        if let Some(occ) = apache_http_foreign {
+            messages.push(format!(
+                "{} detected on :{}, DevStack uses :{new_http}",
+                who_label(&occ),
+                occ.port
+            ));
+        }
+        if let Some(occ) = apache_https_foreign {
+            messages.push(format!(
+                "{} detected on :{}, DevStack uses :{new_https}",
+                who_label(&occ),
+                occ.port
+            ));
+        }
+        stack.apache_http_port = new_http;
+        stack.apache_https_port = new_https;
+    }
+
+    // --- MySQL / MariaDB ---
+    if let Some(occ) = foreign_occupant(stack.mysql_port, owned_pids, runtime) {
+        let alt = if stack.mysql_port == 3306 && port_is_free(ALT_MYSQL) {
+            ALT_MYSQL
+        } else {
+            find_next_free(stack.mysql_port, &candidate_ports_for("mysql", stack.mysql_port))
+        };
+        messages.push(format!(
+            "{} detected on :{}, DevStack uses :{alt}",
+            who_label(&occ),
+            occ.port
+        ));
+        stack.mysql_port = alt;
+    }
+    if let Some(occ) = foreign_occupant(stack.mariadb_port, owned_pids, runtime) {
+        let alt = if stack.mariadb_port == 3306 && port_is_free(ALT_MARIADB) {
+            ALT_MARIADB
+        } else {
+            find_next_free(
+                stack.mariadb_port,
+                &candidate_ports_for("mariadb", stack.mariadb_port),
+            )
+        };
+        messages.push(format!(
+            "{} detected on :{}, DevStack uses :{alt}",
+            who_label(&occ),
+            occ.port
+        ));
+        stack.mariadb_port = alt;
+    }
+
+    let after = PortSnapshot::from_stack(stack);
+    let changed = before.nginx_http != after.nginx_http
+        || before.nginx_https != after.nginx_https
+        || before.apache_http != after.apache_http
+        || before.apache_https != after.apache_https
+        || previous.mysql != stack.mysql_port
+        || previous.mariadb != stack.mariadb_port;
+
+    if changed {
+        stack.coexistence_mode = true;
+        let mut seen = std::collections::HashSet::new();
+        messages.retain(|m| seen.insert(m.clone()));
+    } else {
+        messages.clear();
+    }
+
+    PortRemapNotice {
+        changed,
+        messages,
+        previous: if changed {
+            Some(previous)
+        } else {
+            None
+        },
+        current: Some(PortsConfig::from_stack(stack)),
+    }
+}
+
+/// Collect PIDs DevStack currently owns so auto-separate ignores our listeners.
+pub fn owned_runtime_pids(runtime: &crate::config::RuntimeState) -> Vec<u32> {
+    let mut pids = Vec::new();
+    for p in [
+        runtime.nginx_pid,
+        runtime.apache_pid,
+        runtime.dns_pid,
+        runtime.database_pid,
+        runtime.mongodb_pid,
+        runtime.postgresql_pid,
+        runtime.redis_pid,
+        runtime.mailpit_pid,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        pids.push(p);
+    }
+    pids.extend(runtime.php_pids.values().copied());
+    pids
+}
+
 pub fn parse_ports_patch(value: &serde_json::Value) -> Result<PortsConfig> {
     serde_json::from_value(value.clone())
         .map_err(|e| DevStackError::Message(format!("invalid ports config: {e}")))
@@ -560,6 +870,64 @@ mod tests {
         apply_suggested_ports(&mut stack, &suggested).unwrap();
         assert_eq!(stack.http_port, 8080);
         assert_eq!(stack.mysql_port, 3307);
+    }
+
+    #[test]
+    fn auto_separate_remaps_busy_classic_ports() {
+        let _holders: Vec<TcpListener> = [80u16, 443, 3306]
+            .into_iter()
+            .filter_map(|p| TcpListener::bind(("127.0.0.1", p)).ok())
+            .collect();
+        if _holders.is_empty() {
+            // Environment cannot bind classic ports — skip quietly.
+            return;
+        }
+        let mut stack = StackPreferences::default();
+        assert_eq!(stack.http_port, 80);
+        // Empty owned_pids + empty runtime → holder looks foreign (WAMP-like).
+        let runtime = crate::config::RuntimeState::default();
+        let notice = auto_separate_busy_ports(&mut stack, &[], &runtime);
+        assert!(notice.changed, "expected remap when classic ports held");
+        assert!(stack.coexistence_mode);
+        if !port_is_free(80) {
+            assert_ne!(stack.http_port, 80);
+        }
+        if !port_is_free(443) {
+            assert_ne!(stack.https_port, 443);
+        }
+        if !port_is_free(3306) {
+            assert!(stack.mysql_port != 3306 || stack.mariadb_port != 3306);
+        }
+        assert!(!notice.messages.is_empty());
+    }
+
+    #[test]
+    fn auto_separate_ignores_owned_pids() {
+        let holder = match TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let port = holder.local_addr().unwrap().port();
+        let mut stack = StackPreferences::default();
+        stack.http_port = port;
+        stack.https_port = ALT_HTTPS;
+        let runtime = crate::config::RuntimeState::default();
+        // Without owned pid → remaps away from `port`.
+        let notice = auto_separate_busy_ports(&mut stack, &[], &runtime);
+        assert!(notice.changed);
+        assert_ne!(stack.http_port, port);
+
+        // Reset and claim the listener as ours → no remap.
+        stack.http_port = port;
+        stack.coexistence_mode = false;
+        let occ = inspect_port(port);
+        let owned = occ.pid.map(|p| vec![p]).unwrap_or_default();
+        if owned.is_empty() {
+            return; // platform couldn't resolve pid
+        }
+        let notice = auto_separate_busy_ports(&mut stack, &owned, &runtime);
+        assert!(!notice.changed, "must not remap ports we ourselves hold");
+        assert_eq!(stack.http_port, port);
     }
 
     #[test]

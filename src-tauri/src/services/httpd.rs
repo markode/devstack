@@ -566,6 +566,7 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
     for site in state.sites.iter_mut().filter(|s| site_uses_apache(s)) {
         site.status = "running".into();
     }
+    // Clear stale error/warning once the listener is confirmed ready.
     Ok(())
 }
 

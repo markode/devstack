@@ -126,6 +126,9 @@ pub struct RuntimeState {
     pub postgresql_pid: Option<u32>,
     pub redis_pid: Option<u32>,
     pub mailpit_pid: Option<u32>,
+    /// Ephemeral banner after auto port remap (not required across restarts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_notice: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -133,6 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if e2e {
         run_persistence_and_sites_smoke(&ctx, skip_mariadb).await?;
+        run_wamp_coexist_smoke(&ctx, skip_mariadb).await?;
+        run_status_error_smoke(&ctx).await?;
     }
 
     Ok(())
@@ -1535,6 +1537,227 @@ async fn run_persistence_and_sites_smoke(
     }
 
     println!("SMOKE PASS: persistence + empty site + PMA token");
+    Ok(())
+}
+
+/// Occupy 80/443/3306 like WAMP, then start stack and assert auto-picked ports + WP fetch.
+async fn run_wamp_coexist_smoke(
+    ctx: &DevStackCtx,
+    skip_mariadb: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::ports::port_is_free;
+    use devstack_lib::services::sites::{detect_site, enrich_site_details};
+    use std::net::TcpListener;
+
+    println!("=== WAMP coexistence smoke (busy 80/443/3306) ===");
+    {
+        let mut state = ctx.state.lock().await;
+        let _ = stop_stack(&ctx.paths, &mut state);
+    }
+
+    // Hold classic ports the way WAMP/IIS would.
+    let mut holders = Vec::new();
+    for port in [80u16, 443, 3306] {
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => {
+                println!("holding 127.0.0.1:{port}");
+                holders.push(l);
+            }
+            Err(e) => {
+                println!("could not bind :{port} ({e}) — skipping hold (may already be busy)");
+            }
+        }
+    }
+    if holders.is_empty() {
+        println!("WAMP coexist smoke skipped — could not hold any classic ports");
+        return Ok(());
+    }
+
+    // Reset to classic defaults so auto_separate must remap.
+    {
+        let mut state = ctx.state.lock().await;
+        state.stack.http_port = 80;
+        state.stack.https_port = 443;
+        state.stack.apache_http_port = 8088;
+        state.stack.apache_https_port = 8444;
+        state.stack.mysql_port = 3306;
+        state.stack.mariadb_port = 3306;
+        state.stack.coexistence_mode = false;
+        state.runtime.port_notice.clear();
+    }
+
+    // Install packages if needed, but do not pre-force 8080 — apply_stack remaps.
+    if cfg!(windows) || {
+        let state = ctx.state.lock().await;
+        !state.installed.contains_key("php")
+    } {
+        // Reuse ensure_stack's package installs without its forced ports: call parts via ensure.
+        // Briefly set alt ports so package install/start during ensure_stack won't collide,
+        // then reset again before the real apply.
+        {
+            let mut state = ctx.state.lock().await;
+            state.stack.http_port = 8080;
+            state.stack.https_port = 8443;
+            state.stack.mariadb_port = 3308;
+        }
+        ensure_stack(ctx, skip_mariadb).await?;
+        {
+            let mut state = ctx.state.lock().await;
+            let _ = stop_stack(&ctx.paths, &mut state);
+            state.stack.http_port = 80;
+            state.stack.https_port = 443;
+            state.stack.apache_http_port = 8088;
+            state.stack.apache_https_port = 8444;
+            state.stack.mysql_port = 3306;
+            state.stack.mariadb_port = 3306;
+            state.stack.coexistence_mode = false;
+        }
+    }
+
+    let status = {
+        let mut state = ctx.state.lock().await;
+        apply_stack(&ctx.paths, &mut state)?
+    };
+    println!(
+        "after auto-separate: nginx={}/{} apache={}/{} coexistence={} notice={:?}",
+        status.http_port,
+        status.https_port,
+        status.apache_http_port,
+        status.apache_https_port,
+        status.coexistence_mode,
+        status.port_notice
+    );
+    if status.http_port == 80 || status.https_port == 443 {
+        // If holders failed for those ports, skip hard assert.
+        if !port_is_free(80) || !port_is_free(443) {
+            return Err(format!(
+                "expected auto-separate off 80/443, got {}/{}",
+                status.http_port, status.https_port
+            )
+            .into());
+        }
+    }
+    if !status.coexistence_mode {
+        return Err("expected coexistence_mode after busy classic ports".into());
+    }
+    if status.port_notice.is_empty() {
+        println!("warning: port_notice empty (still remapped)");
+    }
+
+    let progress = noop_job_progress();
+    let created = {
+        let mut state = ctx.state.lock().await;
+        let php_ver = state
+            .installed
+            .get("php")
+            .and_then(|v| v.first())
+            .map(|r| r.version.clone())
+            .unwrap_or_else(|| "8.3".into());
+        create_wordpress_site(
+            &ctx.paths,
+            &mut state,
+            CreateWordPressRequest {
+                name: "wampco".into(),
+                domain: Some("wampco.test".into()),
+                path: Some(ctx.paths.root.join("sites/wampco").display().to_string()),
+                php_version: Some(php_ver),
+                database_engine: Some("mariadb".into()),
+                locale: Some("en_US".into()),
+                admin_user: Some("admin".into()),
+                site_title: Some("WAMP Coexist".into()),
+            },
+            &progress,
+            "wampco",
+        )
+        .await?
+    };
+
+    let (http_port, https_port, reach_state) = {
+        let mut state = ctx.state.lock().await;
+        let _ = apply_stack(&ctx.paths, &mut state)?;
+        let mut details = detect_site(&created.site);
+        enrich_site_details(&ctx.paths, &mut state, &mut details);
+        let reach = details.reachability.clone();
+        (
+            state.stack.apache_http_port,
+            state.stack.apache_https_port,
+            reach,
+        )
+    };
+    http_expect("wampco.test", https_port, "WAMP Coexist")?;
+    let _ = http_get_scheme_opts("wampco.test", http_port, "/", "http", false)?;
+    let reach = reach_state.ok_or("missing reachability")?;
+    if reach.state != "running" || !reach.tcp_ok || !reach.http_ok {
+        return Err(format!("wampco reachability not ok: {reach:?}").into());
+    }
+    println!(
+        "SMOKE PASS: WAMP coexist — nginx={}/{} apache={}/{} status={}",
+        status.http_port, status.https_port, http_port, https_port, reach.state
+    );
+    drop(holders);
+    Ok(())
+}
+
+/// Stop Apache and assert site reachability becomes `error` (not green).
+async fn run_status_error_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::httpd::stop_apache;
+    use devstack_lib::services::sites::{detect_site, enrich_site_details};
+
+    println!("=== Status-error smoke (Apache stopped → red) ===");
+    let site_id = {
+        let state = ctx.state.lock().await;
+        state
+            .sites
+            .iter()
+            .find(|s| {
+                let apache = s
+                    .web_server
+                    .as_deref()
+                    .map(|w| w.eq_ignore_ascii_case("apache"))
+                    .unwrap_or(true);
+                apache
+                    && (s.domain.contains("wampco")
+                        || s.domain.contains("demo")
+                        || s.domain.contains("apache-wp"))
+            })
+            .map(|s| s.id.clone())
+            .ok_or("no apache site for status-error smoke")?
+    };
+
+    {
+        let mut state = ctx.state.lock().await;
+        stop_apache(&ctx.paths, &mut state)?;
+        // Keep nginx up so only Apache sites should flip to error.
+    }
+
+    let reach = {
+        let mut state = ctx.state.lock().await;
+        let site = state
+            .sites
+            .iter()
+            .find(|s| s.id == site_id)
+            .ok_or("site missing")?
+            .clone();
+        let mut details = detect_site(&site);
+        enrich_site_details(&ctx.paths, &mut state, &mut details);
+        details.reachability
+    };
+    let reach = reach.ok_or("no reachability")?;
+    if reach.state != "error" {
+        return Err(format!(
+            "expected reachability state=error after Apache stop, got {} ({:?})",
+            reach.state, reach.message
+        )
+        .into());
+    }
+    if reach.tcp_ok {
+        return Err("expected tcp_ok=false when Apache stopped".into());
+    }
+    println!(
+        "SMOKE PASS: status error — {} ({})",
+        reach.state,
+        reach.message.unwrap_or_default()
+    );
     Ok(())
 }
 

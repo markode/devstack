@@ -83,6 +83,18 @@ export interface StackStatus {
   phpFpmPort: number;
   coexistenceMode: boolean;
   phpVersions: string[];
+  /** Banner lines when ports were auto-remapped beside WAMP/MAMP. */
+  portNotice?: string[];
+}
+
+export interface SiteReachability {
+  /** `running` | `stopped` | `error` | `warning` */
+  state: string;
+  message?: string | null;
+  tcpOk: boolean;
+  httpOk: boolean;
+  probedUrl: string;
+  probedPort: number;
 }
 
 export interface PortsConfig {
@@ -169,6 +181,7 @@ export interface SiteDetails {
   databaseUser?: string | null;
   phpmyadminUrl?: string | null;
   hasWpConfig: boolean;
+  reachability?: SiteReachability | null;
 }
 
 export interface JobProgress {

@@ -696,6 +696,33 @@ select.native {
   background: #777bb4;
 }
 
+.status-dot.error {
+  background: var(--danger, #ff3b30);
+}
+
+.status-dot.warn {
+  background: var(--warning, #ff9500);
+}
+
+.port-notice-banner {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, #007aff) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #007aff) 28%, transparent);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text, inherit);
+}
+
+.port-notice-banner p {
+  margin: 0;
+}
+
+.port-notice-banner p + p {
+  margin-top: 4px;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;

@@ -59,7 +59,26 @@ pub fn run() {
                 return;
             };
             rt.block_on(async {
-                let state = launch_ctx.state.lock().await;
+                let mut state = launch_ctx.state.lock().await;
+                // Persist free ports beside WAMP/MAMP/IIS before the UI opens.
+                let before = crate::services::ports::PortSnapshot::from_stack(&state.stack);
+                let owned = crate::services::ports::owned_runtime_pids(&state.runtime);
+                let runtime_snap = state.runtime.clone();
+                let remap = crate::services::ports::auto_separate_busy_ports(
+                    &mut state.stack,
+                    &owned,
+                    &runtime_snap,
+                );
+                if remap.changed {
+                    state.runtime.port_notice = remap.messages.clone();
+                    let _ = crate::config::save_state(&launch_ctx.paths.state_file, &state);
+                    // Best-effort WP URL rewrite (DB may not be up yet on cold launch).
+                    let _ = crate::services::stack::rewrite_all_wp_urls_for_port_remap(
+                        &launch_ctx.paths,
+                        &state,
+                        before,
+                    );
+                }
                 let _ = crate::php::regenerate_all_php_ini(&launch_ctx.paths, &state);
                 match crate::services::dns::ensure_hosts_if_needed(&launch_ctx.paths, &state) {
                     Ok(_) => {}
