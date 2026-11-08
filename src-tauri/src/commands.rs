@@ -842,6 +842,10 @@ pub async fn set_coexistence_mode(
         state.stack.postgresql_port = 5432;
         state.stack.mongodb_port = 27017;
         state.stack.php_fpm_port = 9000;
+        state.stack.redis_port = 6379;
+        state.stack.mailpit_smtp_port = 1025;
+        state.stack.mailpit_ui_port = 8025;
+        state.stack.dns_port = 5353;
         state.runtime.port_notice.clear();
     }
     let _ = crate::services::stack::rewrite_all_wp_urls_for_port_remap(

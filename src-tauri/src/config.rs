@@ -106,8 +106,32 @@ pub struct StackPreferences {
     pub mongodb_port: u16,
     /// Base PHP-FPM / php-cgi TCP port on Windows (`php_fpm_port + version offset`).
     pub php_fpm_port: u16,
+    /// Redis listen port (default 6379).
+    #[serde(default = "default_redis_port")]
+    pub redis_port: u16,
+    /// Mailpit SMTP / UI ports.
+    #[serde(default = "default_mailpit_smtp")]
+    pub mailpit_smtp_port: u16,
+    #[serde(default = "default_mailpit_ui")]
+    pub mailpit_ui_port: u16,
+    /// Local `*.test` DNS daemon UDP port.
+    #[serde(default = "default_dns_port")]
+    pub dns_port: u16,
     /// When true, prefer non-default ports so DevStack can sit beside WAMP/MAMP.
     pub coexistence_mode: bool,
+}
+
+fn default_redis_port() -> u16 {
+    6379
+}
+fn default_mailpit_smtp() -> u16 {
+    1025
+}
+fn default_mailpit_ui() -> u16 {
+    8025
+}
+fn default_dns_port() -> u16 {
+    5353
 }
 
 impl Default for StackPreferences {
@@ -128,6 +152,10 @@ impl Default for StackPreferences {
             postgresql_port: 5432,
             mongodb_port: 27017,
             php_fpm_port: 9000,
+            redis_port: 6379,
+            mailpit_smtp_port: 1025,
+            mailpit_ui_port: 8025,
+            dns_port: 5353,
             coexistence_mode: false,
         }
     }

@@ -138,7 +138,7 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     // Single UAC on Windows for hosts + CA trust; unix uses helper/sudo separately.
     let _ = sync_hosts_and_trust_ca(paths, state);
 
-    match start_dns(paths, state, 5353) {
+    match start_dns(paths, state, state.stack.dns_port) {
         Ok(()) => {}
         Err(e) => {
             crate::applog::warn(

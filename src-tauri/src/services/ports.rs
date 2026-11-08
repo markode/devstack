@@ -33,6 +33,10 @@ pub struct PortsConfig {
     pub postgresql: u16,
     pub mongodb: u16,
     pub php_fpm: u16,
+    pub redis: u16,
+    pub mailpit_smtp: u16,
+    pub mailpit_ui: u16,
+    pub dns: u16,
     /// URL port for phpMyAdmin (served by Nginx — mirrors nginx HTTPS).
     pub phpmyadmin: u16,
 }
@@ -50,6 +54,10 @@ impl PortsConfig {
             postgresql: stack.postgresql_port,
             mongodb: stack.mongodb_port,
             php_fpm: stack.php_fpm_port,
+            redis: stack.redis_port,
+            mailpit_smtp: stack.mailpit_smtp_port,
+            mailpit_ui: stack.mailpit_ui_port,
+            dns: stack.dns_port,
             phpmyadmin: stack.https_port,
         }
     }
@@ -65,6 +73,10 @@ impl PortsConfig {
         stack.postgresql_port = self.postgresql;
         stack.mongodb_port = self.mongodb;
         stack.php_fpm_port = self.php_fpm;
+        stack.redis_port = self.redis;
+        stack.mailpit_smtp_port = self.mailpit_smtp;
+        stack.mailpit_ui_port = self.mailpit_ui;
+        stack.dns_port = self.dns;
     }
 
     pub fn defaults() -> Self {
@@ -83,6 +95,10 @@ impl PortsConfig {
             postgresql: ALT_POSTGRES,
             mongodb: ALT_MONGO,
             php_fpm: ALT_PHP_FPM,
+            redis: 6380,
+            mailpit_smtp: 1026,
+            mailpit_ui: 8026,
+            dns: 5354,
             phpmyadmin: ALT_HTTPS,
         }
     }
@@ -227,6 +243,10 @@ fn stack_reserved_ports(stack: &StackPreferences, except: &[&str]) -> Vec<u16> {
         ("postgresql", stack.postgresql_port),
         ("mongodb", stack.mongodb_port),
         ("phpFpm", stack.php_fpm_port),
+        ("redis", stack.redis_port),
+        ("mailpitSmtp", stack.mailpit_smtp_port),
+        ("mailpitUi", stack.mailpit_ui_port),
+        ("dns", stack.dns_port),
     ];
     all.retain(|(name, _)| !except.contains(name));
     let mut ports: Vec<u16> = all.into_iter().map(|(_, p)| p).collect();
@@ -509,6 +529,12 @@ pub fn service_ports(stack: &StackPreferences, service_id: &str) -> Vec<(String,
         "postgresql" => vec![("postgresql".into(), stack.postgresql_port)],
         "mongodb" => vec![("mongodb".into(), stack.mongodb_port)],
         "php" | "php-fpm" => vec![("phpFpm".into(), stack.php_fpm_port)],
+        "redis" => vec![("redis".into(), stack.redis_port)],
+        "mailpit" => vec![
+            ("mailpitSmtp".into(), stack.mailpit_smtp_port),
+            ("mailpitUi".into(), stack.mailpit_ui_port),
+        ],
+        "dns" => vec![("dns".into(), stack.dns_port)],
         "phpmyadmin" => vec![("nginxHttps".into(), stack.https_port)],
         _ => vec![],
     }
@@ -592,6 +618,10 @@ pub fn apply_suggested_ports(
             "postgresql" => stack.postgresql_port = *port,
             "mongodb" => stack.mongodb_port = *port,
             "phpFpm" => stack.php_fpm_port = *port,
+            "redis" => stack.redis_port = *port,
+            "mailpitSmtp" => stack.mailpit_smtp_port = *port,
+            "mailpitUi" => stack.mailpit_ui_port = *port,
+            "dns" => stack.dns_port = *port,
             _ => {}
         }
     }
@@ -927,6 +957,67 @@ pub fn auto_separate_busy_ports(
         ));
         stack.php_fpm_port = alt;
     }
+    if let Some(occ) = foreign_occupant(stack.redis_port, owned_pids, runtime) {
+        let reserved = stack_reserved_ports(stack, &["redis"]);
+        let alt = find_next_free_excluding(
+            stack.redis_port,
+            &candidate_ports_for("redis", stack.redis_port),
+            &reserved,
+        );
+        messages.push(format!(
+            "{} detected on :{}, DevStack Redis uses :{alt}",
+            who_label(&occ),
+            occ.port
+        ));
+        stack.redis_port = alt;
+    }
+    let mailpit_smtp_foreign =
+        foreign_occupant(stack.mailpit_smtp_port, owned_pids, runtime);
+    let mailpit_ui_foreign = foreign_occupant(stack.mailpit_ui_port, owned_pids, runtime);
+    if mailpit_smtp_foreign.is_some() || mailpit_ui_foreign.is_some() {
+        let reserved = stack_reserved_ports(stack, &["mailpitSmtp", "mailpitUi"]);
+        if let Some(occ) = mailpit_smtp_foreign {
+            let alt = find_next_free_excluding(
+                stack.mailpit_smtp_port,
+                &candidate_ports_for("mailpitSmtp", stack.mailpit_smtp_port),
+                &reserved,
+            );
+            messages.push(format!(
+                "{} detected on :{}, DevStack Mailpit SMTP uses :{alt}",
+                who_label(&occ),
+                occ.port
+            ));
+            stack.mailpit_smtp_port = alt;
+        }
+        if let Some(occ) = mailpit_ui_foreign {
+            let reserved = stack_reserved_ports(stack, &["mailpitSmtp", "mailpitUi"]);
+            let alt = find_next_free_excluding(
+                stack.mailpit_ui_port,
+                &candidate_ports_for("mailpitUi", stack.mailpit_ui_port),
+                &reserved,
+            );
+            messages.push(format!(
+                "{} detected on :{}, DevStack Mailpit UI uses :{alt}",
+                who_label(&occ),
+                occ.port
+            ));
+            stack.mailpit_ui_port = alt;
+        }
+    }
+    if let Some(occ) = foreign_occupant(stack.dns_port, owned_pids, runtime) {
+        let reserved = stack_reserved_ports(stack, &["dns"]);
+        let alt = find_next_free_excluding(
+            stack.dns_port,
+            &candidate_ports_for("dns", stack.dns_port),
+            &reserved,
+        );
+        messages.push(format!(
+            "{} detected on :{}, DevStack DNS uses :{alt}",
+            who_label(&occ),
+            occ.port
+        ));
+        stack.dns_port = alt;
+    }
 
     let after = PortSnapshot::from_stack(stack);
     let changed = before.nginx_http != after.nginx_http
@@ -937,7 +1028,11 @@ pub fn auto_separate_busy_ports(
         || previous.mariadb != stack.mariadb_port
         || previous.postgresql != stack.postgresql_port
         || previous.mongodb != stack.mongodb_port
-        || previous.php_fpm != stack.php_fpm_port;
+        || previous.php_fpm != stack.php_fpm_port
+        || previous.redis != stack.redis_port
+        || previous.mailpit_smtp != stack.mailpit_smtp_port
+        || previous.mailpit_ui != stack.mailpit_ui_port
+        || previous.dns != stack.dns_port;
 
     if changed {
         stack.coexistence_mode = true;
