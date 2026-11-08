@@ -173,7 +173,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(ctx)
         .setup(|app| {
-            crate::applog::attach_app(app.handle().clone());
+            let handle = app.handle().clone();
+            crate::applog::attach_emitter(move |entry| {
+                use tauri::Emitter;
+                let _ = handle.emit("app-log", entry);
+            });
             crate::applog::info("app", "Tauri setup complete");
             Ok(())
         })

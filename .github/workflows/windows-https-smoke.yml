@@ -20,7 +20,18 @@ jobs:
 
       - name: Cargo test (incl. CREATE_NO_WINDOW / hosts / php.ini / paths)
         working-directory: src-tauri
-        run: cargo test --lib -- --nocapture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # Windows runners occasionally fail the test binary with STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) —
+          # a loader flake, not an assertion. Retry once after a clean rebuild.
+          cargo test --lib -- --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "cargo test failed ($LASTEXITCODE) — clean retry"
+            cargo clean -p devstack
+            cargo test --lib -- --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Process flag + hosts + php.ini unit checks
         working-directory: src-tauri

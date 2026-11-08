@@ -12,11 +12,12 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
 
 const RING_CAP: usize = 5000;
 const FILE_ROTATE_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
-const EVENT: &str = "app-log";
+
+/// Optional live emit sink (wired from Tauri setup — keeps applog free of UI crates).
+type EmitFn = Box<dyn Fn(&LogEntry) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,7 +61,7 @@ struct AppLogInner {
     error_count: u64,
     file: Option<File>,
     file_path: Option<PathBuf>,
-    app: Option<AppHandle>,
+    emit: Option<EmitFn>,
 }
 
 pub struct AppLog {
@@ -79,7 +80,7 @@ fn global() -> &'static AppLog {
             error_count: 0,
             file: None,
             file_path: None,
-            app: None,
+            emit: None,
         }),
     })
 }
@@ -116,9 +117,13 @@ pub fn init(log_dir: &Path) {
     );
 }
 
-pub fn attach_app(app: AppHandle) {
+/// Attach a live emitter (typically Tauri `app.emit("app-log", entry)`).
+pub fn attach_emitter<F>(f: F)
+where
+    F: Fn(&LogEntry) + Send + Sync + 'static,
+{
     if let Ok(mut g) = global().inner.lock() {
-        g.app = Some(app);
+        g.emit = Some(Box::new(f));
     }
 }
 
@@ -182,7 +187,7 @@ fn push(level: LogLevel, source: &str, message: impl AsRef<str>) {
     let message = maybe_redact(message.as_ref());
     let source = source.to_string();
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let (entry, app) = {
+    let entry = {
         let Ok(mut g) = global().inner.lock() else {
             return;
         };
@@ -214,33 +219,37 @@ fn push(level: LogLevel, source: &str, message: impl AsRef<str>) {
             let _ = file.flush();
         }
         let path = g.file_path.clone();
-        let app = g.app.clone();
-        // Rotate outside the hot path if oversized.
+        let need_rotate = path
+            .as_ref()
+            .and_then(|p| p.metadata().ok())
+            .map(|m| m.len() >= FILE_ROTATE_BYTES)
+            .unwrap_or(false);
+        if need_rotate {
+            g.file = None;
+        }
+        (entry, path, need_rotate)
+    };
+    let (entry, path, need_rotate) = entry;
+    if need_rotate {
         if let Some(path) = path {
-            if let Ok(meta) = path.metadata() {
-                if meta.len() >= FILE_ROTATE_BYTES {
-                    g.file = None;
-                    drop(g);
-                    rotate_if_needed(&path);
-                    if let Ok(mut g2) = global().inner.lock() {
-                        g2.file = OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&path)
-                            .ok();
-                    }
-                    return emit_only(entry, app);
-                }
+            rotate_if_needed(&path);
+            if let Ok(mut g2) = global().inner.lock() {
+                g2.file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .ok();
             }
         }
-        (entry, app)
-    };
-    emit_only(entry, app);
+    }
+    emit_entry(&entry);
 }
 
-fn emit_only(entry: LogEntry, app: Option<AppHandle>) {
-    if let Some(app) = app {
-        let _ = app.emit(EVENT, &entry);
+fn emit_entry(entry: &LogEntry) {
+    if let Ok(g) = global().inner.lock() {
+        if let Some(emit) = g.emit.as_ref() {
+            emit(entry);
+        }
     }
 }
 
