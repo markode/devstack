@@ -92,15 +92,6 @@ export async function listSiteDetails(): Promise<SiteDetails[]> {
   return invoke<SiteDetails[]>("list_site_details");
 }
 
-/** Background health probes with short timeouts. */
-export async function probeAllSiteReachability(): Promise<SiteDetails[]> {
-  return invoke<SiteDetails[]>("probe_all_site_reachability");
-}
-
-export async function listSiteDetailsProbed(): Promise<SiteDetails[]> {
-  return invoke<SiteDetails[]>("list_site_details_probed");
-}
-
 /** Background reachability probes (TCP+HTTP). Use after fast list. */
 export async function probeAllSiteReachability(): Promise<SiteDetails[]> {
   return invoke<SiteDetails[]>("probe_all_site_reachability");

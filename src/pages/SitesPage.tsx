@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as client from "../client";
 import {
   AsyncModal,
@@ -17,12 +17,20 @@ import { humanizeError, parsePortBusy } from "../portBusy";
 import { useAppData } from "../store/AppData";
 import type {
   CreateWordPressResult,
+  InstalledPackage,
   JobProgress,
   PortCheckResult,
   SiteDetails,
 } from "../types";
 
-export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) {
+export function SitesPage({
+  initialSiteId,
+  active = true,
+}: {
+  initialSiteId?: string | null;
+  /** False while the keep-alive pane is hidden. */
+  active?: boolean;
+}) {
   const {
     sites: sitesCache,
     loadSites,
@@ -57,10 +65,11 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   const [lastBackup, setLastBackup] = useState<string | null>(null);
   const [patching, setPatching] = useState(false);
   const [logOpenId, setLogOpenId] = useState<string | null>(null);
+  const wasActive = useRef(active);
 
   const refresh = async () => {
     try {
-      await loadSites({ force: true });
+      await loadSites({ force: true, probe: true });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -96,7 +105,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   };
 
   useEffect(() => {
-    void loadSites().catch((e) =>
+    void loadSites({ probe: true }).catch((e) =>
       setError(e instanceof Error ? e.message : String(e)),
     );
     let unlisten: (() => void) | undefined;
@@ -107,6 +116,14 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       unlisten?.();
     };
   }, [loadSites]);
+
+  // Soft background refresh when returning to Sites — cached tiles stay visible.
+  useEffect(() => {
+    if (active && !wasActive.current && sitesLoaded) {
+      void loadSites({ force: true, probe: true });
+    }
+    wasActive.current = active;
+  }, [active, loadSites, sitesLoaded]);
 
   useEffect(() => {
     if (initialSiteId) setSelectedId(initialSiteId);
@@ -336,10 +353,9 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   return (
     <div>
       <div className="sites-toolbar">
-        <div className="section-head" style={{ margin: 0 }}>
-          <h2>Sites</h2>
-          <p>Local projects on .test domains — click a tile for details.</p>
-        </div>
+        <p className="sites-toolbar-blurb muted">
+          Local projects on .test domains — click a tile for details.
+        </p>
         <div className="sites-toolbar-actions">
           <span
             className="stack-status-pill"
@@ -364,7 +380,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
             {stackRunning ? "Running" : "Stopped"}
           </span>
           {sitesRefreshing ? (
-            <span className="muted" style={{ fontSize: 11 }}>
+            <span className="muted" style={{ fontSize: 11 }} data-testid="sites-updating">
               Updating…
             </span>
           ) : null}

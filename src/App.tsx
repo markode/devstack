@@ -58,6 +58,7 @@ function KeepAlivePane({
     <div
       className="page-pane"
       data-section={id}
+      data-testid={`pane-${id}`}
       hidden={active !== id}
       aria-hidden={active !== id}
     >
@@ -72,7 +73,8 @@ function AppShell() {
   const [visited, setVisited] = useState<Set<SectionId>>(
     () => new Set<SectionId>([sectionFromHash()]),
   );
-  const { sitesRefreshing, siteDetails, sitesLoaded } = useAppData();
+  const { sites } = useAppData();
+  const sitesBusy = sites.refreshing || sites.probing;
 
   useEffect(() => {
     const onHash = () => {
@@ -124,22 +126,27 @@ function AppShell() {
             ‹ ›
           </div>
           <div className="content-title">{TITLES[section]}</div>
-          {section === "sites" && sitesLoaded ? (
+          {section === "sites" && sites.loaded ? (
             <div className="content-header-meta" aria-live="polite">
-              {siteDetails.length} {siteDetails.length === 1 ? "site" : "sites"}
+              {sites.details.length}{" "}
+              {sites.details.length === 1 ? "site" : "sites"}
             </div>
           ) : null}
-          {sitesRefreshing ? (
+          {sitesBusy ? (
             <div
               className="content-header-loader"
               role="status"
               aria-label="Refreshing"
+              data-testid="sites-header-loader"
             />
           ) : null}
         </header>
         <div className="content-body">
           <KeepAlivePane id="sites" active={section} visited={visited}>
-            <SitesPage initialSiteId={siteDeepLink} active={section === "sites"} />
+            <SitesPage
+              initialSiteId={siteDeepLink}
+              active={section === "sites"}
+            />
           </KeepAlivePane>
           <KeepAlivePane id="services" active={section} visited={visited}>
             <ServicesPage />

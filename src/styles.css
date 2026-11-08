@@ -201,6 +201,46 @@ select {
   flex-shrink: 0;
 }
 
+.content-header-meta {
+  position: absolute;
+  right: 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.content-header-loader {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.content-header-loader::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: 40%;
+  background: var(--accent);
+  animation: header-loader 1s ease-in-out infinite;
+}
+
+@keyframes header-loader {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+.page-pane[hidden] {
+  display: none !important;
+}
+
 .nav-arrows {
   position: absolute;
   left: 14px;
@@ -619,10 +659,16 @@ select.native {
 .sites-toolbar {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 12px 16px;
   margin-bottom: 16px;
+}
+
+.sites-toolbar-blurb {
+  margin: 0;
+  font-size: 13px;
+  max-width: 42ch;
 }
 
 .sites-toolbar-actions {

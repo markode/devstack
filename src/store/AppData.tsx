@@ -17,180 +17,163 @@ import type {
   TemplateRecord,
 } from "../types";
 
-export type AppDataState = {
-  siteDetails: SiteDetails[];
-  sitesLoaded: boolean;
-  sitesRefreshing: boolean;
-  stack: StackStatus | null;
-  hosts: HostsStatus | null;
+export type SitesCache = {
+  details: SiteDetails[];
+  templates: TemplateRecord[];
   phpInstalled: InstalledPackage[];
   nodeInstalled: InstalledPackage[];
-  templates: TemplateRecord[];
-  error: string | null;
+  stack: StackStatus | null;
+  hosts: HostsStatus | null;
+  /** True after the first successful fast list (empty list can still be loaded). */
+  loaded: boolean;
+  /** True while the fast list request is in flight. */
+  refreshing: boolean;
+  /** True while background reachability probes are running. */
+  probing: boolean;
 };
 
-type AppDataContextValue = AppDataState & {
-  /** Fast list (+ optional background probe). Never clears cache on failure. */
-  refreshSites: (opts?: { probe?: boolean }) => Promise<void>;
-  setSiteDetails: (
+type AppDataContextValue = {
+  sites: SitesCache;
+  /** Load fast list immediately; optionally probe in background. Never clears cache on failure. */
+  loadSites: (opts?: { force?: boolean; probe?: boolean }) => Promise<void>;
+  setSitesDetails: (
     next: SiteDetails[] | ((prev: SiteDetails[]) => SiteDetails[]),
   ) => void;
   setStack: (stack: StackStatus | null) => void;
-  setHosts: (hosts: HostsStatus | null) => void;
-  setTemplates: (templates: TemplateRecord[]) => void;
-  setError: (error: string | null) => void;
-  refreshInstalled: () => Promise<void>;
+  patchSitesCache: (patch: Partial<SitesCache>) => void;
+};
+
+const emptySites: SitesCache = {
+  details: [],
+  templates: [],
+  phpInstalled: [],
+  nodeInstalled: [],
+  stack: null,
+  hosts: null,
+  loaded: false,
+  refreshing: false,
+  probing: false,
 };
 
 const AppDataContext = createContext<AppDataContextValue | null>(null);
 
-const initialState: AppDataState = {
-  siteDetails: [],
-  sitesLoaded: false,
-  sitesRefreshing: false,
-  stack: null,
-  hosts: null,
-  phpInstalled: [],
-  nodeInstalled: [],
-  templates: [],
-  error: null,
-};
-
 export function AppDataProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AppDataState>(initialState);
-  const refreshGen = useRef(0);
+  const [sites, setSites] = useState<SitesCache>(emptySites);
+  const gen = useRef(0);
+  const inflight = useRef<Promise<void> | null>(null);
   const booted = useRef(false);
 
-  const setSiteDetails = useCallback(
+  const patchSitesCache = useCallback((patch: Partial<SitesCache>) => {
+    setSites((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  const setSitesDetails = useCallback(
     (next: SiteDetails[] | ((prev: SiteDetails[]) => SiteDetails[])) => {
-      setState((prev) => ({
+      setSites((prev) => ({
         ...prev,
-        siteDetails: typeof next === "function" ? next(prev.siteDetails) : next,
-        sitesLoaded: true,
+        details: typeof next === "function" ? next(prev.details) : next,
+        loaded: true,
       }));
     },
     [],
   );
 
   const setStack = useCallback((stack: StackStatus | null) => {
-    setState((prev) => ({ ...prev, stack }));
+    setSites((prev) => ({ ...prev, stack }));
   }, []);
 
-  const setHosts = useCallback((hosts: HostsStatus | null) => {
-    setState((prev) => ({ ...prev, hosts }));
-  }, []);
-
-  const setTemplates = useCallback((templates: TemplateRecord[]) => {
-    setState((prev) => ({ ...prev, templates }));
-  }, []);
-
-  const setError = useCallback((error: string | null) => {
-    setState((prev) => ({ ...prev, error }));
-  }, []);
-
-  const refreshInstalled = useCallback(async () => {
-    try {
-      const [php, node] = await Promise.all([
-        client.listInstalled("php"),
-        client.listInstalled("node"),
-      ]);
-      setState((prev) => ({
-        ...prev,
-        phpInstalled: php,
-        nodeInstalled: node,
-      }));
-    } catch {
-      /* keep cache */
-    }
-  }, []);
-
-  const refreshSites = useCallback(async (opts?: { probe?: boolean }) => {
-    const gen = ++refreshGen.current;
-    setState((prev) => ({
-      ...prev,
-      sitesRefreshing: true,
-      error: null,
-    }));
-    try {
-      const [details, php, node, st, tpl, h] = await Promise.all([
-        client.listSiteDetails(),
-        client.listInstalled("php"),
-        client.listInstalled("node"),
-        client.getStackStatus(),
-        client.getTemplates(),
-        client.getHostsStatus(),
-      ]);
-      if (gen !== refreshGen.current) return;
-      setState((prev) => ({
-        ...prev,
-        siteDetails: details,
-        sitesLoaded: true,
-        phpInstalled: php,
-        nodeInstalled: node,
-        stack: st,
-        templates: tpl,
-        hosts: h,
-        sitesRefreshing: opts?.probe !== false,
-      }));
-
-      // Background health probes — never block / clear the fast list.
-      if (opts?.probe !== false) {
-        void client
-          .probeAllSiteReachability()
-          .then((probed) => {
-            if (gen !== refreshGen.current) return;
-            setState((prev) => ({
-              ...prev,
-              siteDetails: probed,
-              sitesLoaded: true,
-              sitesRefreshing: false,
-            }));
-          })
-          .catch(() => {
-            if (gen !== refreshGen.current) return;
-            setState((prev) => ({ ...prev, sitesRefreshing: false }));
-          });
-      } else {
-        setState((prev) => ({ ...prev, sitesRefreshing: false }));
+  const loadSites = useCallback(
+    async (opts?: { force?: boolean; probe?: boolean }) => {
+      const probe = opts?.probe !== false;
+      // Deduplicate concurrent loads unless forced.
+      if (inflight.current && !opts?.force) {
+        return inflight.current;
       }
-    } catch (e) {
-      if (gen !== refreshGen.current) return;
-      setState((prev) => ({
+
+      const myGen = ++gen.current;
+      setSites((prev) => ({
         ...prev,
-        // Keep existing siteDetails on failure — never flash empty.
-        sitesRefreshing: false,
-        error: e instanceof Error ? e.message : String(e),
+        refreshing: true,
+        // Keep existing details visible — never clear to [].
       }));
-    }
-  }, []);
+
+      let runPromise!: Promise<void>;
+      runPromise = (async () => {
+        try {
+          const [details, php, node, st, tpl, h] = await Promise.all([
+            client.listSiteDetails(),
+            client.listInstalled("php"),
+            client.listInstalled("node"),
+            client.getStackStatus(),
+            client.getTemplates(),
+            client.getHostsStatus(),
+          ]);
+          if (myGen !== gen.current) return;
+          setSites((prev) => ({
+            ...prev,
+            details,
+            phpInstalled: php,
+            nodeInstalled: node,
+            stack: st,
+            templates: tpl,
+            hosts: h,
+            loaded: true,
+            refreshing: false,
+            probing: probe,
+          }));
+
+          if (!probe) return;
+
+          try {
+            const probed = await client.probeAllSiteReachability();
+            if (myGen !== gen.current) return;
+            setSites((prev) => ({
+              ...prev,
+              details: probed,
+              loaded: true,
+              probing: false,
+            }));
+          } catch {
+            if (myGen !== gen.current) return;
+            // Keep fast-list cache; just stop the top loader.
+            setSites((prev) => ({ ...prev, probing: false }));
+          }
+        } catch {
+          if (myGen !== gen.current) return;
+          // Do not clear details on refresh failure.
+          setSites((prev) => ({
+            ...prev,
+            refreshing: false,
+            probing: false,
+          }));
+        } finally {
+          if (inflight.current === runPromise) {
+            inflight.current = null;
+          }
+        }
+      })();
+
+      inflight.current = runPromise;
+      return runPromise;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (booted.current) return;
     booted.current = true;
-    void refreshSites({ probe: true });
-  }, [refreshSites]);
+    void loadSites({ probe: true });
+  }, [loadSites]);
 
   const value = useMemo<AppDataContextValue>(
     () => ({
-      ...state,
-      refreshSites,
-      setSiteDetails,
+      sites,
+      loadSites,
+      setSitesDetails,
       setStack,
-      setHosts,
-      setTemplates,
-      setError,
-      refreshInstalled,
+      patchSitesCache,
     }),
-    [
-      state,
-      refreshSites,
-      setSiteDetails,
-      setStack,
-      setHosts,
-      setTemplates,
-      setError,
-      refreshInstalled,
-    ],
+    [sites, loadSites, setSitesDetails, setStack, patchSitesCache],
   );
 
   return (
