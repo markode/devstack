@@ -247,7 +247,9 @@ fn http_probe_ok(host: &str, port: u16, https: bool) -> bool {
             "-k",
             "-sS",
             "--max-time",
-            "3",
+            "1",
+            "--connect-timeout",
+            "1",
             "--resolve",
             &format!("{host}:{port}:127.0.0.1"),
             "-o",
@@ -272,12 +274,12 @@ fn http_probe_ok(host: &str, port: u16, https: bool) -> bool {
     }
     // Raw HTTP GET fallback.
     let Ok(mut stream) =
-        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(800))
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(400))
     else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
     let req = format!(
         "GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
     );
@@ -335,7 +337,7 @@ pub fn probe_site_reachability(
     }
 
     let tcp_ok =
-        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(600))
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(350))
             .is_ok();
     if !tcp_ok {
         let log = server_log_hint(paths, apache);
@@ -382,6 +384,11 @@ pub fn probe_site_reachability(
         probed_url,
         probed_port: port,
     }
+}
+
+/// Attach URLs from stack ports without probing (instant list render).
+pub fn enrich_site_details_fast(details: &mut SiteDetails, state: &AppState) {
+    apply_stack_ports(details, state);
 }
 
 /// Attach reachability to details and sync the matching SiteRecord.status in state.

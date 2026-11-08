@@ -507,6 +507,25 @@ export async function mockListSiteDetails(): Promise<SiteDetails[]> {
   return sites.map(toDetails);
 }
 
+/** Simulated slow probe pass — used to assert cache-first UI. */
+export async function mockListSiteDetailsProbed(): Promise<SiteDetails[]> {
+  await delay(30);
+  return sites.map((s) => {
+    const d = toDetails(s);
+    return {
+      ...d,
+      reachability: {
+        state: s.status === "running" ? "running" : "stopped",
+        message: null,
+        tcpOk: s.status === "running",
+        httpOk: s.status === "running",
+        probedUrl: d.url,
+        probedPort: 80,
+      },
+    };
+  });
+}
+
 export async function mockGetSiteDetails(siteId: string): Promise<SiteDetails> {
   const s = sites.find((x) => x.id === siteId) ?? sites[0];
   return toDetails(s);

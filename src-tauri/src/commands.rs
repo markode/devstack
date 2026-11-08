@@ -231,8 +231,22 @@ pub async fn get_sites(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteRecord>> {
     Ok(state.sites.clone())
 }
 
+/// Fast site list for UI: local config only — no TCP/HTTP probes.
+/// Call `probe_site_reachability_cmd` (or list with probe=true) in the background.
 #[tauri::command]
 pub async fn list_site_details(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDetails>> {
+    list_site_details_inner(ctx, false).await
+}
+
+#[tauri::command]
+pub async fn list_site_details_probed(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDetails>> {
+    list_site_details_inner(ctx, true).await
+}
+
+async fn list_site_details_inner(
+    ctx: State<'_, Arc<AppCtx>>,
+    probe: bool,
+) -> Result<Vec<SiteDetails>> {
     let mut state = ctx.state.lock().await;
     ensure_welcome_site(&ctx.paths, &mut state);
     refresh_site_metadata(&mut state);
@@ -240,11 +254,24 @@ pub async fn list_site_details(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteDe
     let mut details = Vec::with_capacity(sites.len());
     for s in sites {
         let mut d = detect_site(&s);
-        crate::services::sites::enrich_site_details(&ctx.paths, &mut state, &mut d);
+        if probe {
+            crate::services::sites::enrich_site_details(&ctx.paths, &mut state, &mut d);
+        } else {
+            crate::services::sites::enrich_site_details_fast(&mut d, &state);
+        }
         details.push(d);
     }
-    save_state(&ctx.paths.state_file, &state)?;
+    if probe {
+        save_state(&ctx.paths.state_file, &state)?;
+    }
     Ok(details)
+}
+
+#[tauri::command]
+pub async fn probe_all_site_reachability(
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<Vec<SiteDetails>> {
+    list_site_details_inner(ctx, true).await
 }
 
 #[tauri::command]

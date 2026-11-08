@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { GeneralPage, PlaceholderPage } from "./pages/GeneralPage";
 import { PhpPage } from "./pages/PhpPage";
@@ -6,6 +6,7 @@ import { JavaScriptPage } from "./pages/JavaScriptPage";
 import { ServicesPage } from "./pages/ServicesPage";
 import { SitesPage } from "./pages/SitesPage";
 import { AboutPage } from "./pages/AboutPage";
+import { AppDataProvider, useAppData } from "./store/AppData";
 import type { SectionId } from "./types";
 
 const TITLES: Record<SectionId, string> = {
@@ -20,6 +21,9 @@ const TITLES: Record<SectionId, string> = {
   shortcuts: "Shortcuts",
   about: "About",
 };
+
+/** Sections kept mounted (hidden) after first visit so local + cached state survives. */
+const KEEP_ALIVE: SectionId[] = ["sites", "services", "php", "javascript"];
 
 const SECTIONS = Object.keys(TITLES) as SectionId[];
 
@@ -38,14 +42,49 @@ export function siteIdFromHash(): string | null {
   return null;
 }
 
-export default function App() {
+function KeepAlivePane({
+  id,
+  active,
+  visited,
+  children,
+}: {
+  id: SectionId;
+  active: SectionId;
+  visited: ReadonlySet<SectionId>;
+  children: ReactNode;
+}) {
+  if (!visited.has(id) && active !== id) return null;
+  return (
+    <div
+      className="page-pane"
+      data-section={id}
+      hidden={active !== id}
+      aria-hidden={active !== id}
+    >
+      {children}
+    </div>
+  );
+}
+
+function AppShell() {
   const [section, setSection] = useState<SectionId>(sectionFromHash);
   const [siteDeepLink, setSiteDeepLink] = useState<string | null>(siteIdFromHash);
+  const [visited, setVisited] = useState<Set<SectionId>>(
+    () => new Set<SectionId>([sectionFromHash()]),
+  );
+  const { sitesRefreshing, siteDetails, sitesLoaded } = useAppData();
 
   useEffect(() => {
     const onHash = () => {
-      setSection(sectionFromHash());
+      const next = sectionFromHash();
+      setSection(next);
       setSiteDeepLink(siteIdFromHash());
+      setVisited((prev) => {
+        if (prev.has(next)) return prev;
+        const copy = new Set(prev);
+        copy.add(next);
+        return copy;
+      });
     };
     window.addEventListener("hashchange", onHash);
     if (!window.location.hash) {
@@ -54,10 +93,27 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, [section]);
 
+  useEffect(() => {
+    setVisited((prev) => {
+      if (prev.has(section)) return prev;
+      const copy = new Set(prev);
+      copy.add(section);
+      return copy;
+    });
+  }, [section]);
+
   const select = (id: SectionId) => {
     setSection(id);
+    setVisited((prev) => {
+      if (prev.has(id)) return prev;
+      const copy = new Set(prev);
+      copy.add(id);
+      return copy;
+    });
     window.location.hash = `#/${id}`;
   };
+
+  const ephemeral = !KEEP_ALIVE.includes(section);
 
   return (
     <div className="app-shell">
@@ -68,40 +124,72 @@ export default function App() {
             ‹ ›
           </div>
           <div className="content-title">{TITLES[section]}</div>
+          {section === "sites" && sitesLoaded ? (
+            <div className="content-header-meta" aria-live="polite">
+              {siteDetails.length} {siteDetails.length === 1 ? "site" : "sites"}
+            </div>
+          ) : null}
+          {sitesRefreshing ? (
+            <div
+              className="content-header-loader"
+              role="status"
+              aria-label="Refreshing"
+            />
+          ) : null}
         </header>
-        <div className="content-body" key={section}>
-          {section === "general" && <GeneralPage />}
-          {section === "php" && <PhpPage />}
-          {section === "javascript" && <JavaScriptPage />}
-          {section === "services" && <ServicesPage />}
-          {section === "sites" && <SitesPage initialSiteId={siteDeepLink} />}
-          {section === "ai" && (
-            <PlaceholderPage
-              title="AI"
-              blurb="Placeholder — assistant integrations arrive in a later milestone."
-            />
-          )}
-          {section === "pro" && (
-            <PlaceholderPage
-              title="Pro"
-              blurb="Placeholder — Pro features will land here."
-            />
-          )}
-          {section === "sharing" && (
-            <PlaceholderPage
-              title="Sharing"
-              blurb="Placeholder — public URL sharing for local sites."
-            />
-          )}
-          {section === "shortcuts" && (
-            <PlaceholderPage
-              title="Shortcuts"
-              blurb="Placeholder — keyboard shortcuts and CLI helpers."
-            />
-          )}
-          {section === "about" && <AboutPage />}
+        <div className="content-body">
+          <KeepAlivePane id="sites" active={section} visited={visited}>
+            <SitesPage initialSiteId={siteDeepLink} active={section === "sites"} />
+          </KeepAlivePane>
+          <KeepAlivePane id="services" active={section} visited={visited}>
+            <ServicesPage />
+          </KeepAlivePane>
+          <KeepAlivePane id="php" active={section} visited={visited}>
+            <PhpPage />
+          </KeepAlivePane>
+          <KeepAlivePane id="javascript" active={section} visited={visited}>
+            <JavaScriptPage />
+          </KeepAlivePane>
+          {ephemeral ? (
+            <>
+              {section === "general" && <GeneralPage />}
+              {section === "ai" && (
+                <PlaceholderPage
+                  title="AI"
+                  blurb="Placeholder — assistant integrations arrive in a later milestone."
+                />
+              )}
+              {section === "pro" && (
+                <PlaceholderPage
+                  title="Pro"
+                  blurb="Placeholder — Pro features will land here."
+                />
+              )}
+              {section === "sharing" && (
+                <PlaceholderPage
+                  title="Sharing"
+                  blurb="Placeholder — public URL sharing for local sites."
+                />
+              )}
+              {section === "shortcuts" && (
+                <PlaceholderPage
+                  title="Shortcuts"
+                  blurb="Placeholder — keyboard shortcuts and CLI helpers."
+                />
+              )}
+              {section === "about" && <AboutPage />}
+            </>
+          ) : null}
         </div>
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AppDataProvider>
+      <AppShell />
+    </AppDataProvider>
   );
 }

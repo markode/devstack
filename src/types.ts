@@ -91,6 +91,8 @@ export interface SiteReachability {
   /** `running` | `stopped` | `error` | `warning` */
   state: string;
   message?: string | null;
+  /** Fresh log lines for a Show log expander. */
+  logExcerpt?: string | null;
   tcpOk: boolean;
   httpOk: boolean;
   probedUrl: string;

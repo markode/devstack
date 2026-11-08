@@ -101,6 +101,26 @@ export async function listSiteDetails(): Promise<SiteDetails[]> {
   return api.listSiteDetails();
 }
 
+export async function probeAllSiteReachability(): Promise<SiteDetails[]> {
+  if (useMock()) return mock.mockListSiteDetailsProbed();
+  return api.probeAllSiteReachability();
+}
+
+export async function listSiteDetailsProbed(): Promise<SiteDetails[]> {
+  if (useMock()) return mock.mockListSiteDetailsProbed();
+  return api.listSiteDetailsProbed();
+}
+
+export async function probeAllSiteReachability(): Promise<SiteDetails[]> {
+  if (useMock()) return mock.mockListSiteDetails();
+  return api.probeAllSiteReachability();
+}
+
+export async function listSiteDetailsProbed(): Promise<SiteDetails[]> {
+  if (useMock()) return mock.mockListSiteDetails();
+  return api.listSiteDetailsProbed();
+}
+
 export async function getSiteDetails(siteId: string): Promise<SiteDetails> {
   if (useMock()) return mock.mockGetSiteDetails(siteId);
   return api.getSiteDetails(siteId);
