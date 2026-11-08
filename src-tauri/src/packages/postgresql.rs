@@ -178,11 +178,25 @@ impl PackageProvider for PostgreSqlProvider {
         state: &mut AppState,
         progress: ProgressFn,
     ) -> Result<InstalledPackage> {
+        let triple = Self::target_triple()?;
         let versions = self.list_versions(state).await?;
+        // list_versions may flip to the curated fallback under GitHub rate limits
+        // between pick and install — synthesize a direct download URL in that case.
         let meta = versions
             .into_iter()
             .find(|v| v.version == version || v.channel == version)
-            .ok_or_else(|| DevStackError::VersionNotFound(version.into()))?;
+            .unwrap_or_else(|| {
+                let major = version.split('.').next().unwrap_or(version).to_string();
+                PackageVersion {
+                    label: format!("PostgreSQL {version}"),
+                    version: version.to_string(),
+                    channel: major,
+                    lts: true,
+                    download_url: Some(Self::fallback_download_url(version, triple)),
+                    sha256: None,
+                    notes: Some(format!("theseus-rs binary ({triple}, direct)")),
+                }
+            });
         let url = meta
             .download_url
             .clone()

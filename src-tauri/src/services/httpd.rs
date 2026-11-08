@@ -427,7 +427,23 @@ fn collect_php_versions(state: &AppState) -> Vec<String> {
     versions
 }
 
+struct StartApacheOpts {
+    run_configtest: bool,
+    start_php_runtimes: bool,
+}
+
 pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
+    start_apache_inner(
+        paths,
+        state,
+        StartApacheOpts {
+            run_configtest: true,
+            start_php_runtimes: true,
+        },
+    )
+}
+
+fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts) -> Result<()> {
     if let Some(pid) = state.runtime.apache_pid {
         if is_running(pid) {
             return reload_apache(paths, state);
@@ -445,7 +461,7 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
             if http_free && https_free {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
     crate::services::ports::ensure_ports_free(&state.stack, "apache")?;
@@ -457,15 +473,17 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     }
 
     let mut runtimes = Vec::new();
-    for ver in collect_php_versions(state) {
-        match start_php(paths, state, &ver) {
-            Ok(rt) => runtimes.push((ver, rt)),
-            Err(e) => {
-                eprintln!("apache: skip php {ver}: {e}");
+    if opts.start_php_runtimes {
+        for ver in collect_php_versions(state) {
+            match start_php(paths, state, &ver) {
+                Ok(rt) => runtimes.push((ver, rt)),
+                Err(e) => {
+                    eprintln!("apache: skip php {ver}: {e}");
+                }
             }
         }
     }
-    // Also resolve without starting if already up
+    // Resolve without starting if already up / reload fast-path.
     if runtimes.is_empty() {
         for ver in collect_php_versions(state) {
             if let Ok(rt) = resolve_php(paths, state, &ver) {
@@ -484,18 +502,21 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     }
 
     let conf_s = conf.display().to_string();
-    // Configtest first so we surface syntax/module errors instead of a silent exit.
-    let test = crate::services::process::command(&bin)
-        .args(["-f", &conf_s, "-t"])
-        .current_dir(&root)
-        .output();
-    if let Ok(out) = &test {
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            return Err(DevStackError::Message(format!(
-                "Apache configtest failed: {stderr}{stdout}"
-            )));
+    // Configtest on cold start so we surface syntax/module errors. Reload skips
+    // it — the conf was just rendered and the extra httpd -t was ~1–2s on CI.
+    if opts.run_configtest {
+        let test = crate::services::process::command(&bin)
+            .args(["-f", &conf_s, "-t"])
+            .current_dir(&root)
+            .output();
+        if let Ok(out) = &test {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                return Err(DevStackError::Message(format!(
+                    "Apache configtest failed: {stderr}{stdout}"
+                )));
+            }
         }
     }
 
@@ -568,7 +589,7 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
             }
             state.runtime.apache_pid = None;
             // Brief poll — mpm_winnt children usually release ports within ~200ms.
-            for _ in 0..40 {
+            for _ in 0..20 {
                 let http_free =
                     std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
                 let https_free = std::net::TcpListener::bind((
@@ -579,9 +600,13 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
                 if http_free && https_free {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(25));
+                std::thread::sleep(std::time::Duration::from_millis(15));
             }
-            return start_apache(paths, state);
+            // Skip configtest + PHP re-start — conf just rendered, PHP-CGI already up.
+            return start_apache_inner(paths, state, StartApacheOpts {
+                run_configtest: false,
+                start_php_runtimes: false,
+            });
         }
         let _ = crate::services::process::command(&bin)
             .args([

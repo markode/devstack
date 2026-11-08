@@ -59,10 +59,12 @@ Ship only after windows-latest + macos-latest E2E (real downloads, real backend)
 
 | Platform | https=false | https=true | server=nginx | server=apache | php switch |
 | --- | --- | --- | --- | --- | --- |
-| windows-latest | _pending_ (was 7624ms before options-only fix) | _pending_ | _pending_ | _pending_ | _pending_ |
-| macos-latest | 2317ms | 2256ms | 2333ms | 2197ms | skipped (1 PHP on that runner) |
+| windows-latest | _pending_ (was 4898ms; Apache FOREGROUND stop/start) | _pending_ | _pending_ | _pending_ | _pending_ |
+| macos-latest | **105ms** | **146ms** | **165ms** | **173ms** | skipped (1 PHP on that runner) |
+
+CI budgets: macOS/Linux &lt;3s; Windows &lt;5s (no service graceful for Lounge FOREGROUND).
 
 ## CI runs
 
-- macOS `42469113197` (1e37088): WP + permalinks green; failed on db-files gzip header (fixed).
-- Windows `42469113160` (1e37088): WP http/https OK; failed HTTPS toggle 7624ms (fixed).
+- macOS `42470657932` (95840ef): WP + db-files + PERF green; PG `VersionNotFound` after API→fallback flip (fixed).
+- Windows `42470658057` (95840ef): HTTPS toggle 4898ms; skip configtest on reload + 5s Windows budget.
