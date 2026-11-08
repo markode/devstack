@@ -582,21 +582,33 @@ async fn run_wordpress_smoke(
 
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    // WordPress home should mention the site title / WordPress over HTTPS + HTTP.
-    for (scheme_port, label) in [(https_port, "https"), (http_port, "http")] {
-        if let Err(e) = http_expect("demo.test", scheme_port, "Demo Blog") {
-            dump_apache_logs(ctx);
-            return Err(format!("demo.test {label}: {e}").into());
+    // HTTPS must return the WP home page (200).
+    if let Err(e) = http_expect("demo.test", https_port, "Demo Blog") {
+        dump_apache_logs(ctx);
+        return Err(format!("demo.test https: {e}").into());
+    }
+    let https_body = http_get_scheme("demo.test", https_port, "/", "https")?;
+    if https_body.to_lowercase().contains("no input file specified") {
+        dump_apache_logs(ctx);
+        return Err("demo.test https: No input file specified".into());
+    }
+    // HTTP listener must accept cleartext (200 or WP canonical redirect to HTTPS).
+    // Do not follow redirects — a mis-bound SSL listener returns 400 here.
+    match http_get_scheme_opts("demo.test", http_port, "/", "http", false) {
+        Ok(body) => {
+            if body.to_lowercase().contains("no input file specified") {
+                dump_apache_logs(ctx);
+                return Err("demo.test http: No input file specified".into());
+            }
+            if body.to_lowercase().contains("ssl-enabled server port") {
+                dump_apache_logs(ctx);
+                return Err("demo.test http: SSL bound on HTTP port".into());
+            }
+            println!("demo.test http OK ({} bytes)", body.len());
         }
-        let body = http_get_scheme(
-            "demo.test",
-            scheme_port,
-            "/",
-            if label == "http" { "http" } else { "https" },
-        )?;
-        if body.to_lowercase().contains("no input file specified") {
+        Err(e) => {
             dump_apache_logs(ctx);
-            return Err(format!("demo.test {label}: No input file specified").into());
+            return Err(format!("demo.test http: {e}").into());
         }
     }
     // After search-replace, clone should not still advertise the old domain as canonical
@@ -1293,6 +1305,16 @@ fn http_get_scheme(
     path: &str,
     scheme: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    http_get_scheme_opts(host, port, path, scheme, true)
+}
+
+fn http_get_scheme_opts(
+    host: &str,
+    port: u16,
+    path: &str,
+    scheme: &str,
+    follow_redirects: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
     let url = format!("{scheme}://{host}:{port}{path}");
     let slug = path.trim_matches('/').replace('/', "-");
     let tmp = std::env::temp_dir();
@@ -1307,27 +1329,29 @@ fn http_get_scheme(
         ))
         .to_string_lossy()
         .to_string();
-    let status = smoke_command("curl")
-        .args([
-            "-k",
-            "--resolve",
-            &format!("{host}:{port}:127.0.0.1"),
-            "-sS",
-            "-L",
-            "-o",
-            &out,
-            "-w",
-            "%{http_code}",
-            &url,
-        ])
-        .output()?;
+    let mut args = vec![
+        "-k".to_string(),
+        "--resolve".into(),
+        format!("{host}:{port}:127.0.0.1"),
+        "-sS".into(),
+        "-o".into(),
+        out.clone(),
+        "-w".into(),
+        "%{http_code}".into(),
+    ];
+    if follow_redirects {
+        args.push("-L".into());
+    }
+    args.push(url.clone());
+    let status = smoke_command("curl").args(&args).output()?;
     let code = String::from_utf8_lossy(&status.stdout).trim().to_string();
     let body = std::fs::read_to_string(&out).unwrap_or_default();
-    println!("HTTP {code} for {url}");
-    if code != "200" {
-        return Err(format!("HTTP {code} for {url}: {body}").into());
+    println!("HTTP {code} for {url} (follow={follow_redirects})");
+    // HTTP→HTTPS redirects (301/302) are success for the cleartext listener.
+    if code == "200" || (!follow_redirects && (code == "301" || code == "302")) {
+        return Ok(body);
     }
-    Ok(body)
+    Err(format!("HTTP {code} for {url}: {body}").into())
 }
 
 async fn install_pkg(
@@ -1559,13 +1583,15 @@ async fn run_site_settings_perf(
             return Err(format!("server switch to {server} took {ms}ms (>3000)").into());
         }
         // Fetch home on both schemes — must not be connection refused / No input file.
-        for (port, scheme) in [(http_port, "http"), (https_port, "https")] {
-            let body = http_get_scheme("demo.test", port, "/", scheme)?;
-            if body.to_lowercase().contains("no input file specified") {
-                return Err(
-                    format!("demo.test via {server} {scheme}: No input file specified").into(),
-                );
-            }
+        let https_body = http_get_scheme("demo.test", https_port, "/", "https")?;
+        if https_body.to_lowercase().contains("no input file specified") {
+            return Err(format!("demo.test via {server} https: No input file specified").into());
+        }
+        let http_body = http_get_scheme_opts("demo.test", http_port, "/", "http", false)?;
+        if http_body.to_lowercase().contains("no input file specified")
+            || http_body.to_lowercase().contains("ssl-enabled server port")
+        {
+            return Err(format!("demo.test via {server} http: bad response").into());
         }
     }
 

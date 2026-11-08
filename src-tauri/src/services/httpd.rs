@@ -220,8 +220,9 @@ pub fn render_stack(
     };
     let body = format!(
         r#"ServerRoot "{server_root}"
-Listen 127.0.0.1:{http_port}
-Listen 127.0.0.1:{https_port}
+# Bind address + protocol so HTTP/HTTPS listeners never share SSL state.
+Listen 127.0.0.1:{http_port} http
+Listen 127.0.0.1:{https_port} https
 {load_modules}
 ServerName localhost
 ServerAdmin admin@localhost
@@ -335,8 +336,10 @@ fn write_vhost(
     };
     let root = crate::paths_util::conf_path(&docroot);
     let php = php_proxy_block(runtime, &root);
+    // VirtualHost address must match Listen (127.0.0.1) — `*:port` can attach the
+    // SSL vhost to the wrong listener on Lounge/Homebrew builds.
     let mut conf = format!(
-        r#"<VirtualHost *:{http_port}>
+        r#"<VirtualHost 127.0.0.1:{http_port}>
   ServerName {domain}
   DocumentRoot "{root}"
   <Directory "{root}">
@@ -366,7 +369,7 @@ fn write_vhost(
         let certs = ensure_site_cert(paths, &site.domain)?;
         conf.push_str(&format!(
             r#"
-<VirtualHost *:{https_port}>
+<VirtualHost 127.0.0.1:{https_port}>
   ServerName {domain}
   DocumentRoot "{root}"
   SSLEngine on
