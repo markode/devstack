@@ -821,9 +821,18 @@ fn start_dns_thread(port: u16) -> Result<()> {
 }
 
 /// Entry used when the process is launched with `--devstack-dns <port>`.
+/// Returns Err on bind failure (e.g. Windows 10013) — caller must not panic;
+/// the main app falls back to hosts-file resolution only.
 pub fn run_dns_daemon(port: u16) -> Result<()> {
-    let sock = UdpSocket::bind(("127.0.0.1", port))
-        .map_err(|e| DevStackError::Message(format!("DNS bind failed: {e}")))?;
+    let sock = match UdpSocket::bind(("127.0.0.1", port)) {
+        Ok(s) => s,
+        Err(e) => {
+            let code = e.raw_os_error().unwrap_or(0);
+            return Err(DevStackError::Message(format!(
+                "DNS bind 127.0.0.1:{port} failed ({code}): {e}. Using hosts-file resolution only."
+            )));
+        }
+    };
     dns_loop(sock);
     Ok(())
 }

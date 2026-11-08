@@ -17,6 +17,7 @@ pub mod stack;
 pub mod templates;
 pub mod tls;
 pub mod wordpress;
+pub mod wp_url;
 
 pub use stack::{apply_stack, stack_status, start_stack, stop_stack, StackStatus};
 pub use sites::{detect_site, open_phpmyadmin_url, SiteDetails};

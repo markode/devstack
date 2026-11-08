@@ -1,9 +1,32 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
+
+static STACK_OP_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+struct StackOpGuard;
+impl StackOpGuard {
+    fn try_acquire() -> Result<Self> {
+        if STACK_OP_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(crate::error::DevStackError::Message(
+                "A start/stop stack operation is already in progress".into(),
+            ));
+        }
+        Ok(Self)
+    }
+}
+impl Drop for StackOpGuard {
+    fn drop(&mut self) {
+        STACK_OP_IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
 
 use crate::config::{
     ensure_welcome_site, load_state, save_state, AppState, Paths, SiteRecord, TemplateRecord,
@@ -230,7 +253,11 @@ pub async fn get_sites(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteRecord>> {
     ensure_welcome_site(&ctx.paths, &mut state);
     refresh_site_metadata(&mut state);
     save_state(&ctx.paths.state_file, &state)?;
-    Ok(state.sites.clone())
+    let mut sites = state.sites.clone();
+    for s in &mut sites {
+        s.database_password = None;
+    }
+    Ok(sites)
 }
 
 /// Fast site list for UI: local config only — no TCP/HTTP probes.
@@ -261,6 +288,8 @@ async fn list_site_details_inner(
         } else {
             crate::services::sites::enrich_site_details_fast(&mut d, &state);
         }
+        // Never leak DB passwords over the IPC bridge.
+        d.site.database_password = None;
         details.push(d);
     }
     if probe {
@@ -291,8 +320,34 @@ pub async fn get_site_details(
         .clone();
     let mut details = detect_site(&site);
     crate::services::sites::enrich_site_details(&ctx.paths, &mut state, &mut details);
+    details.site.database_password = None;
     save_state(&ctx.paths.state_file, &state)?;
     Ok(details)
+}
+
+#[tauri::command]
+pub async fn repair_site_url_cmd(
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+) -> Result<String> {
+    crate::applog::command_call("repair_site_url", &format!(r#"{{"siteId":"{site_id}"}}"#));
+    let state = ctx.state.lock().await;
+    let site = state
+        .sites
+        .iter()
+        .find(|s| s.id == site_id)
+        .cloned()
+        .ok_or_else(|| crate::error::DevStackError::Message(format!("site not found: {site_id}")))?;
+    match crate::services::wp_url::repair_site_url(&ctx.paths, &state, &site) {
+        Ok(msg) => {
+            crate::applog::command_ok("repair_site_url", &msg);
+            Ok(msg)
+        }
+        Err(e) => {
+            crate::applog::command_err("repair_site_url", &format!("{e:#}"));
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -441,6 +496,7 @@ pub async fn get_stack_status(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus
 #[tauri::command]
 pub async fn start_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
     crate::applog::command_call("start_dev_stack", "{}");
+    let _guard = StackOpGuard::try_acquire()?;
     let mut state = ctx.state.lock().await;
     match start_stack(&ctx.paths, &mut state) {
         Ok(s) => {
@@ -463,6 +519,7 @@ pub async fn start_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus>
 #[tauri::command]
 pub async fn stop_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
     crate::applog::command_call("stop_dev_stack", "{}");
+    let _guard = StackOpGuard::try_acquire()?;
     let mut state = ctx.state.lock().await;
     match stop_stack(&ctx.paths, &mut state) {
         Ok(s) => {

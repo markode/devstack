@@ -22,8 +22,9 @@ use commands::{
     list_managed_services_cmd, list_package_versions, list_packages, list_php_extension_settings,
     list_site_details, list_site_details_probed, mark_template, mint_phpmyadmin_signon_url,
     open_app_log_folder, open_path_cmd, prefetch_version_lists, probe_all_site_reachability,
-    register_system_php_cmd, repair_hosts, restore_site_database, reveal_path_cmd,
-    seed_site_large_table, set_coexistence_mode, set_php_manifest_url, set_php_xdebug,
+    register_system_php_cmd, repair_hosts, repair_site_url_cmd, restore_site_database,
+    reveal_path_cmd, seed_site_large_table, set_coexistence_mode, set_php_manifest_url,
+    set_php_xdebug,
     start_dev_stack, start_managed_service, stop_dev_stack, stop_managed_service,
     uninstall_package, update_db_files_settings, update_developer_settings, update_package,
     update_ports_config, update_site_environment,
@@ -43,7 +44,12 @@ pub fn run() {
             .get(i + 1)
             .and_then(|p| p.parse().ok())
             .unwrap_or(5353u16);
-        services::dns::run_dns_daemon(port).expect("dns daemon failed");
+        // Never panic the helper — Windows bind 10013 (access denied / in use)
+        // must fall back to hosts-only DNS without taking down the process tree.
+        if let Err(e) = services::dns::run_dns_daemon(port) {
+            eprintln!("devstack-dns: {e}");
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -65,15 +71,20 @@ pub fn run() {
                 let mut state = launch_ctx.state.lock().await;
                 // Persist free ports beside WAMP/MAMP/IIS before the UI opens.
                 let before = crate::services::ports::PortSnapshot::from_stack(&state.stack);
-                let owned = crate::services::ports::owned_runtime_pids(&state.runtime);
+                let owned = crate::services::ports::owned_runtime_pids_with_files(
+                    &launch_ctx.paths,
+                    &state.runtime,
+                );
                 let runtime_snap = state.runtime.clone();
                 let remap = crate::services::ports::auto_separate_busy_ports(
                     &mut state.stack,
                     &owned,
                     &runtime_snap,
                 );
+                let mut notice = remap.messages.clone();
+                notice.extend(crate::services::ports::classic_web_port_notice(&state.stack));
+                state.runtime.port_notice = notice;
                 if remap.changed {
-                    state.runtime.port_notice = remap.messages.clone();
                     let _ = crate::config::save_state(&launch_ctx.paths.state_file, &state);
                     // Best-effort WP URL rewrite (DB may not be up yet on cold launch).
                     let _ = crate::services::stack::rewrite_all_wp_urls_for_port_remap(
@@ -242,6 +253,7 @@ pub fn run() {
             apply_next_free_ports,
             get_hosts_status,
             repair_hosts,
+            repair_site_url_cmd,
             mint_phpmyadmin_signon_url,
             delete_site_cmd,
             open_path_cmd,

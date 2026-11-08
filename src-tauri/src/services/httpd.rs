@@ -338,8 +338,28 @@ fn write_vhost(
     let php = php_proxy_block(runtime, &root);
     // VirtualHost address must match Listen (127.0.0.1) — `*:port` can attach the
     // SSL vhost to the wrong listener on Lounge/Homebrew builds.
-    let mut conf = format!(
-        r#"<VirtualHost 127.0.0.1:{http_port}>
+    let mut conf = if site.https {
+        let dest = crate::services::ports::format_url("https", &site.domain, https_port);
+        format!(
+            r#"<VirtualHost 127.0.0.1:{http_port}>
+  ServerName {domain}
+  Redirect permanent / {dest}/
+  ErrorLog "{err}"
+  CustomLog "{access}" common
+</VirtualHost>
+"#,
+            domain = site.domain,
+            dest = dest.trim_end_matches('/'),
+            err = crate::paths_util::conf_path(
+                &paths.logs.join(format!("apache/{}-error.log", site.id)),
+            ),
+            access = crate::paths_util::conf_path(
+                &paths.logs.join(format!("apache/{}-access.log", site.id)),
+            ),
+        )
+    } else {
+        format!(
+            r#"<VirtualHost 127.0.0.1:{http_port}>
   ServerName {domain}
   DocumentRoot "{root}"
   <Directory "{root}">
@@ -354,16 +374,17 @@ fn write_vhost(
   CustomLog "{access}" common
 </VirtualHost>
 "#,
-        domain = site.domain,
-        root = root,
-        php = php,
-        err = crate::paths_util::conf_path(
-            &paths.logs.join(format!("apache/{}-error.log", site.id)),
-        ),
-        access = crate::paths_util::conf_path(
-            &paths.logs.join(format!("apache/{}-access.log", site.id)),
-        ),
-    );
+            domain = site.domain,
+            root = root,
+            php = php,
+            err = crate::paths_util::conf_path(
+                &paths.logs.join(format!("apache/{}-error.log", site.id)),
+            ),
+            access = crate::paths_util::conf_path(
+                &paths.logs.join(format!("apache/{}-access.log", site.id)),
+            ),
+        )
+    };
 
     if site.https {
         let certs = ensure_site_cert(paths, &site.domain)?;
@@ -553,6 +574,16 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if !ready {
+        // Warm-up retry: Windows mpm_winnt can take an extra beat after accept().
+        for _ in 0..20 {
+            if std::net::TcpStream::connect(("127.0.0.1", https_port)).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
     if !ready {
         let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();

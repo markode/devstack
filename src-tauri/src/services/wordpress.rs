@@ -320,10 +320,25 @@ pub async fn create_wordpress_site(
     crate::services::database::start_database(paths, state, &engine)?;
     ensure_database(paths, state, &engine, &db_name, &db_user, &db_pass)?;
 
-    // WordPress defaults to Apache — use Apache HTTPS port in siteurl.
-    let https_port = state.stack.apache_https_port;
-    let public_url =
-        crate::services::ports::format_url("https", &domain, https_port);
+    // Canonical Open URL from the single URL builder (Apache + HTTPS by default).
+    let provisional = SiteRecord {
+        id: id.clone(),
+        name: req.name.clone(),
+        path: site_path.clone(),
+        domain: domain.clone(),
+        php_version: Some(php_version.clone()),
+        node_version: None,
+        https: true,
+        web_server: Some("apache".into()),
+        framework: Some("wordpress".into()),
+        database_engine: Some(engine.clone()),
+        database_name: Some(db_name.clone()),
+        database_user: Some(db_user.clone()),
+        database_password: None,
+        status: "running".into(),
+        is_template: false,
+    };
+    let public_url = crate::services::ports::canonical_site_url(&provisional, state);
     let db_host = crate::services::ports::mysql_db_host(
         crate::services::ports::engine_db_port(&state.stack, &engine),
     );

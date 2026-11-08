@@ -1537,6 +1537,30 @@ function SiteDetail({
               </span>
             )}
           </div>
+          {details.hasWpConfig ? (
+            <div className="settings-row">
+              <label>
+                Site URL
+                <span className="hint">
+                  Sync WordPress siteurl/home to {site.https ? details.httpsUrl : details.url}
+                </span>
+              </label>
+              <button
+                type="button"
+                className="btn btn-install"
+                disabled={busy}
+                data-testid="repair-site-url"
+                onClick={() =>
+                  runOpen(async () => {
+                    const msg = await client.repairSiteUrl(site.id);
+                    onToast(msg);
+                  })
+                }
+              >
+                Repair site URL
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
 

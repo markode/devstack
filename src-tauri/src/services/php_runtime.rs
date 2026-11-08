@@ -1,14 +1,40 @@
 //! PHP-FPM pools (macOS/Linux) and php-cgi worker manager (Windows).
 
+use std::collections::HashSet;
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::{find_installed, AppState, Paths};
 use crate::error::{DevStackError, Result};
 use crate::services::process::{
     find_bin, is_running, read_pid, run_capture, spawn_logged, stop_pid, write_pid,
 };
+
+fn supervisor_stops() -> &'static Mutex<HashSet<String>> {
+    static STOPS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    STOPS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn mark_supervisor_stop(version: &str) {
+    if let Ok(mut g) = supervisor_stops().lock() {
+        g.insert(version.to_string());
+    }
+}
+
+fn clear_supervisor_stop(version: &str) {
+    if let Ok(mut g) = supervisor_stops().lock() {
+        g.remove(version);
+    }
+}
+
+fn should_supervisor_stop(version: &str) -> bool {
+    supervisor_stops()
+        .lock()
+        .map(|g| g.contains(version))
+        .unwrap_or(true)
+}
 
 #[derive(Debug, Clone)]
 pub struct PhpRuntime {
@@ -384,6 +410,7 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
     state.runtime.php_pids.insert(runtime.version.clone(), pid);
 
     // Lightweight supervisor: if the worker dies, respawn once the port frees.
+    clear_supervisor_stop(&runtime.version);
     spawn_php_cgi_supervisor(
         paths.clone(),
         runtime.clone(),
@@ -406,11 +433,15 @@ fn spawn_php_cgi_supervisor(
     log_err: PathBuf,
     pid_file: PathBuf,
 ) {
+    let version = runtime.version.clone();
     std::thread::Builder::new()
-        .name(format!("php-cgi-supervise-{}", runtime.version))
+        .name(format!("php-cgi-supervise-{version}"))
         .spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(2));
+                if should_supervisor_stop(&version) {
+                    break;
+                }
                 let pid = read_pid(&pid_file);
                 let alive = pid.map(is_running).unwrap_or(false);
                 let listening = if let Some(addr) = parse_tcp_listen(&runtime.listen) {
@@ -424,6 +455,9 @@ fn spawn_php_cgi_supervisor(
                 };
                 if alive && listening {
                     continue;
+                }
+                if should_supervisor_stop(&version) {
+                    break;
                 }
                 // Worker gone or port dead — respawn.
                 if let Some(p) = pid {
@@ -467,6 +501,7 @@ fn spawn_php_cgi_supervisor(
 }
 
 pub fn stop_php(paths: &Paths, state: &mut AppState, version: &str) -> Result<()> {
+    mark_supervisor_stop(version);
     if let Some(pid) = state.runtime.php_pids.remove(version) {
         stop_pid(pid)?;
     }

@@ -116,6 +116,11 @@ export async function getSiteDetails(siteId: string): Promise<SiteDetails> {
   return api.getSiteDetails(siteId);
 }
 
+export async function repairSiteUrl(siteId: string): Promise<string> {
+  if (useMock()) return `mock: repaired ${siteId}`;
+  return api.repairSiteUrl(siteId);
+}
+
 export async function updateSiteEnvironment(
   siteId: string,
   patch: {

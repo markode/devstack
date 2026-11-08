@@ -160,6 +160,10 @@ export async function getSiteDetails(siteId: string): Promise<SiteDetails> {
   return invoke<SiteDetails>("get_site_details", { siteId });
 }
 
+export async function repairSiteUrl(siteId: string): Promise<string> {
+  return invoke<string>("repair_site_url_cmd", { siteId });
+}
+
 export async function createSite(
   name: string,
   path: string,

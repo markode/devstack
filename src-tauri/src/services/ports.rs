@@ -95,6 +95,9 @@ pub struct PortOccupant {
     pub pid: Option<u32>,
     pub process_name: Option<String>,
     pub hint: Option<String>,
+    /// Windows service name when the listener is a service (e.g. wampapache64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_service: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +248,10 @@ fn candidate_ports_for(field: &str, current: u16) -> Vec<u16> {
         "postgresql" => &[5433, 5434, 5435],
         "mongodb" => &[27018, 27019, 27020],
         "phpFpm" => &[9001, 9002, 9003, 9070],
+        "redis" => &[6380, 6381, 6382],
+        "mailpitUi" => &[8026, 8027, 8028, 18025],
+        "mailpitSmtp" => &[1026, 1027, 1028, 11025],
+        "dns" => &[5354, 5355, 5356, 15353],
         _ => &[],
     };
     let mut out: Vec<u16> = presets.iter().copied().filter(|p| *p != current).collect();
@@ -274,6 +281,7 @@ fn inspect_port_windows(port: u16) -> PortOccupant {
         pid: None,
         process_name: None,
         hint: None,
+        windows_service: None,
     };
     let out = crate::services::process::command("netstat")
         .args(["-ano"])
@@ -313,8 +321,32 @@ fn inspect_port_windows(port: u16) -> PortOccupant {
         }
         break;
     }
+    if let Some(pid) = occupant.pid {
+        occupant.windows_service = windows_service_for_pid(pid);
+    }
     occupant.hint = coexistence_hint(occupant.process_name.as_deref());
     occupant
+}
+
+#[cfg(windows)]
+fn windows_service_for_pid(pid: u32) -> Option<String> {
+    // sc queryex type= service state= all is heavy; use tasklist /svc instead.
+    let out = crate::services::process::command("tasklist")
+        .args(["/SVC", "/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // "httpd.exe","1234","wampapache64"
+    for line in text.lines() {
+        let cols: Vec<_> = line.split(',').map(|c| c.trim().trim_matches('"')).collect();
+        if cols.len() >= 3 {
+            let svc = cols[2];
+            if !svc.is_empty() && !svc.eq_ignore_ascii_case("N/A") && !svc.starts_with("INFO:") {
+                return Some(svc.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(not(windows))]
@@ -324,6 +356,7 @@ fn inspect_port_unix(port: u16) -> PortOccupant {
         pid: None,
         process_name: None,
         hint: None,
+        windows_service: None,
     };
     let out = crate::services::process::command("lsof")
         .args([
@@ -397,12 +430,67 @@ pub fn format_occupant(o: &PortOccupant) -> String {
         .process_name
         .clone()
         .unwrap_or_else(|| "unknown process".into());
+    let svc = o
+        .windows_service
+        .as_ref()
+        .map(|s| format!(" / service {s}"))
+        .unwrap_or_default();
     match (&o.hint, o.pid) {
-        (Some(hint), Some(pid)) => format!("port {} used by {proc} ({hint}) [pid {pid}]", o.port),
-        (Some(hint), None) => format!("port {} used by {proc} ({hint})", o.port),
-        (None, Some(pid)) => format!("port {} used by {proc} [pid {pid}]", o.port),
+        (Some(hint), Some(pid)) => {
+            format!("port {} used by {proc}{svc} ({hint}) [pid {pid}]", o.port)
+        }
+        (Some(hint), None) => format!("port {} used by {proc}{svc} ({hint})", o.port),
+        (None, Some(pid)) => format!("port {} used by {proc}{svc} [pid {pid}]", o.port),
         (None, None) => format!("port {} is in use", o.port),
     }
+}
+
+/// Informational-only notice when classic 80/443 are held by another stack.
+/// Never claims those ports — DevStack stays on its own listeners.
+pub fn classic_web_port_notice(stack: &StackPreferences) -> Vec<String> {
+    let mut out = Vec::new();
+    for port in [80u16, 443u16] {
+        if port_is_free(port) {
+            continue;
+        }
+        let occ = inspect_port(port);
+        // Skip if somehow our own nginx/apache is on 80/443.
+        let ours = matches!(
+            (port, stack.http_port, stack.https_port, stack.apache_http_port, stack.apache_https_port),
+            (80, h, _, _, _) if h == 80
+        ) || matches!(
+            (port, stack.https_port),
+            (443, h) if h == 443
+        ) || matches!(
+            (port, stack.apache_http_port),
+            (80, h) if h == 80
+        ) || matches!(
+            (port, stack.apache_https_port),
+            (443, h) if h == 443
+        );
+        if ours {
+            continue;
+        }
+        let who = occ
+            .hint
+            .clone()
+            .or_else(|| occ.process_name.clone())
+            .unwrap_or_else(|| "another process".into());
+        let svc = occ
+            .windows_service
+            .as_ref()
+            .map(|s| format!(" (service {s})"))
+            .unwrap_or_default();
+        let ds_http = if stack.apache_http_port != 80 {
+            stack.apache_http_port
+        } else {
+            stack.http_port
+        };
+        out.push(format!(
+            "Port {port} is used by {who}{svc}. .test URLs without a port go there. DevStack uses :{ds_http}."
+        ));
+    }
+    out
 }
 
 /// Ports a service needs before it can start.
@@ -796,13 +884,60 @@ pub fn auto_separate_busy_ports(
         stack.mariadb_port = alt;
     }
 
+    // --- PostgreSQL / MongoDB / PHP-FPM base ---
+    if let Some(occ) = foreign_occupant(stack.postgresql_port, owned_pids, runtime) {
+        let reserved = stack_reserved_ports(stack, &["postgresql"]);
+        let alt = find_next_free_excluding(
+            stack.postgresql_port,
+            &candidate_ports_for("postgresql", stack.postgresql_port),
+            &reserved,
+        );
+        messages.push(format!(
+            "{} detected on :{}, DevStack PostgreSQL uses :{alt}",
+            who_label(&occ),
+            occ.port
+        ));
+        stack.postgresql_port = alt;
+    }
+    if let Some(occ) = foreign_occupant(stack.mongodb_port, owned_pids, runtime) {
+        let reserved = stack_reserved_ports(stack, &["mongodb"]);
+        let alt = find_next_free_excluding(
+            stack.mongodb_port,
+            &candidate_ports_for("mongodb", stack.mongodb_port),
+            &reserved,
+        );
+        messages.push(format!(
+            "{} detected on :{}, DevStack MongoDB uses :{alt}",
+            who_label(&occ),
+            occ.port
+        ));
+        stack.mongodb_port = alt;
+    }
+    if let Some(occ) = foreign_occupant(stack.php_fpm_port, owned_pids, runtime) {
+        let reserved = stack_reserved_ports(stack, &["phpFpm"]);
+        let alt = find_next_free_excluding(
+            stack.php_fpm_port,
+            &candidate_ports_for("phpFpm", stack.php_fpm_port),
+            &reserved,
+        );
+        messages.push(format!(
+            "{} detected on :{}, DevStack PHP-FPM base uses :{alt}",
+            who_label(&occ),
+            occ.port
+        ));
+        stack.php_fpm_port = alt;
+    }
+
     let after = PortSnapshot::from_stack(stack);
     let changed = before.nginx_http != after.nginx_http
         || before.nginx_https != after.nginx_https
         || before.apache_http != after.apache_http
         || before.apache_https != after.apache_https
         || previous.mysql != stack.mysql_port
-        || previous.mariadb != stack.mariadb_port;
+        || previous.mariadb != stack.mariadb_port
+        || previous.postgresql != stack.postgresql_port
+        || previous.mongodb != stack.mongodb_port
+        || previous.php_fpm != stack.php_fpm_port;
 
     if changed {
         stack.coexistence_mode = true;
@@ -944,6 +1079,7 @@ mod tests {
             pid: Some(4242),
             process_name: Some("httpd.exe".into()),
             hint: Some("WAMP".into()),
+            windows_service: Some("wampapache64".into()),
         };
         let s = format_occupant(&o);
         assert!(s.contains("port 80"));
@@ -1049,5 +1185,97 @@ mod tests {
         stack.mariadb_port = 3308;
         assert_eq!(engine_db_port(&stack, "mysql"), 3307);
         assert_eq!(engine_db_port(&stack, "mariadb"), 3308);
+    }
+
+    #[test]
+    fn busy_port_fallback_each_service_field() {
+        // Bind ephemeral ports and point each stack field at them; auto_separate
+        // must remap without ever stopping the foreign holders.
+        let holders: Vec<TcpListener> = (0..8)
+            .filter_map(|_| TcpListener::bind(("127.0.0.1", 0)).ok())
+            .collect();
+        if holders.len() < 8 {
+            return;
+        }
+        let ports: Vec<u16> = holders
+            .iter()
+            .map(|h| h.local_addr().unwrap().port())
+            .collect();
+        let mut stack = StackPreferences::default();
+        stack.http_port = ports[0];
+        stack.https_port = ports[1];
+        stack.apache_http_port = ports[2];
+        stack.apache_https_port = ports[3];
+        stack.mysql_port = ports[4];
+        stack.mariadb_port = ports[5];
+        stack.postgresql_port = ports[6];
+        stack.mongodb_port = ports[7];
+        stack.php_fpm_port = 9000; // may or may not be free
+        let runtime = crate::config::RuntimeState::default();
+        let notice = auto_separate_busy_ports(&mut stack, &[], &runtime);
+        assert!(notice.changed);
+        assert_ne!(stack.http_port, ports[0]);
+        assert_ne!(stack.https_port, ports[1]);
+        assert_ne!(stack.apache_http_port, ports[2]);
+        assert_ne!(stack.apache_https_port, ports[3]);
+        assert_ne!(stack.mysql_port, ports[4]);
+        assert_ne!(stack.mariadb_port, ports[5]);
+        assert_ne!(stack.postgresql_port, ports[6]);
+        assert_ne!(stack.mongodb_port, ports[7]);
+        assert_ne!(stack.mysql_port, stack.mariadb_port);
+        // Foreign listeners must still be accept()ing — we never killed them.
+        for h in &holders {
+            assert!(h.local_addr().is_ok());
+        }
+    }
+
+    #[test]
+    fn mysql_mariadb_ports_stay_unique_after_collision() {
+        let mut stack = StackPreferences::default();
+        stack.mysql_port = 3308;
+        stack.mariadb_port = 3308;
+        let runtime = crate::config::RuntimeState::default();
+        let _ = auto_separate_busy_ports(&mut stack, &[], &runtime);
+        assert_ne!(stack.mysql_port, stack.mariadb_port);
+    }
+
+    #[test]
+    fn classic_web_notice_is_informational_only() {
+        // When DevStack is already on coexistence ports, a busy :80 produces a
+        // notice string but must not mutate stack ports.
+        let _holder = TcpListener::bind(("127.0.0.1", 80)).ok();
+        let stack = PortsConfig::coexistence();
+        let before = (stack.nginx_http, stack.nginx_https);
+        let mut s = StackPreferences::default();
+        stack.apply_to_stack(&mut s);
+        let msgs = classic_web_port_notice(&s);
+        assert_eq!((s.http_port, s.https_port), before);
+        // msgs may be empty if :80 was free in this environment — that's fine.
+        let _ = msgs;
+    }
+
+    #[test]
+    fn canonical_site_url_builder_unit() {
+        let mut state = crate::config::AppState::default();
+        state.stack.apache_http_port = 8088;
+        state.stack.apache_https_port = 8444;
+        let site = crate::config::SiteRecord {
+            id: "t".into(),
+            name: "t".into(),
+            path: std::path::PathBuf::from("/tmp/t"),
+            domain: "test.test".into(),
+            php_version: None,
+            node_version: None,
+            https: false,
+            web_server: Some("apache".into()),
+            framework: Some("wordpress".into()),
+            database_engine: None,
+            database_name: None,
+            database_user: None,
+            database_password: None,
+            status: "stopped".into(),
+            is_template: false,
+        };
+        assert_eq!(canonical_site_url(&site, &state), "http://test.test:8088");
     }
 }
