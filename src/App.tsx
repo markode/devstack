@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { PageHeader } from "./components/PageHeader";
 import { Sidebar } from "./components/Sidebar";
 import { GeneralPage, PlaceholderPage } from "./pages/GeneralPage";
 import { PhpPage } from "./pages/PhpPage";
@@ -121,26 +122,17 @@ function AppShell() {
     <div className="app-shell">
       <Sidebar active={section} onSelect={select} />
       <main className="content">
-        <header className="content-header">
-          <div className="nav-arrows" aria-hidden>
-            ‹ ›
-          </div>
-          <div className="content-title">{TITLES[section]}</div>
-          {section === "sites" && sites.loaded ? (
-            <div className="content-header-meta" aria-live="polite">
-              {sites.details.length}{" "}
-              {sites.details.length === 1 ? "site" : "sites"}
-            </div>
-          ) : null}
-          {sitesBusy ? (
-            <div
-              className="content-header-loader"
-              role="status"
-              aria-label="Refreshing"
-              data-testid="sites-header-loader"
-            />
-          ) : null}
-        </header>
+        <PageHeader
+          title={TITLES[section]}
+          meta={
+            section === "sites" && sites.loaded
+              ? `${sites.details.length} ${
+                  sites.details.length === 1 ? "site" : "sites"
+                }`
+              : undefined
+          }
+          refreshing={sitesBusy}
+        />
         <div className="content-body">
           <KeepAlivePane id="sites" active={section} visited={visited}>
             <SitesPage

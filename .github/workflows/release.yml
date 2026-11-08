@@ -138,6 +138,13 @@ jobs:
           npm run smoke:frontend
           npm test
 
+      - name: Playwright responsive header screenshots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npx playwright install chromium
+          npm run test:e2e
+
       - name: Release E2E — clean ports + busy 80/443/3306/8025 full flow
         working-directory: src-tauri
         shell: pwsh

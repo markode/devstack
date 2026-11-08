@@ -29,6 +29,12 @@ jobs:
           npm run smoke:frontend
           npm test
 
+      - name: Playwright responsive header screenshots
+        run: |
+          set -euo pipefail
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+
       - name: Brew PHP + MariaDB + httpd (managed packages are Windows-first)
         run: |
           set -euo pipefail

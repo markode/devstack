@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DevStack header fixture</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .fixture-shell {
+        min-height: 100vh;
+        background: #f7f7f9;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="fixture-shell">
+      <header class="content-header" data-testid="page-header">
+        <div class="nav-arrows" aria-hidden>‹ ›</div>
+        <div class="content-title" data-testid="page-header-title">Sites</div>
+        <div class="content-header-meta">2 sites</div>
+        <div
+          class="content-header-loader"
+          role="status"
+          aria-label="Refreshing"
+          data-testid="sites-header-loader"
+        ></div>
+      </header>
+      <div class="content-body">
+        <div class="sites-toolbar" data-testid="sites-toolbar">
+          <p class="sites-toolbar-blurb muted">
+            Local projects on .test domains — click a tile for details.
+          </p>
+          <div class="sites-toolbar-actions">
+            <span class="stack-status-pill" data-testid="stack-status-pill">
+              <span class="status-dot"></span>
+              Stopped
+            </span>
+            <button type="button" class="btn btn-install">Add site</button>
+            <button type="button" class="btn btn-install">Duplicate</button>
+            <button type="button" class="btn btn-primary">New WordPress</button>
+            <button type="button" class="btn btn-install">Start stack</button>
+          </div>
+        </div>
+        <div class="sites-grid" data-testid="sites-grid">
+          <button type="button" class="site-tile">
+            <div class="site-tile-top">
+              <span class="fw-icon fw-wordpress">WP</span>
+              <span class="status-dot"></span>
+            </div>
+            <div class="site-tile-name">demo</div>
+            <div class="site-tile-domain">demo.test</div>
+          </button>
+          <button type="button" class="site-tile">
+            <div class="site-tile-top">
+              <span class="fw-icon fw-php">P</span>
+              <span class="status-dot on"></span>
+            </div>
+            <div class="site-tile-name">nginxdash</div>
+            <div class="site-tile-domain">nginxdash.test</div>
+          </button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

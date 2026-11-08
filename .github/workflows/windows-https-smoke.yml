@@ -43,6 +43,13 @@ jobs:
           npm run smoke:frontend
           npm test
 
+      - name: Playwright responsive header screenshots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npx playwright install chromium
+          npm run test:e2e
+
       - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip
         working-directory: src-tauri
         shell: pwsh
