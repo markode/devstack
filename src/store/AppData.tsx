@@ -62,25 +62,40 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const gen = useRef(0);
   const inflight = useRef<Promise<void> | null>(null);
   const booted = useRef(false);
+  const mounted = useRef(true);
 
-  const patchSitesCache = useCallback((patch: Partial<SitesCache>) => {
-    setSites((prev) => ({ ...prev, ...patch }));
-  }, []);
+  const safeSetSites = useCallback(
+    (updater: SitesCache | ((prev: SitesCache) => SitesCache)) => {
+      if (!mounted.current) return;
+      setSites(updater);
+    },
+    [],
+  );
+
+  const patchSitesCache = useCallback(
+    (patch: Partial<SitesCache>) => {
+      safeSetSites((prev) => ({ ...prev, ...patch }));
+    },
+    [safeSetSites],
+  );
 
   const setSitesDetails = useCallback(
     (next: SiteDetails[] | ((prev: SiteDetails[]) => SiteDetails[])) => {
-      setSites((prev) => ({
+      safeSetSites((prev) => ({
         ...prev,
         details: typeof next === "function" ? next(prev.details) : next,
         loaded: true,
       }));
     },
-    [],
+    [safeSetSites],
   );
 
-  const setStack = useCallback((stack: StackStatus | null) => {
-    setSites((prev) => ({ ...prev, stack }));
-  }, []);
+  const setStack = useCallback(
+    (stack: StackStatus | null) => {
+      safeSetSites((prev) => ({ ...prev, stack }));
+    },
+    [safeSetSites],
+  );
 
   const loadSites = useCallback(
     async (opts?: { force?: boolean; probe?: boolean }) => {
@@ -91,7 +106,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       }
 
       const myGen = ++gen.current;
-      setSites((prev) => ({
+      safeSetSites((prev) => ({
         ...prev,
         refreshing: true,
         // Keep existing details visible — never clear to [].
@@ -108,8 +123,8 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
             client.getTemplates(),
             client.getHostsStatus(),
           ]);
-          if (myGen !== gen.current) return;
-          setSites((prev) => ({
+          if (!mounted.current || myGen !== gen.current) return;
+          safeSetSites((prev) => ({
             ...prev,
             details,
             phpInstalled: php,
@@ -126,22 +141,22 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
           try {
             const probed = await client.probeAllSiteReachability();
-            if (myGen !== gen.current) return;
-            setSites((prev) => ({
+            if (!mounted.current || myGen !== gen.current) return;
+            safeSetSites((prev) => ({
               ...prev,
               details: probed,
               loaded: true,
               probing: false,
             }));
           } catch {
-            if (myGen !== gen.current) return;
+            if (!mounted.current || myGen !== gen.current) return;
             // Keep fast-list cache; just stop the top loader.
-            setSites((prev) => ({ ...prev, probing: false }));
+            safeSetSites((prev) => ({ ...prev, probing: false }));
           }
         } catch {
-          if (myGen !== gen.current) return;
+          if (!mounted.current || myGen !== gen.current) return;
           // Do not clear details on refresh failure.
-          setSites((prev) => ({
+          safeSetSites((prev) => ({
             ...prev,
             refreshing: false,
             probing: false,
@@ -156,13 +171,19 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       inflight.current = runPromise;
       return runPromise;
     },
-    [],
+    [safeSetSites],
   );
 
   useEffect(() => {
-    if (booted.current) return;
-    booted.current = true;
-    void loadSites({ probe: true });
+    mounted.current = true;
+    if (!booted.current) {
+      booted.current = true;
+      void loadSites({ probe: true });
+    }
+    return () => {
+      mounted.current = false;
+      gen.current += 1;
+    };
   }, [loadSites]);
 
   const value = useMemo<AppDataContextValue>(

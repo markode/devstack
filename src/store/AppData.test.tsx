@@ -122,7 +122,9 @@ vi.mock("../client", () => ({
 import { AppDataProvider, useAppData } from "./AppData";
 import { SitesPage } from "../pages/SitesPage";
 
-afterEach(() => {
+afterEach(async () => {
+  // Let background probes settle before jsdom tears down (avoids setState-after-unmount).
+  await new Promise((r) => setTimeout(r, Math.max(probeDelayMs, 30) + 40));
   cleanup();
   listDelayMs = 0;
   probeDelayMs = 80;
