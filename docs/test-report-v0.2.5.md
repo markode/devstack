@@ -16,6 +16,10 @@ Ship only after windows-latest + macos-latest E2E (real downloads, real backend)
 | Apache→Nginx left `:8444` dead / wrong Open URL | Targeted reload + WP URL port rewrite; Open URL from live stack ports |
 | phpMyAdmin password in URL + CGI failure | One-time token signon (`pma-tokens/`, 60s TTL); password never in query string |
 | Double hosts/CA sync on every env change | `apply_site_environment_change` fast path |
+| Apache HTTP 400 “plain HTTP to SSL port” | Explicit `Listen 127.0.0.1:<http>` + `Listen … https` and per-port VirtualHosts |
+| macOS helper AppleScript syntax error | Prefer `sudo -n`; wrap shell cmd in AppleScript `"` |
+| Databases export `.sql.gz` was zstd (invalid gzip header) | Detect compression from path incl. `.partial`; temp named `*.partial.sql.gz` |
+| Windows HTTPS toggle 7s+ (seeded WP DB) | Options-only `siteurl`/`home` rewrite + batched mysql REPLACE |
 
 ## Automated coverage
 
@@ -55,9 +59,10 @@ Ship only after windows-latest + macos-latest E2E (real downloads, real backend)
 
 | Platform | https=false | https=true | server=nginx | server=apache | php switch |
 | --- | --- | --- | --- | --- | --- |
-| windows-latest | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| macos-latest | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| windows-latest | _pending_ (was 7624ms before options-only fix) | _pending_ | _pending_ | _pending_ | _pending_ |
+| macos-latest | 2317ms | 2256ms | 2333ms | 2197ms | skipped (1 PHP on that runner) |
 
 ## CI runs
 
-_Pending first green PR checks after push._
+- macOS `42469113197` (1e37088): WP + permalinks green; failed on db-files gzip header (fixed).
+- Windows `42469113160` (1e37088): WP http/https OK; failed HTTPS toggle 7624ms (fixed).

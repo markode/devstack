@@ -252,24 +252,24 @@ fn rewrite_wp_urls_for_https_toggle(
     if !matches!(engine.as_str(), "mysql" | "mariadb") {
         return Ok(());
     }
-    let port = if crate::services::httpd::site_uses_apache(site) {
-        state.stack.apache_https_port
+    let (https_port, http_port) = if crate::services::httpd::site_uses_apache(site) {
+        (state.stack.apache_https_port, state.stack.apache_http_port)
     } else {
-        state.stack.https_port
+        (state.stack.https_port, state.stack.http_port)
     };
+    let https_url = crate::services::ports::format_url("https", &site.domain, https_port);
+    let http_url = crate::services::ports::format_url("http", &site.domain, http_port);
     let (from, to) = if site.https && !prev_https {
-        (
-            format!("http://{}", site.domain),
-            crate::services::ports::format_url("https", &site.domain, port),
-        )
+        (http_url, https_url)
     } else if !site.https && prev_https {
-        (
-            crate::services::ports::format_url("https", &site.domain, port),
-            format!("http://{}", site.domain),
-        )
+        (https_url, http_url)
     } else {
         return Ok(());
     };
-    let _ = crate::services::db_files::mysql_simple_replace_pub(paths, state, &engine, db, &from, &to);
+    // Options-only — full-table REPLACE scans seeded demo tables and blew the
+    // <3s toggle budget on Windows. siteurl/home is what the app Open URL uses.
+    let _ = crate::services::db_files::mysql_wp_options_url_replace(
+        paths, state, &engine, db, &from, &to,
+    );
     Ok(())
 }

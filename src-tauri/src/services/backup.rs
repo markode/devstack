@@ -49,6 +49,29 @@ impl CompressKind {
     }
 }
 
+/// Pick compression from the destination path, including atomic `*.partial` temps.
+pub fn compression_kind_for_dest(dest: &Path) -> CompressKind {
+    let dest_name = dest.to_string_lossy().to_lowercase();
+    let name = dest_name
+        .strip_suffix(".partial")
+        .unwrap_or(dest_name.as_ref());
+    if name.ends_with(".sql.zst") || name.ends_with(".zst") || name.ends_with(".zstd") {
+        CompressKind::Zstd
+    } else if name.ends_with(".sql.gz")
+        || name.ends_with(".gz")
+        || name.ends_with(".archive.gz")
+        || Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gz"))
+            .unwrap_or(false)
+    {
+        CompressKind::Gzip
+    } else {
+        CompressKind::preferred()
+    }
+}
+
 pub fn backup_database(
     paths: &Paths,
     state: &AppState,
@@ -67,24 +90,8 @@ pub fn backup_database(
 
     // Honor the destination extension — never write zstd bytes into a `.sql.gz`
     // path just because `zstd` is on PATH (broke restore with "invalid gzip header").
-    let dest_name = dest.to_string_lossy().to_lowercase();
-    let kind = if dest_name.ends_with(".sql.zst")
-        || dest_name.ends_with(".zst")
-        || dest_name.ends_with(".zstd")
-    {
-        CompressKind::Zstd
-    } else if dest_name.ends_with(".sql.gz")
-        || dest_name.ends_with(".gz")
-        || dest
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("gz"))
-            .unwrap_or(false)
-    {
-        CompressKind::Gzip
-    } else {
-        CompressKind::preferred()
-    };
+    // Atomic export temps look like `db.sql.gz.partial` — strip that suffix first.
+    let kind = compression_kind_for_dest(dest);
 
     // Normalize dest extension if caller passed a stem
     let dest = if dest.extension().is_none() {
@@ -563,4 +570,22 @@ CREATE TABLE IF NOT EXISTS devstack_big (
     }
     let _ = fs::remove_file(&tmp);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn compression_kind_honors_sql_gz_partial_temp() {
+        let p = PathBuf::from("/tmp/Databases/mariadb/wp_dbfiles.sql.gz.partial");
+        assert_eq!(compression_kind_for_dest(&p), CompressKind::Gzip);
+        let p2 = PathBuf::from("/tmp/Databases/mariadb/wp_dbfiles.partial.sql.gz");
+        assert_eq!(compression_kind_for_dest(&p2), CompressKind::Gzip);
+        let p3 = PathBuf::from("/tmp/backups/demo-large.sql.gz");
+        assert_eq!(compression_kind_for_dest(&p3), CompressKind::Gzip);
+        let p4 = PathBuf::from("/tmp/backups/demo.sql.zst");
+        assert_eq!(compression_kind_for_dest(&p4), CompressKind::Zstd);
+    }
 }
