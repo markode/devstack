@@ -432,19 +432,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redact_off_by_default_passthrough() {
-        set_redact_secrets(false);
-        let raw = "password=hunter2 token=abc";
-        assert_eq!(maybe_redact(raw), raw);
+    fn redact_helper_masks_secrets() {
+        // Test pure `redact()` — avoids flaky shared AtomicBool across parallel tests.
+        let s = redact("password=hunter2 token=abc123");
+        assert!(!s.contains("hunter2"), "got {s}");
+        assert!(!s.contains("abc123"), "got {s}");
+        assert!(s.contains("***"), "got {s}");
     }
 
     #[test]
-    fn redact_on_masks_secrets() {
+    fn maybe_redact_respects_flag() {
+        let raw = "password=hunter2";
+        set_redact_secrets(false);
+        assert_eq!(maybe_redact(raw), raw);
         set_redact_secrets(true);
-        let s = maybe_redact("password=hunter2 token=abc123");
-        assert!(!s.contains("hunter2"));
-        assert!(!s.contains("abc123"));
-        assert!(s.contains("***"));
+        let s = maybe_redact(raw);
+        assert!(!s.contains("hunter2"), "got {s}");
         set_redact_secrets(false);
     }
 
