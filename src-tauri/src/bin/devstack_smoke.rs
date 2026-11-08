@@ -553,6 +553,8 @@ async fn run_wordpress_smoke(
     };
     println!("Clone ready at {}", dup.url);
 
+    // Keep hosts in sync with site_domains() (includes mailpit.test + welcome.test)
+    // so apply_site_environment_change → sync_hosts_if_needed is a no-op during perf toggles.
     let _ = smoke_command("sudo")
         .args([
             "-n",
@@ -560,7 +562,9 @@ async fn run_wordpress_smoke(
             "hosts-sync",
             "demo.test",
             "clone.test",
+            "welcome.test",
             "phpmyadmin.test",
+            "mailpit.test",
         ])
         .status();
 

@@ -1,8 +1,8 @@
 //! `.test` domain resolution + privileged helper (hosts / resolver / CA trust).
 //!
 //! Windows writes `%SystemRoot%\System32\drivers\etc\hosts` (elevated via UAC
-//! when needed). macOS uses osascript administrator privileges. Linux keeps
-//! `sudo -n` / the bash helper script.
+//! when needed). macOS prefers passwordless `sudo -n` (CI / admin shells), then
+//! falls back to osascript administrator privileges. Linux keeps `sudo -n`.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -275,13 +275,25 @@ fn helper_run_linux(paths: &Paths, args: &[&str]) -> Result<()> {
 #[cfg(target_os = "macos")]
 fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
     let script = ensure_helper_script(paths)?;
-    // Escape for embedding inside an AppleScript string.
-    let mut cmd = format!("'{}'", script.display());
-    for a in args {
-        cmd.push(' ');
-        cmd.push_str(&shell_single_quote(a));
+    // Prefer passwordless sudo (GitHub Actions / admin shells) — same path as Linux.
+    // osascript "with administrator privileges" needs a GUI auth dialog and was
+    // also mis-quoted (AppleScript strings use ", not ').
+    let sudo = crate::services::process::command("sudo")
+        .arg("-n")
+        .arg(&script)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    if let Ok(out) = &sudo {
+        if out.status.success() {
+            return Ok(());
+        }
     }
-    let apple = format!("do shell script {cmd} with administrator privileges");
+    // Fall through to GUI elevation when sudo needs a password or is unavailable.
+
+    let apple = macos_osascript_helper_command(&script, args);
     let output = crate::services::process::command("osascript")
         .args(["-e", &apple])
         .stdin(Stdio::null())
@@ -299,7 +311,20 @@ fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+/// Build `do shell script "…" with administrator privileges` with correct quoting.
+/// Outer `"` are AppleScript string delimiters; inner `'` quote for `/bin/sh`.
+#[cfg(any(test, target_os = "macos"))]
+fn macos_osascript_helper_command(script: &Path, args: &[&str]) -> String {
+    let mut shell_cmd = shell_single_quote(&script.display().to_string());
+    for a in args {
+        shell_cmd.push(' ');
+        shell_cmd.push_str(&shell_single_quote(a));
+    }
+    let escaped = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("do shell script \"{escaped}\" with administrator privileges")
+}
+
+#[cfg(any(test, target_os = "macos", windows))]
 fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -915,5 +940,26 @@ mod tests {
         assert!(d.contains(&"a.test".into()));
         assert!(d.contains(&"phpmyadmin.test".into()));
         assert!(d.contains(&"mailpit.test".into()));
+    }
+
+    #[test]
+    fn osascript_helper_command_uses_applescript_double_quotes() {
+        let script = PathBuf::from(
+            "/Users/runner/Library/Application Support/devstack/helper/devstack-helper.sh",
+        );
+        let apple = macos_osascript_helper_command(&script, &["hosts-sync", "mailpit.test"]);
+        assert!(
+            apple.starts_with("do shell script \""),
+            "AppleScript string must use double quotes: {apple}"
+        );
+        assert!(apple.contains("with administrator privileges"));
+        assert!(apple.contains("Application Support"));
+        assert!(apple.contains("'hosts-sync'"));
+        assert!(apple.contains("'mailpit.test'"));
+        // Must not produce the old broken form: do shell script '/path' 'arg'
+        assert!(
+            !apple.starts_with("do shell script '"),
+            "bare single-quoted args break AppleScript: {apple}"
+        );
     }
 }
