@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
 import * as client from "../client";
+import {
+  AsyncModal,
+  BusyLabel,
+  useAsyncJob,
+} from "../components/AsyncModal";
 import { PortConflictDialog } from "../components/PortConflictDialog";
 import {
   browseDatabaseDump,
@@ -42,6 +47,7 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
   const [credentials, setCredentials] =
     useState<CreateWordPressResult | null>(null);
   const [lastBackup, setLastBackup] = useState<string | null>(null);
+  const [patching, setPatching] = useState(false);
 
   const refresh = async () => {
     try {
@@ -138,11 +144,28 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
     },
   ) => {
     setError(null);
+    setPatching(true);
+    // Optimistic UI — reflect the toggle/select immediately while backend reloads.
+    setDetails((prev) =>
+      prev.map((d) => {
+        if (d.site.id !== siteId) return d;
+        const site = { ...d.site };
+        if (update.phpVersion !== undefined) site.phpVersion = update.phpVersion;
+        if (update.nodeVersion !== undefined)
+          site.nodeVersion = update.nodeVersion;
+        if (update.https !== undefined) site.https = update.https;
+        if (update.webServer !== undefined) site.webServer = update.webServer;
+        return { ...d, site };
+      }),
+    );
     try {
       await client.updateSiteEnvironment(siteId, update);
       await refresh();
     } catch (e) {
       setError(humanizeError(e instanceof Error ? e.message : String(e)));
+      await refresh();
+    } finally {
+      setPatching(false);
     }
   };
 
@@ -236,7 +259,8 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
           details={selected}
           phpInstalled={phpInstalled}
           nodeInstalled={nodeInstalled}
-          busy={busy}
+          busy={busy || patching}
+          patching={patching}
           lastBackup={lastBackup}
           hostsOk={hosts?.ok !== false}
           onBack={backToGrid}
@@ -276,18 +300,18 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
             ]}
             defaultSource={selected.site.id}
             phpInstalled={phpInstalled}
-            busy={busy}
             onClose={() => setShowDuplicate(false)}
-            onSubmit={(req) =>
-              void runJob(async () => {
-                const r = await client.duplicateSite(req);
-                setShowDuplicate(false);
-                openSite(r.site.id);
-              })
-            }
+            onSubmit={async (req) => {
+              const r = await client.duplicateSite(req);
+              setShowDuplicate(false);
+              await refresh();
+              openSite(r.site.id);
+            }}
           />
         ) : null}
-        {progress ? <ProgressToast progress={progress} /> : null}
+        {progress && !showDuplicate ? (
+          <ProgressToast progress={progress} />
+        ) : null}
         {hosts && !hosts.ok ? (
           <div
             className="error-banner"
@@ -465,7 +489,12 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
         <PortConflictDialog
           conflict={portConflict}
           busy={busy}
-          onCancel={() => setPortConflict(null)}
+          error={error}
+          busyLabel="Updating ports…"
+          onCancel={() => {
+            setPortConflict(null);
+            setError(null);
+          }}
           onUseSuggested={() => void resolvePortConflict("suggested")}
           onCoexistence={() => void resolvePortConflict("coexistence")}
         />
@@ -474,39 +503,35 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
       {showAddSite ? (
         <AddSiteModal
           phpInstalled={phpInstalled}
-          busy={busy}
           onClose={() => setShowAddSite(false)}
-          onSubmit={(req) =>
-            void runJob(async () => {
-              const site = await client.createSite(
-                req.name,
-                req.path,
-                req.phpVersion,
-                {
-                  webServer: req.webServer,
-                  https: req.https,
-                },
-              );
-              setShowAddSite(false);
-              openSite(site.id);
-            })
-          }
+          onSubmit={async (req) => {
+            const site = await client.createSite(
+              req.name,
+              req.path,
+              req.phpVersion,
+              {
+                webServer: req.webServer,
+                https: req.https,
+              },
+            );
+            setShowAddSite(false);
+            await refresh();
+            openSite(site.id);
+          }}
         />
       ) : null}
 
       {showNewWp ? (
         <NewWordpressModal
           phpInstalled={phpInstalled}
-          busy={busy}
           onClose={() => setShowNewWp(false)}
-          onSubmit={(req) =>
-            void runJob(async () => {
-              const result = await client.createWordpress(req);
-              setShowNewWp(false);
-              setCredentials(result);
-              // Keep credentials modal visible — do not navigate away yet.
-            })
-          }
+          onSubmit={async (req) => {
+            const result = await client.createWordpress(req);
+            setShowNewWp(false);
+            await refresh();
+            setCredentials(result);
+            // Keep credentials modal visible — do not navigate away yet.
+          }}
         />
       ) : null}
 
@@ -523,15 +548,13 @@ export function SitesPage({ initialSiteId }: { initialSiteId?: string | null }) 
             })),
           ]}
           phpInstalled={phpInstalled}
-          busy={busy}
           onClose={() => setShowDuplicate(false)}
-          onSubmit={(req) =>
-            void runJob(async () => {
-              const r = await client.duplicateSite(req);
-              setShowDuplicate(false);
-              openSite(r.site.id);
-            })
-          }
+          onSubmit={async (req) => {
+            const r = await client.duplicateSite(req);
+            setShowDuplicate(false);
+            await refresh();
+            openSite(r.site.id);
+          }}
         />
       ) : null}
 
@@ -578,12 +601,10 @@ function runtimeValue(pkg: InstalledPackage): string {
 
 function AddSiteModal({
   phpInstalled,
-  busy,
   onClose,
   onSubmit,
 }: {
   phpInstalled: InstalledPackage[];
-  busy: boolean;
   onClose: () => void;
   onSubmit: (req: {
     name: string;
@@ -591,8 +612,9 @@ function AddSiteModal({
     phpVersion?: string;
     webServer: string;
     https: boolean;
-  }) => void;
+  }) => Promise<void>;
 }) {
+  const job = useAsyncJob();
   const [mode, setMode] = useState<"empty" | "link">("empty");
   const [name, setName] = useState("my-site");
   const [path, setPath] = useState("~/Sites/my-site");
@@ -629,138 +651,151 @@ function AddSiteModal({
     }
   };
 
+  const submitLabel = mode === "link" ? "Link site" : "Create site";
+
   return (
-    <div className="modal-backdrop" role="dialog">
-      <div className="modal-card">
-        <h3>Add site</h3>
-        <p className="muted">
-          Create an empty PHP site or link a folder you already have.
-        </p>
-        <div className="field-row" style={{ gap: 8 }}>
+    <AsyncModal
+      title="Add site"
+      description="Create an empty PHP site or link a folder you already have."
+      busy={job.busy}
+      progress={job.progress}
+      error={job.error ?? pickError}
+      onClose={() => {
+        if (!job.busy) onClose();
+      }}
+      actions={
+        <>
           <button
             type="button"
-            className={`btn ${mode === "empty" ? "btn-primary" : "btn-install"}`}
-            disabled={busy}
-            onClick={() => setMode("empty")}
+            className="btn"
+            disabled={job.busy}
+            onClick={onClose}
           >
-            Empty site
-          </button>
-          <button
-            type="button"
-            className={`btn ${mode === "link" ? "btn-primary" : "btn-install"}`}
-            disabled={busy}
-            onClick={() => void pickFolder()}
-          >
-            Link folder…
-          </button>
-        </div>
-        {pickError ? <div className="error-banner">{pickError}</div> : null}
-        <label className="field">
-          Name
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="field">
-          Directory
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              style={{ flex: 1 }}
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-            />
-            <button
-              type="button"
-              className="btn btn-install"
-              disabled={busy}
-              title="Browse for a folder"
-              onClick={() => void pickFolder()}
-            >
-              Browse
-            </button>
-          </div>
-        </label>
-        <div className="field-row">
-          <label className="field">
-            PHP
-            {phpInstalled.length === 0 ? (
-              <span className="hint">
-                No PHP installed —{" "}
-                <a href="#/php" onClick={onClose}>
-                  install one
-                </a>
-              </span>
-            ) : (
-              <select
-                className="native"
-                value={php}
-                onChange={(e) => setPhp(e.target.value)}
-              >
-                {phpInstalled.map((v) => (
-                  <option key={v.version} value={runtimeValue(v)}>
-                    {runtimeValue(v)}
-                  </option>
-                ))}
-              </select>
-            )}
-          </label>
-          <label className="field">
-            Web server
-            <select
-              className="native"
-              value={webServer}
-              onChange={(e) => setWebServer(e.target.value)}
-            >
-              <option value="nginx">Nginx</option>
-              <option value="apache">Apache</option>
-            </select>
-          </label>
-        </div>
-        <label className="field" style={{ flexDirection: "row", gap: 8 }}>
-          <input
-            type="checkbox"
-            checked={https}
-            onChange={(e) => setHttps(e.target.checked)}
-          />
-          HTTPS (.test certificate)
-        </label>
-        <div className="modal-actions">
-          <button type="button" className="btn" disabled={busy} onClick={onClose}>
             Cancel
           </button>
           <button
             type="button"
             className="btn btn-primary"
-            disabled={busy || !name.trim() || !path.trim()}
+            disabled={job.busy || !name.trim() || !path.trim()}
             title={
               !name.trim() || !path.trim()
                 ? "Name and directory are required"
                 : "Create site and sync hosts"
             }
             onClick={() =>
-              onSubmit({
-                name: name.trim(),
-                path: path.trim(),
-                phpVersion: php || undefined,
-                webServer,
-                https,
+              void job.run(async () => {
+                await onSubmit({
+                  name: name.trim(),
+                  path: path.trim(),
+                  phpVersion: php || undefined,
+                  webServer,
+                  https,
+                });
               })
             }
           >
-            {mode === "link" ? "Link site" : "Create site"}
+            <BusyLabel
+              busy={job.busy}
+              idle={submitLabel}
+              busyText="Creating…"
+              progress={job.progress}
+            />
+          </button>
+        </>
+      }
+    >
+      <div className="field-row" style={{ gap: 8 }}>
+        <button
+          type="button"
+          className={`btn ${mode === "empty" ? "btn-primary" : "btn-install"}`}
+          onClick={() => setMode("empty")}
+        >
+          Empty site
+        </button>
+        <button
+          type="button"
+          className={`btn ${mode === "link" ? "btn-primary" : "btn-install"}`}
+          onClick={() => void pickFolder()}
+        >
+          Link folder…
+        </button>
+      </div>
+      <label className="field">
+        Name
+        <input value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label className="field">
+        Directory
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            style={{ flex: 1 }}
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+          />
+          <button
+            type="button"
+            className="btn btn-install"
+            title="Browse for a folder"
+            onClick={() => void pickFolder()}
+          >
+            Browse
           </button>
         </div>
+      </label>
+      <div className="field-row">
+        <label className="field">
+          PHP
+          {phpInstalled.length === 0 ? (
+            <span className="hint">
+              No PHP installed —{" "}
+              <a href="#/php" onClick={onClose}>
+                install one
+              </a>
+            </span>
+          ) : (
+            <select
+              className="native"
+              value={php}
+              onChange={(e) => setPhp(e.target.value)}
+            >
+              {phpInstalled.map((v) => (
+                <option key={v.version} value={runtimeValue(v)}>
+                  {runtimeValue(v)}
+                </option>
+              ))}
+            </select>
+          )}
+        </label>
+        <label className="field">
+          Web server
+          <select
+            className="native"
+            value={webServer}
+            onChange={(e) => setWebServer(e.target.value)}
+          >
+            <option value="nginx">Nginx</option>
+            <option value="apache">Apache</option>
+          </select>
+        </label>
       </div>
-    </div>
+      <label className="field" style={{ flexDirection: "row", gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={https}
+          onChange={(e) => setHttps(e.target.checked)}
+        />
+        HTTPS (.test certificate)
+      </label>
+    </AsyncModal>
   );
 }
 
 function NewWordpressModal({
   phpInstalled,
-  busy,
   onClose,
   onSubmit,
 }: {
   phpInstalled: InstalledPackage[];
-  busy: boolean;
   onClose: () => void;
   onSubmit: (req: {
     name: string;
@@ -769,8 +804,9 @@ function NewWordpressModal({
     phpVersion?: string;
     databaseEngine?: string;
     locale?: string;
-  }) => void;
+  }) => Promise<void>;
 }) {
+  const job = useAsyncJob();
   const [name, setName] = useState("my-site");
   const [domain, setDomain] = useState("my-site.test");
   const [path, setPath] = useState("~/Sites/my-site");
@@ -790,96 +826,112 @@ function NewWordpressModal({
   }, [name]);
 
   return (
-    <div className="modal-backdrop" role="dialog">
-      <div className="modal-card">
-        <h3>New WordPress</h3>
-        <p className="muted">
-          Downloads latest WordPress + WP-CLI, creates a database, installs over
-          HTTPS on a .test domain.
-        </p>
-        <label className="field">
-          Name
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="field">
-          Domain
-          <input value={domain} onChange={(e) => setDomain(e.target.value)} />
-        </label>
-        <label className="field">
-          Directory
-          <input value={path} onChange={(e) => setPath(e.target.value)} />
-        </label>
-        <div className="field-row">
-          <label className="field">
-            PHP
-            {phpInstalled.length === 0 ? (
-              <span className="hint">
-                No PHP installed —{" "}
-                <a href="#/php" onClick={onClose}>
-                  install one
-                </a>
-              </span>
-            ) : (
-              <select
-                className="native"
-                value={php}
-                onChange={(e) => setPhp(e.target.value)}
-              >
-                {phpInstalled.map((v) => (
-                  <option key={v.version} value={runtimeValue(v)}>
-                    {runtimeValue(v)}
-                  </option>
-                ))}
-              </select>
-            )}
-          </label>
-          <label className="field">
-            Database
-            <select
-              className="native"
-              value={engine}
-              onChange={(e) => setEngine(e.target.value)}
-            >
-              <option value="mariadb">MariaDB</option>
-              <option value="mysql">MySQL</option>
-            </select>
-          </label>
-          <label className="field">
-            Locale
-            <select
-              className="native"
-              value={locale}
-              onChange={(e) => setLocale(e.target.value)}
-            >
-              <option value="en_US">en_US</option>
-              <option value="pl_PL">pl_PL</option>
-            </select>
-          </label>
-        </div>
-        <div className="modal-actions">
-          <button type="button" className="btn btn-install" onClick={onClose}>
+    <AsyncModal
+      title="New WordPress"
+      description="Downloads latest WordPress + WP-CLI, creates a database, installs over HTTPS on a .test domain."
+      busy={job.busy}
+      progress={job.progress}
+      error={job.error}
+      onClose={() => {
+        if (!job.busy) onClose();
+      }}
+      actions={
+        <>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={job.busy}
+            onClick={onClose}
+          >
             Cancel
           </button>
           <button
             type="button"
             className="btn btn-primary"
-            disabled={busy || !name.trim() || !php}
+            disabled={job.busy || !name.trim() || !php}
             onClick={() =>
-              onSubmit({
-                name: name.trim(),
-                domain,
-                path,
-                phpVersion: php,
-                databaseEngine: engine,
-                locale,
+              void job.run(async () => {
+                await onSubmit({
+                  name: name.trim(),
+                  domain,
+                  path,
+                  phpVersion: php,
+                  databaseEngine: engine,
+                  locale,
+                });
               })
             }
           >
-            Create site
+            <BusyLabel
+              busy={job.busy}
+              idle="Create site"
+              busyText="Installing WordPress…"
+              progress={job.progress}
+            />
           </button>
-        </div>
+        </>
+      }
+    >
+      <label className="field">
+        Name
+        <input value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label className="field">
+        Domain
+        <input value={domain} onChange={(e) => setDomain(e.target.value)} />
+      </label>
+      <label className="field">
+        Directory
+        <input value={path} onChange={(e) => setPath(e.target.value)} />
+      </label>
+      <div className="field-row">
+        <label className="field">
+          PHP
+          {phpInstalled.length === 0 ? (
+            <span className="hint">
+              No PHP installed —{" "}
+              <a href="#/php" onClick={onClose}>
+                install one
+              </a>
+            </span>
+          ) : (
+            <select
+              className="native"
+              value={php}
+              onChange={(e) => setPhp(e.target.value)}
+            >
+              {phpInstalled.map((v) => (
+                <option key={v.version} value={runtimeValue(v)}>
+                  {runtimeValue(v)}
+                </option>
+              ))}
+            </select>
+          )}
+        </label>
+        <label className="field">
+          Database
+          <select
+            className="native"
+            value={engine}
+            onChange={(e) => setEngine(e.target.value)}
+          >
+            <option value="mariadb">MariaDB</option>
+            <option value="mysql">MySQL</option>
+          </select>
+        </label>
+        <label className="field">
+          Locale
+          <select
+            className="native"
+            value={locale}
+            onChange={(e) => setLocale(e.target.value)}
+          >
+            <option value="en_US">en_US</option>
+            <option value="pl_PL">pl_PL</option>
+          </select>
+        </label>
       </div>
-    </div>
+    </AsyncModal>
   );
 }
 
@@ -887,14 +939,12 @@ function DuplicateModal({
   sources,
   defaultSource,
   phpInstalled,
-  busy,
   onClose,
   onSubmit,
 }: {
   sources: { id: string; label: string }[];
   defaultSource?: string;
   phpInstalled: InstalledPackage[];
-  busy: boolean;
   onClose: () => void;
   onSubmit: (req: {
     sourceId: string;
@@ -903,8 +953,9 @@ function DuplicateModal({
     path: string;
     phpVersion?: string;
     databaseEngine?: string;
-  }) => void;
+  }) => Promise<void>;
 }) {
+  const job = useAsyncJob();
   const [sourceId, setSourceId] = useState(
     defaultSource || sources[0]?.id || "",
   );
@@ -926,101 +977,122 @@ function DuplicateModal({
   }, [name]);
 
   return (
-    <div className="modal-backdrop" role="dialog">
-      <div className="modal-card">
-        <h3>Duplicate site</h3>
-        <p className="muted">
+    <AsyncModal
+      title="Duplicate site"
+      description={
+        <>
           Copies files, streams the database import, then runs serialized-safe{" "}
           <code>wp search-replace</code>.
-        </p>
-        <label className="field">
-          Source template or site
-          <select
-            className="native"
-            value={sourceId}
-            onChange={(e) => setSourceId(e.target.value)}
+        </>
+      }
+      busy={job.busy}
+      progress={job.progress}
+      error={job.error}
+      onClose={() => {
+        if (!job.busy) onClose();
+      }}
+      actions={
+        <>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={job.busy}
+            onClick={onClose}
           >
-            {sources.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          New name
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="field">
-          New domain
-          <input value={domain} onChange={(e) => setDomain(e.target.value)} />
-        </label>
-        <label className="field">
-          Target directory
-          <input value={path} onChange={(e) => setPath(e.target.value)} />
-        </label>
-        <div className="field-row">
-          <label className="field">
-            PHP
-            {phpInstalled.length === 0 ? (
-              <span className="hint">
-                No PHP installed —{" "}
-                <a href="#/php" onClick={onClose}>
-                  install one
-                </a>
-              </span>
-            ) : (
-              <select
-                className="native"
-                value={php}
-                onChange={(e) => setPhp(e.target.value)}
-              >
-                {phpInstalled.map((v) => (
-                  <option key={v.version} value={runtimeValue(v)}>
-                    {runtimeValue(v)}
-                  </option>
-                ))}
-              </select>
-            )}
-          </label>
-          <label className="field">
-            Database
-            <select
-              className="native"
-              value={engine}
-              onChange={(e) => setEngine(e.target.value)}
-            >
-              <option value="mariadb">MariaDB</option>
-              <option value="mysql">MySQL</option>
-            </select>
-          </label>
-        </div>
-        <div className="modal-actions">
-          <button type="button" className="btn btn-install" onClick={onClose}>
             Cancel
           </button>
           <button
             type="button"
             className="btn btn-primary"
             disabled={
-              busy || !sourceId || !name.trim() || !path.trim() || !php
+              job.busy || !sourceId || !name.trim() || !path.trim() || !php
             }
             onClick={() =>
-              onSubmit({
-                sourceId,
-                name: name.trim(),
-                domain,
-                path,
-                phpVersion: php,
-                databaseEngine: engine,
+              void job.run(async () => {
+                await onSubmit({
+                  sourceId,
+                  name: name.trim(),
+                  domain,
+                  path,
+                  phpVersion: php,
+                  databaseEngine: engine,
+                });
               })
             }
           >
-            Duplicate
+            <BusyLabel
+              busy={job.busy}
+              idle="Duplicate"
+              busyText="Duplicating…"
+              progress={job.progress}
+            />
           </button>
-        </div>
+        </>
+      }
+    >
+      <label className="field">
+        Source template or site
+        <select
+          className="native"
+          value={sourceId}
+          onChange={(e) => setSourceId(e.target.value)}
+        >
+          {sources.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        New name
+        <input value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label className="field">
+        New domain
+        <input value={domain} onChange={(e) => setDomain(e.target.value)} />
+      </label>
+      <label className="field">
+        Target directory
+        <input value={path} onChange={(e) => setPath(e.target.value)} />
+      </label>
+      <div className="field-row">
+        <label className="field">
+          PHP
+          {phpInstalled.length === 0 ? (
+            <span className="hint">
+              No PHP installed —{" "}
+              <a href="#/php" onClick={onClose}>
+                install one
+              </a>
+            </span>
+          ) : (
+            <select
+              className="native"
+              value={php}
+              onChange={(e) => setPhp(e.target.value)}
+            >
+              {phpInstalled.map((v) => (
+                <option key={v.version} value={runtimeValue(v)}>
+                  {runtimeValue(v)}
+                </option>
+              ))}
+            </select>
+          )}
+        </label>
+        <label className="field">
+          Database
+          <select
+            className="native"
+            value={engine}
+            onChange={(e) => setEngine(e.target.value)}
+          >
+            <option value="mariadb">MariaDB</option>
+            <option value="mysql">MySQL</option>
+          </select>
+        </label>
       </div>
-    </div>
+    </AsyncModal>
   );
 }
 
@@ -1084,6 +1156,7 @@ function SiteDetail({
   phpInstalled,
   nodeInstalled,
   busy,
+  patching,
   lastBackup,
   hostsOk,
   onBack,
@@ -1100,6 +1173,7 @@ function SiteDetail({
   phpInstalled: InstalledPackage[];
   nodeInstalled: InstalledPackage[];
   busy: boolean;
+  patching?: boolean;
   lastBackup: string | null;
   hostsOk: boolean;
   onBack: () => void;
@@ -1201,10 +1275,19 @@ function SiteDetail({
             <label>Environment</label>
           </div>
           <div className="settings-row">
-            <label>Web server</label>
+            <label>
+              Web server
+              {patching ? (
+                <span className="hint btn-busy-label">
+                  <span className="btn-spinner" aria-hidden />
+                  Applying…
+                </span>
+              ) : null}
+            </label>
             <select
               className="native"
               value={webServer === "apache" ? "apache" : "nginx"}
+              disabled={busy}
               onChange={(e) => onPatch({ webServer: e.target.value })}
             >
               <option value="apache">Apache (full .htaccess)</option>
@@ -1232,6 +1315,7 @@ function SiteDetail({
               <select
                 className="native"
                 value={site.phpVersion ?? ""}
+                disabled={busy}
                 onChange={(e) =>
                   onPatch({ phpVersion: e.target.value || null })
                 }
@@ -1266,6 +1350,7 @@ function SiteDetail({
               <select
                 className="native"
                 value={site.nodeVersion ?? ""}
+                disabled={busy}
                 onChange={(e) =>
                   onPatch({ nodeVersion: e.target.value || null })
                 }
@@ -1280,10 +1365,20 @@ function SiteDetail({
             )}
           </div>
           <div className="settings-row">
-            <label>HTTPS</label>
+            <label>
+              HTTPS
+              {patching ? (
+                <span className="hint btn-busy-label">
+                  <span className="btn-spinner" aria-hidden />
+                  Applying…
+                </span>
+              ) : null}
+            </label>
             <button
               type="button"
               className={`toggle ${site.https ? "on" : ""}`}
+              disabled={busy}
+              aria-busy={patching || undefined}
               onClick={() => onPatch({ https: !site.https })}
             />
           </div>
@@ -1332,12 +1427,16 @@ function SiteDetail({
                   : "Not detected"}
               </span>
             </label>
-            {details.phpmyadminUrl ? (
+            {details.phpmyadminUrl || details.databaseName ? (
               <button
                 type="button"
                 className="btn btn-primary"
+                disabled={busy}
                 onClick={() =>
-                  runOpen(() => openInBrowser(details.phpmyadminUrl!))
+                  runOpen(async () => {
+                    const url = await client.mintPhpmyadminSignonUrl(site.id);
+                    await openInBrowser(url);
+                  })
                 }
               >
                 Open database

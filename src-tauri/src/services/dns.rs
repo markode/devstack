@@ -1,8 +1,8 @@
 //! `.test` domain resolution + privileged helper (hosts / resolver / CA trust).
 //!
 //! Windows writes `%SystemRoot%\System32\drivers\etc\hosts` (elevated via UAC
-//! when needed). macOS uses osascript administrator privileges. Linux keeps
-//! `sudo -n` / the bash helper script.
+//! when needed). macOS prefers passwordless `sudo -n` (CI / admin shells), then
+//! falls back to osascript administrator privileges. Linux keeps `sudo -n`.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -275,13 +275,25 @@ fn helper_run_linux(paths: &Paths, args: &[&str]) -> Result<()> {
 #[cfg(target_os = "macos")]
 fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
     let script = ensure_helper_script(paths)?;
-    // Escape for embedding inside an AppleScript string.
-    let mut cmd = format!("'{}'", script.display());
-    for a in args {
-        cmd.push(' ');
-        cmd.push_str(&shell_single_quote(a));
+    // Prefer passwordless sudo (GitHub Actions / admin shells) — same path as Linux.
+    // osascript "with administrator privileges" needs a GUI auth dialog and was
+    // also mis-quoted (AppleScript strings use ", not ').
+    let sudo = crate::services::process::command("sudo")
+        .arg("-n")
+        .arg(&script)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    if let Ok(out) = &sudo {
+        if out.status.success() {
+            return Ok(());
+        }
     }
-    let apple = format!("do shell script {cmd} with administrator privileges");
+    // Fall through to GUI elevation when sudo needs a password or is unavailable.
+
+    let apple = macos_osascript_helper_command(&script, args);
     let output = crate::services::process::command("osascript")
         .args(["-e", &apple])
         .stdin(Stdio::null())
@@ -299,7 +311,20 @@ fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+/// Build `do shell script "…" with administrator privileges` with correct quoting.
+/// Outer `"` are AppleScript string delimiters; inner `'` quote for `/bin/sh`.
+#[cfg(any(test, target_os = "macos"))]
+fn macos_osascript_helper_command(script: &Path, args: &[&str]) -> String {
+    let mut shell_cmd = shell_single_quote(&script.display().to_string());
+    for a in args {
+        shell_cmd.push(' ');
+        shell_cmd.push_str(&shell_single_quote(a));
+    }
+    let escaped = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("do shell script \"{escaped}\" with administrator privileges")
+}
+
+#[cfg(any(test, target_os = "macos", windows))]
 fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -405,14 +430,20 @@ fn trust_ca_windows(paths: &Paths, ca: &Path) -> Result<()> {
             ca.display()
         )));
     }
+    if crate::services::tls::is_ca_trust_cached(paths) {
+        return Ok(());
+    }
     if try_trust_ca_direct(ca) {
+        let _ = crate::services::tls::mark_ca_trusted(paths);
         return Ok(());
     }
     let ps = format!(
         "certutil -addstore -f Root {}\nWrite-DevStackLog 'CA trusted'\n",
         ps_quote(&ca.display().to_string())
     );
-    run_elevated_powershell(paths, &ps)
+    run_elevated_powershell(paths, &ps)?;
+    crate::services::tls::mark_ca_trusted(paths)?;
+    Ok(())
 }
 
 /// Write hosts + trust the DevStack CA in a **single** UAC prompt on Windows.
@@ -431,10 +462,22 @@ pub fn sync_hosts_and_trust_ca_windows(
     let hosts_path = windows_hosts_path();
     let existing = fs::read_to_string(&hosts_path).unwrap_or_default();
     let merged = merge_hosts_contents(&existing, domains);
-    let hosts_ok = try_write_hosts_direct(&hosts_path, &merged)?;
-    let ca_ok = try_trust_ca_direct(ca);
+    // Skip rewriting hosts when the DevStack block is already complete.
+    let hosts_complete = domains_missing_from_hosts(&existing, domains).is_empty();
+    let hosts_ok = if hosts_complete {
+        true
+    } else {
+        try_write_hosts_direct(&hosts_path, &merged)?
+    };
+    let ca_cached = crate::services::tls::is_ca_trust_cached(paths);
+    let ca_ok = ca_cached || try_trust_ca_direct(ca);
+    if ca_ok && !ca_cached {
+        let _ = crate::services::tls::mark_ca_trusted(paths);
+    }
     if hosts_ok && ca_ok {
-        verify_hosts_contain(&hosts_path, domains)?;
+        if !hosts_complete {
+            verify_hosts_contain(&hosts_path, domains)?;
+        }
         return Ok(());
     }
 
@@ -586,22 +629,52 @@ pub fn sync_hosts(paths: &Paths, state: &AppState) -> Result<()> {
 }
 
 /// Sync hosts file and trust the local CA — one elevation on Windows.
+///
+/// Skips both steps when hosts already contain every domain and the CA trust
+/// marker matches the on-disk root cert (avoids UAC / certutil on every toggle).
 pub fn sync_hosts_and_trust_ca(paths: &Paths, state: &AppState) -> Result<()> {
     let ca = crate::services::tls::ca_cert_path(paths);
     if !ca.exists() {
         crate::services::tls::ensure_root_ca(paths)?;
     }
+    let hosts_ok = check_hosts_status(paths, state).ok;
+    let ca_ok = crate::services::tls::is_ca_trust_cached(paths);
+    if hosts_ok && ca_ok {
+        return Ok(());
+    }
     #[cfg(windows)]
     {
         let domains = site_domains(&state.sites);
-        return sync_hosts_and_trust_ca_windows(paths, &domains, &ca);
+        if hosts_ok && !ca_ok {
+            trust_ca_windows(paths, &ca)?;
+            crate::services::tls::mark_ca_trusted(paths)?;
+            return Ok(());
+        }
+        if !hosts_ok && ca_ok {
+            return sync_hosts_windows(paths, &domains);
+        }
+        sync_hosts_and_trust_ca_windows(paths, &domains, &ca)?;
+        crate::services::tls::mark_ca_trusted(paths)?;
+        Ok(())
     }
     #[cfg(not(windows))]
     {
-        let _ = ca;
-        sync_hosts(paths, state)?;
-        crate::services::tls::trust_ca_via_helper(paths)
+        if !hosts_ok {
+            sync_hosts(paths, state)?;
+        }
+        if !ca_ok {
+            crate::services::tls::trust_ca_via_helper(paths)?;
+        }
+        Ok(())
     }
+}
+
+/// Hosts-only sync when entries are missing (never re-trusts the CA).
+pub fn sync_hosts_if_needed(paths: &Paths, state: &AppState) -> Result<()> {
+    if check_hosts_status(paths, state).ok {
+        return Ok(());
+    }
+    sync_hosts(paths, state)
 }
 
 /// True when `domain` resolves to a loopback address (hosts entry present).
@@ -867,5 +940,26 @@ mod tests {
         assert!(d.contains(&"a.test".into()));
         assert!(d.contains(&"phpmyadmin.test".into()));
         assert!(d.contains(&"mailpit.test".into()));
+    }
+
+    #[test]
+    fn osascript_helper_command_uses_applescript_double_quotes() {
+        let script = PathBuf::from(
+            "/Users/runner/Library/Application Support/devstack/helper/devstack-helper.sh",
+        );
+        let apple = macos_osascript_helper_command(&script, &["hosts-sync", "mailpit.test"]);
+        assert!(
+            apple.starts_with("do shell script \""),
+            "AppleScript string must use double quotes: {apple}"
+        );
+        assert!(apple.contains("with administrator privileges"));
+        assert!(apple.contains("Application Support"));
+        assert!(apple.contains("'hosts-sync'"));
+        assert!(apple.contains("'mailpit.test'"));
+        // Must not produce the old broken form: do shell script '/path' 'arg'
+        assert!(
+            !apple.starts_with("do shell script '"),
+            "bare single-quoted args break AppleScript: {apple}"
+        );
     }
 }

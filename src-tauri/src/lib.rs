@@ -17,12 +17,13 @@ use commands::{
     get_service_log, get_site_details, get_sites, get_stack_status, get_templates,
     import_database_from_folder, import_site_database_file, install_package, list_database_files,
     list_installed, list_managed_services_cmd, list_package_versions, list_packages,
-    list_php_extension_settings, list_site_details, mark_template, open_path_cmd,
-    prefetch_version_lists, register_system_php_cmd, repair_hosts, restore_site_database,
-    reveal_path_cmd, seed_site_large_table, set_coexistence_mode, set_php_manifest_url,
-    set_php_xdebug, start_dev_stack, start_managed_service, stop_dev_stack,
-    stop_managed_service, uninstall_package, update_db_files_settings, update_package,
-    update_ports_config, update_site_environment,
+    delete_site_cmd, list_php_extension_settings, list_site_details, mark_template,
+    mint_phpmyadmin_signon_url, open_path_cmd, prefetch_version_lists,
+    register_system_php_cmd, repair_hosts, restore_site_database, reveal_path_cmd,
+    seed_site_large_table, set_coexistence_mode, set_php_manifest_url, set_php_xdebug,
+    start_dev_stack, start_managed_service, stop_dev_stack, stop_managed_service,
+    uninstall_package, update_db_files_settings, update_package, update_ports_config,
+    update_site_environment,
 };
 use config::default_data_root;
 use services::db_files::{
@@ -198,6 +199,8 @@ pub fn run() {
             apply_next_free_ports,
             get_hosts_status,
             repair_hosts,
+            mint_phpmyadmin_signon_url,
+            delete_site_cmd,
             open_path_cmd,
             reveal_path_cmd,
         ])

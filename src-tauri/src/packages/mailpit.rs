@@ -40,6 +40,9 @@ struct GhAsset {
     digest: Option<String>,
 }
 
+/// Curated tags used when the GitHub API is rate-limited.
+const FALLBACK_VERSIONS: &[&str] = &["1.33.1", "1.27.10", "1.22.3"];
+
 impl MailpitProvider {
     pub fn new(client: reqwest::Client) -> Self {
         Self { client }
@@ -55,6 +58,27 @@ impl MailpitProvider {
             ("windows", "arm64") => Ok("mailpit-windows-arm64.zip"),
             (os, arch) => Err(DevStackError::UnsupportedPlatform(format!("{os}/{arch}"))),
         }
+    }
+
+    fn fallback_download_url(version: &str, asset: &str) -> String {
+        format!(
+            "https://github.com/axllent/mailpit/releases/download/v{version}/{asset}"
+        )
+    }
+
+    fn fallback_versions(asset: &str) -> Vec<PackageVersion> {
+        FALLBACK_VERSIONS
+            .iter()
+            .map(|version| PackageVersion {
+                label: format!("Mailpit {version}"),
+                version: (*version).to_string(),
+                channel: (*version).to_string(),
+                lts: true,
+                download_url: Some(Self::fallback_download_url(version, asset)),
+                sha256: None,
+                notes: Some(format!("{asset} (fallback)")),
+            })
+            .collect()
     }
 }
 
@@ -72,16 +96,28 @@ impl PackageProvider for MailpitProvider {
 
     async fn list_versions(&self, _state: &AppState) -> Result<Vec<PackageVersion>> {
         let want = Self::asset_name()?;
-        let releases: Vec<GhRelease> = self
+        let releases: Vec<GhRelease> = match self
             .client
             .get(RELEASES_API)
             .header("User-Agent", "DevStack")
             .header("Accept", "application/vnd.github+json")
             .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            .await
+        {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(ok) => ok.json().await.map_err(|e| {
+                    DevStackError::Message(format!("Failed to parse Mailpit releases: {e}"))
+                })?,
+                Err(e) => {
+                    eprintln!("[mailpit] releases API failed ({e}); using curated fallback");
+                    return Ok(Self::fallback_versions(want));
+                }
+            },
+            Err(e) => {
+                eprintln!("[mailpit] releases API unreachable ({e}); using curated fallback");
+                return Ok(Self::fallback_versions(want));
+            }
+        };
 
         let mut out = Vec::new();
         for r in releases {
@@ -116,6 +152,9 @@ impl PackageProvider for MailpitProvider {
                 break;
             }
         }
+        if out.is_empty() {
+            return Ok(Self::fallback_versions(want));
+        }
         Ok(out)
     }
 
@@ -126,11 +165,24 @@ impl PackageProvider for MailpitProvider {
         state: &mut AppState,
         progress: ProgressFn,
     ) -> Result<InstalledPackage> {
+        let want = Self::asset_name()?;
         let versions = self.list_versions(state).await?;
         let meta = versions
             .into_iter()
-            .find(|v| v.version == version || v.channel == version || format!("v{version}") == v.version)
-            .ok_or_else(|| DevStackError::VersionNotFound(version.into()))?;
+            .find(|v| {
+                v.version == version
+                    || v.channel == version
+                    || format!("v{version}") == v.version
+            })
+            .unwrap_or_else(|| PackageVersion {
+                label: format!("Mailpit {version}"),
+                version: version.to_string(),
+                channel: version.to_string(),
+                lts: true,
+                download_url: Some(Self::fallback_download_url(version, want)),
+                sha256: None,
+                notes: Some(format!("{want} (direct)")),
+            });
         let url = meta
             .download_url
             .clone()

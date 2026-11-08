@@ -497,7 +497,7 @@ function toDetails(s: SiteRecord): SiteDetails {
     databaseUser: s.databaseUser,
     phpmyadminUrl:
       framework === "wordpress" && s.databaseName
-        ? `https://phpmyadmin.test/devstack-signon.php?db=${s.databaseName}&user=${s.databaseUser ?? "root"}&pass=`
+        ? `https://phpmyadmin.test/devstack-signon.php?db=${s.databaseName}`
         : null,
     hasWpConfig: framework === "wordpress",
   };

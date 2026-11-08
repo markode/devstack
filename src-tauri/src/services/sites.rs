@@ -7,7 +7,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::config::{slugify, AppState, Paths, SiteRecord};
-use crate::error::Result;
+use crate::error::{DevStackError, Result};
 use crate::services::nginx::expand_home;
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,20 +69,19 @@ pub fn detect_site(site: &SiteRecord) -> SiteDetails {
         (site.database_name.clone(), site.database_user.clone(), None)
     };
 
+    // Placeholder only — real Open database mints a one-time token via
+    // `mint_phpmyadmin_signon_url` so the password never appears in the URL.
     let pma = if framework == "wordpress" {
         db_name.as_ref().map(|db| {
-            let user = db_user.clone().unwrap_or_else(|| "root".into());
-            let pass = db_pass.clone().unwrap_or_default();
             format!(
-                "https://phpmyadmin.test/devstack-signon.php?db={}&user={}&pass={}",
-                urlencoding_minimal(db),
-                urlencoding_minimal(&user),
-                urlencoding_minimal(&pass)
+                "https://phpmyadmin.test/devstack-signon.php?db={}",
+                urlencoding_minimal(db)
             )
         })
     } else {
         None
     };
+    let _ = db_pass;
 
     let mut updated = site.clone();
     updated.framework = Some(framework.clone());
@@ -222,4 +221,20 @@ pub fn create_site(
         fs::write(abs.join("index.php"), "<?php phpinfo();")?;
     }
     Ok(site)
+}
+
+/// Remove a site from state and drop its nginx/apache vhost snippets.
+/// Does not delete the site files on disk.
+pub fn delete_site(paths: &Paths, state: &mut AppState, site_id: &str) -> Result<()> {
+    let existed = state.sites.iter().any(|s| s.id == site_id);
+    if !existed {
+        return Err(DevStackError::Message(format!("site not found: {site_id}")));
+    }
+    state.sites.retain(|s| s.id != site_id);
+    state.templates.retain(|t| t.source_site_id != site_id && t.id != site_id);
+    let nginx_conf = paths.nginx_sites_dir().join(format!("{site_id}.conf"));
+    let apache_conf = paths.apache_sites_dir().join(format!("{site_id}.conf"));
+    let _ = fs::remove_file(nginx_conf);
+    let _ = fs::remove_file(apache_conf);
+    Ok(())
 }

@@ -220,8 +220,9 @@ pub fn render_stack(
     };
     let body = format!(
         r#"ServerRoot "{server_root}"
-Listen 127.0.0.1:{http_port}
-Listen 127.0.0.1:{https_port}
+# Bind address + protocol so HTTP/HTTPS listeners never share SSL state.
+Listen 127.0.0.1:{http_port} http
+Listen 127.0.0.1:{https_port} https
 {load_modules}
 ServerName localhost
 ServerAdmin admin@localhost
@@ -286,21 +287,26 @@ fn nix_geteuid() -> u32 {
 
 /// PHP proxy directives for a vhost.
 ///
-/// Windows php-cgi needs an absolute SCRIPT_FILENAME. Trailing-slash SetHandler
-/// alone leaves a URL path ("No input file specified"); no slash glues `D:` onto
-/// the host. Fix: trailing slash + ProxyFCGISetEnvIf rebuild from DOCUMENT_ROOT.
+/// Windows php-cgi needs a real filesystem `SCRIPT_FILENAME`:
+/// - `SetHandler proxy:fcgi://host:port` (no slash) glues `D:` onto the authority
+/// - trailing-slash SetHandler alone leaves a URL path → "No input file specified"
+/// - `ProxyPassMatch …/C:/docroot/$1` often yields `/C:/…` (leading slash) which
+///   php-cgi also rejects
+///
+/// Fix: trailing-slash SetHandler + `ProxyFCGISetEnvIf` rebuild from
+/// `DOCUMENT_ROOT` + `SCRIPT_NAME` (forward-slash docroots via `conf_path`).
 ///
 /// Unix php-fpm uses SetHandler with a trailing slash.
 fn php_proxy_block(runtime: &PhpRuntime, _docroot_conf: &str) -> String {
     let fcgi = fcgi_target(runtime);
     if cfg!(windows) {
-        // ProxyPassMatch embeds the absolute docroot so php-cgi gets a real path.
-        // (SetHandler±slash either glues D: onto the host or leaves a URL path.)
-        let host = nginx_fastcgi_pass(runtime);
-        let docroot = _docroot_conf.trim_end_matches('/');
         format!(
             r#"  ProxyFCGIBackendType GENERIC
-  ProxyPassMatch "^/(.*\.php(/.*)?)$" "fcgi://{host}/{docroot}/$1"
+  <FilesMatch "\.php$">
+    SetHandler "proxy:{fcgi}"
+  </FilesMatch>
+  # Rebuild SCRIPT_FILENAME as DOCUMENT_ROOT + SCRIPT_NAME (Windows drive-safe).
+  ProxyFCGISetEnvIf "true" SCRIPT_FILENAME "%{{reqenv:DOCUMENT_ROOT}}%{{reqenv:SCRIPT_NAME}}"
   ProxyTimeout 3600
 "#
         )
@@ -330,8 +336,10 @@ fn write_vhost(
     };
     let root = crate::paths_util::conf_path(&docroot);
     let php = php_proxy_block(runtime, &root);
+    // VirtualHost address must match Listen (127.0.0.1) — `*:port` can attach the
+    // SSL vhost to the wrong listener on Lounge/Homebrew builds.
     let mut conf = format!(
-        r#"<VirtualHost *:{http_port}>
+        r#"<VirtualHost 127.0.0.1:{http_port}>
   ServerName {domain}
   DocumentRoot "{root}"
   <Directory "{root}">
@@ -361,7 +369,7 @@ fn write_vhost(
         let certs = ensure_site_cert(paths, &site.domain)?;
         conf.push_str(&format!(
             r#"
-<VirtualHost *:{https_port}>
+<VirtualHost 127.0.0.1:{https_port}>
   ServerName {domain}
   DocumentRoot "{root}"
   SSLEngine on
@@ -419,7 +427,23 @@ fn collect_php_versions(state: &AppState) -> Vec<String> {
     versions
 }
 
+struct StartApacheOpts {
+    run_configtest: bool,
+    start_php_runtimes: bool,
+}
+
 pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
+    start_apache_inner(
+        paths,
+        state,
+        StartApacheOpts {
+            run_configtest: true,
+            start_php_runtimes: true,
+        },
+    )
+}
+
+fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts) -> Result<()> {
     if let Some(pid) = state.runtime.apache_pid {
         if is_running(pid) {
             return reload_apache(paths, state);
@@ -437,7 +461,7 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
             if http_free && https_free {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
     crate::services::ports::ensure_ports_free(&state.stack, "apache")?;
@@ -449,15 +473,17 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     }
 
     let mut runtimes = Vec::new();
-    for ver in collect_php_versions(state) {
-        match start_php(paths, state, &ver) {
-            Ok(rt) => runtimes.push((ver, rt)),
-            Err(e) => {
-                eprintln!("apache: skip php {ver}: {e}");
+    if opts.start_php_runtimes {
+        for ver in collect_php_versions(state) {
+            match start_php(paths, state, &ver) {
+                Ok(rt) => runtimes.push((ver, rt)),
+                Err(e) => {
+                    eprintln!("apache: skip php {ver}: {e}");
+                }
             }
         }
     }
-    // Also resolve without starting if already up
+    // Resolve without starting if already up / reload fast-path.
     if runtimes.is_empty() {
         for ver in collect_php_versions(state) {
             if let Ok(rt) = resolve_php(paths, state, &ver) {
@@ -476,18 +502,21 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     }
 
     let conf_s = conf.display().to_string();
-    // Configtest first so we surface syntax/module errors instead of a silent exit.
-    let test = crate::services::process::command(&bin)
-        .args(["-f", &conf_s, "-t"])
-        .current_dir(&root)
-        .output();
-    if let Ok(out) = &test {
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            return Err(DevStackError::Message(format!(
-                "Apache configtest failed: {stderr}{stdout}"
-            )));
+    // Configtest on cold start so we surface syntax/module errors. Reload skips
+    // it — the conf was just rendered and the extra httpd -t was ~1–2s on CI.
+    if opts.run_configtest {
+        let test = crate::services::process::command(&bin)
+            .args(["-f", &conf_s, "-t"])
+            .current_dir(&root)
+            .output();
+        if let Ok(out) = &test {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                return Err(DevStackError::Message(format!(
+                    "Apache configtest failed: {stderr}{stdout}"
+                )));
+            }
         }
     }
 
@@ -508,9 +537,10 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     // Wait until the process is still alive and accepts TCP on the HTTPS port.
     // Do NOT use bind()-fails-as-ready: Windows SO_REUSEADDR lets bind succeed
     // while httpd is already listening, which false-negatived readiness.
+    // Keep the poll budget tight so site setting toggles stay under ~2s.
     let https_port = state.stack.apache_https_port;
     let mut ready = false;
-    for _ in 0..50 {
+    for _ in 0..40 {
         if !is_running(pid) {
             let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
             let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
@@ -522,7 +552,7 @@ pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
             ready = true;
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
     if !ready {
         let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
@@ -558,16 +588,25 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
                 let _ = stop_pid(file_pid);
             }
             state.runtime.apache_pid = None;
-            // Wait until our ports are free (mpm_winnt child can lag behind taskkill).
-            for _ in 0..30 {
-                let http_free = std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
-                let https_free = std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_https_port)).is_ok();
+            // Brief poll — mpm_winnt children usually release ports within ~200ms.
+            for _ in 0..20 {
+                let http_free =
+                    std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
+                let https_free = std::net::TcpListener::bind((
+                    "127.0.0.1",
+                    state.stack.apache_https_port,
+                ))
+                .is_ok();
                 if http_free && https_free {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(std::time::Duration::from_millis(15));
             }
-            return start_apache(paths, state);
+            // Skip configtest + PHP re-start — conf just rendered, PHP-CGI already up.
+            return start_apache_inner(paths, state, StartApacheOpts {
+                run_configtest: false,
+                start_php_runtimes: false,
+            });
         }
         let _ = crate::services::process::command(&bin)
             .args([
@@ -614,6 +653,41 @@ mod tests {
     use super::*;
     use crate::services::php_runtime::PhpRuntime;
     use std::path::PathBuf;
+
+    #[test]
+    fn windows_php_proxy_rebuilds_script_filename() {
+        let rt = PhpRuntime {
+            version: "8.4".into(),
+            root: PathBuf::from("."),
+            php_bin: PathBuf::from("php"),
+            fpm_bin: None,
+            cgi_bin: None,
+            listen: "127.0.0.1:9084".into(),
+            is_system: false,
+        };
+        let block = php_proxy_block(&rt, "C:/Users/Marcin/Sites/test");
+        if cfg!(windows) {
+            assert!(
+                block.contains("ProxyFCGISetEnvIf"),
+                "expected ProxyFCGISetEnvIf, got:\n{block}"
+            );
+            assert!(
+                block.contains("SCRIPT_FILENAME"),
+                "expected SCRIPT_FILENAME rebuild, got:\n{block}"
+            );
+            assert!(
+                block.contains("proxy:fcgi://127.0.0.1:9084/"),
+                "expected trailing-slash SetHandler, got:\n{block}"
+            );
+            assert!(
+                !block.contains("ProxyPassMatch"),
+                "ProxyPassMatch embeds /C:/… which php-cgi rejects:\n{block}"
+            );
+        } else {
+            assert!(block.contains("SetHandler"));
+            assert!(!block.contains("ProxyFCGISetEnvIf"));
+        }
+    }
 
     #[test]
     fn fcgi_target_tcp_has_trailing_slash() {

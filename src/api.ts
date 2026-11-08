@@ -325,3 +325,9 @@ export async function applyNextFreePorts(
 ): Promise<import("./types").PortsConfig> {
   return invoke("apply_next_free_ports", { serviceId });
 }
+
+export async function mintPhpmyadminSignonUrl(
+  siteId: string,
+): Promise<string> {
+  return invoke<string>("mint_phpmyadmin_signon_url", { siteId });
+}

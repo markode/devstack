@@ -419,20 +419,43 @@ pub fn configure_phpmyadmin(paths: &Paths, state: &AppState) -> Result<()> {
             ),
         )
     };
+    crate::services::pma_signon::ensure_tokens_dir(paths)?;
+    let tokens_dir = crate::services::pma_signon::tokens_dir_conf(paths);
     fs::write(
         &signon,
         format!(
             r#"<?php
+// DevStack one-time sign-on — credentials come from a short-lived token file,
+// never from ?pass= in the URL.
+session_name('SignonSession');
 session_start();
-if (!empty($_GET['db'])) {{
-  $_SESSION['PMA_single_signon_user'] = $_GET['user'] ?? 'root';
-  $_SESSION['PMA_single_signon_password'] = $_GET['pass'] ?? '';
-  $_SESSION['PMA_single_signon_host'] = '{host}';
-  $_SESSION['PMA_single_signon_port'] = '{port}';
-  $_SESSION['PMA_single_signon_only_database'] = $_GET['db'];
+$token = isset($_GET['token']) ? preg_replace('/[^a-f0-9]/', '', strtolower((string)$_GET['token'])) : '';
+$dir = '{tokens_dir}';
+$ttl = 60;
+if ($token !== '' && is_dir($dir)) {{
+  $file = $dir . DIRECTORY_SEPARATOR . $token . '.json';
+  if (is_file($file)) {{
+    $age = time() - (int)@filemtime($file);
+    $raw = @file_get_contents($file);
+    @unlink($file);
+    if ($raw !== false && $age >= 0 && $age <= $ttl) {{
+      $data = json_decode($raw, true);
+      if (is_array($data)) {{
+        $_SESSION['PMA_single_signon_user'] = $data['user'] ?? 'root';
+        $_SESSION['PMA_single_signon_password'] = $data['pass'] ?? '';
+        $_SESSION['PMA_single_signon_host'] = $data['host'] ?? '{host}';
+        $_SESSION['PMA_single_signon_port'] = (string)($data['port'] ?? '{port}');
+        if (!empty($data['db'])) {{
+          $_SESSION['PMA_single_signon_only_database'] = $data['db'];
+        }}
+      }}
+    }}
+  }}
 }}
 header('Location: index.php');
+exit;
 "#,
+            tokens_dir = tokens_dir.replace('\\', "\\\\").replace('\'', "\\'"),
             host = host,
             port = port,
         ),

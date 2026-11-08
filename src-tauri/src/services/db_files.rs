@@ -300,13 +300,22 @@ pub fn export_database_file(
     let root = databases_folder(paths, &state.db_files)?;
     let final_path = export_path_for(&root, engine, db_name);
     // Deterministic .partial next to target for atomic rename.
-    let tmp = final_path.with_file_name(format!(
-        "{}.partial",
-        final_path
+    // Keep real compression extensions on the temp name (`db.partial.sql.gz`),
+    // not `db.sql.gz.partial` — the latter selected zstd when `zstd` is on PATH.
+    let tmp = {
+        let name = final_path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("dump")
-    ));
+            .unwrap_or("dump.sql.gz");
+        let partial_name = if let Some(rest) = name.strip_suffix(".sql.gz") {
+            format!("{rest}.partial.sql.gz")
+        } else if let Some(rest) = name.strip_suffix(".archive.gz") {
+            format!("{rest}.partial.archive.gz")
+        } else {
+            format!("{name}.partial")
+        };
+        final_path.with_file_name(partial_name)
+    };
     if let Some(parent) = tmp.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -325,13 +334,14 @@ pub fn export_database_file(
         }
     };
 
-    // backup_database may append extension — resolve actual tmp
+    // backup_database may append an extension when the dest has none.
     let written = if tmp.exists() {
         tmp
     } else if PathBuf::from(format!("{}.sql.gz", tmp.display())).exists() {
         PathBuf::from(format!("{}.sql.gz", tmp.display()))
+    } else if PathBuf::from(format!("{}.sql.zst", tmp.display())).exists() {
+        PathBuf::from(format!("{}.sql.zst", tmp.display()))
     } else {
-        // search for partial
         tmp
     };
 
@@ -962,6 +972,48 @@ pub fn wp_search_replace_urls(
     Ok(())
 }
 
+pub fn mysql_simple_replace_pub(
+    paths: &Paths,
+    state: &AppState,
+    engine: &str,
+    db: &str,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    mysql_simple_replace(paths, state, engine, db, from, to)
+}
+
+/// Fast HTTPS/HTTP toggle: rewrite only `siteurl` / `home` in `wp_options`.
+pub fn mysql_wp_options_url_replace(
+    paths: &Paths,
+    state: &AppState,
+    engine: &str,
+    db: &str,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    let root = engine_install_dir(state, engine)?;
+    let client = client_bin_for(&root)?;
+    let connect = mysql_root_args(paths, state, engine);
+    let from_e = from.replace('\'', "''");
+    let to_e = to.replace('\'', "''");
+    let sql = format!(
+        "UPDATE `wp_options` SET `option_value`=REPLACE(`option_value`, '{from_e}', '{to_e}') \
+         WHERE `option_name` IN ('siteurl','home');"
+    );
+    let mut run = connect;
+    run.push(format!("--database={db}"));
+    run.push("-e".into());
+    run.push(sql);
+    let status = crate::services::process::command(&client).args(&run).status()?;
+    if !status.success() {
+        return Err(DevStackError::Message(format!(
+            "wp_options URL replace failed for `{db}` (exit {status})"
+        )));
+    }
+    Ok(())
+}
+
 fn mysql_simple_replace(
     paths: &Paths,
     state: &AppState,
@@ -988,12 +1040,27 @@ fn mysql_simple_replace(
         .args(&args)
         .output()?;
     let stmts = String::from_utf8_lossy(&out.stdout);
+    // Batch every REPLACE into one mysql session — per-statement spawn was
+    // multi-second on Windows (HTTPS toggle >3s CI budget).
+    let mut script = String::new();
     for line in stmts.lines().filter(|l| !l.trim().is_empty()) {
-        let mut run = connect.clone();
+        script.push_str(line.trim());
+        if !line.trim_end().ends_with(';') {
+            script.push(';');
+        }
+        script.push('\n');
+    }
+    if !script.is_empty() {
+        let mut run = connect;
         run.push(format!("--database={db}"));
         run.push("-e".into());
-        run.push(line.to_string());
-        let _ = crate::services::process::command(&client).args(&run).status();
+        run.push(script);
+        let status = crate::services::process::command(&client).args(&run).status()?;
+        if !status.success() {
+            return Err(DevStackError::Message(format!(
+                "URL replace failed for `{db}` (exit {status})"
+            )));
+        }
     }
     Ok(())
 }
