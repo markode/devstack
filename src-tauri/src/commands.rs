@@ -1170,11 +1170,12 @@ pub async fn repair_hosts(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus> {
     let mut state = ctx.state.lock().await;
     ensure_welcome_site(&ctx.paths, &mut state);
     let _ = crate::services::tls::ensure_root_ca(&ctx.paths);
-    crate::applog::info("hosts", "sync_hosts_and_trust_ca begin");
-    match dns::sync_hosts_and_trust_ca(&ctx.paths, &state) {
-        Ok(()) => crate::applog::info("hosts", "sync_hosts_and_trust_ca ok"),
+    // Retry clears the CA deferred marker so UAC can run again after a decline.
+    crate::applog::info("hosts", "retry_hosts_and_ca_trust begin");
+    match dns::retry_hosts_and_ca_trust(&ctx.paths, &state) {
+        Ok(()) => crate::applog::info("hosts", "retry_hosts_and_ca_trust ok"),
         Err(e) => {
-            crate::applog::error("hosts", format!("sync_hosts_and_trust_ca failed: {e:#}"));
+            crate::applog::error("hosts", format!("retry_hosts_and_ca_trust failed: {e:#}"));
             return Err(e);
         }
     }
@@ -1182,7 +1183,10 @@ pub async fn repair_hosts(ctx: State<'_, Arc<AppCtx>>) -> Result<HostsStatus> {
     let status = dns::check_hosts_status(&ctx.paths, &state);
     crate::applog::command_ok(
         "repair_hosts",
-        &format!("ok={} missing={:?}", status.ok, status.missing),
+        &format!(
+            "ok={} missing={:?} ca_trusted={}",
+            status.ok, status.missing, status.ca_trusted
+        ),
     );
     Ok(status)
 }

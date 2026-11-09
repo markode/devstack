@@ -40,6 +40,25 @@ pub struct AppState {
     pub sites_settings: SitesSettings,
     /// Full-site backup folder / schedule.
     pub backup_settings: BackupSettings,
+    /// Performance preferences (opt-in Defender exclusions, etc.).
+    pub performance: PerformanceSettings,
+}
+
+/// Opt-in performance tweaks. Defender exclusions default OFF and are never
+/// applied silently from apply_stack — only via Settings → Performance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PerformanceSettings {
+    /// Windows only: exclude DevStack data paths from Defender scanning.
+    pub defender_exclusions: bool,
+}
+
+impl Default for PerformanceSettings {
+    fn default() -> Self {
+        Self {
+            defender_exclusions: false,
+        }
+    }
 }
 
 /// Parked-folder + tooling preferences for the Sites panel.

@@ -420,3 +420,33 @@ pub async fn import_config(
     save_state(&ctx.paths.state_file, &state)?;
     Ok(report)
 }
+
+// --- Performance (opt-in Defender exclusions) ----------------------------------
+
+#[tauri::command]
+pub async fn get_performance_settings(
+    ctx: Ctx<'_>,
+) -> Result<crate::services::defender::PerformanceSettingsView> {
+    let state = ctx.state.lock().await;
+    Ok(crate::services::defender::settings_view(
+        &ctx.paths,
+        state.performance.defender_exclusions,
+    ))
+}
+
+/// Opt-in Windows Defender path exclusions. Default OFF; elevates via UAC.
+/// Never invoked from apply_stack — Settings → Performance only.
+#[tauri::command]
+pub async fn set_defender_exclusions(
+    ctx: Ctx<'_>,
+    enabled: bool,
+) -> Result<crate::services::defender::PerformanceSettingsView> {
+    let mut state = ctx.state.lock().await;
+    crate::services::defender::set_defender_exclusions(&ctx.paths, enabled)?;
+    state.performance.defender_exclusions = enabled;
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(crate::services::defender::settings_view(
+        &ctx.paths,
+        state.performance.defender_exclusions,
+    ))
+}

@@ -406,6 +406,8 @@ pub fn run() {
             commands_v030::export_config,
             commands_v030::inspect_config_archive,
             commands_v030::import_config,
+            commands_v030::get_performance_settings,
+            commands_v030::set_defender_exclusions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");

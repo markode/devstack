@@ -4,6 +4,7 @@ pub mod backup;
 pub mod config_transfer;
 pub mod database;
 pub mod db_files;
+pub mod defender;
 pub mod dns;
 pub mod dump;
 pub mod extras;

@@ -153,6 +153,18 @@ export async function repairHosts(): Promise<HostsStatus> {
   return invoke<HostsStatus>("repair_hosts");
 }
 
+export async function getPerformanceSettings(): Promise<
+  import("./types").PerformanceSettings
+> {
+  return invoke("get_performance_settings");
+}
+
+export async function setDefenderExclusions(
+  enabled: boolean,
+): Promise<import("./types").PerformanceSettings> {
+  return invoke("set_defender_exclusions", { enabled });
+}
+
 export async function listInstalled(
   packageId?: string,
 ): Promise<InstalledPackage[]> {

@@ -71,6 +71,17 @@ export interface HostsStatus {
   ok: boolean;
   missing: string[];
   message?: string | null;
+  /** True only when the DevStack CA is verified in the OS trust store. */
+  caTrusted?: boolean;
+  /** Present when HTTPS will warn until the user Retry-trusts the CA. */
+  caMessage?: string | null;
+}
+
+export interface PerformanceSettings {
+  defenderExclusions: boolean;
+  defenderExclusionsSupported: boolean;
+  exclusionPaths: string[];
+  defenderExclusionsHelp: string;
 }
 
 export interface InstalledPackage {

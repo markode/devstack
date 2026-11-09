@@ -93,16 +93,58 @@ export async function onVersionsUpdated(
 
 export async function getHostsStatus(): Promise<HostsStatus> {
   if (useMock()) {
-    return { ok: true, missing: [], message: null };
+    return {
+      ok: true,
+      missing: [],
+      message: null,
+      caTrusted: true,
+      caMessage: null,
+    };
   }
   return api.getHostsStatus();
 }
 
 export async function repairHosts(): Promise<HostsStatus> {
   if (useMock()) {
-    return { ok: true, missing: [], message: null };
+    return {
+      ok: true,
+      missing: [],
+      message: null,
+      caTrusted: true,
+      caMessage: null,
+    };
   }
   return api.repairHosts();
+}
+
+export async function getPerformanceSettings(): Promise<
+  import("./types").PerformanceSettings
+> {
+  if (useMock()) {
+    return {
+      defenderExclusions: false,
+      defenderExclusionsSupported: false,
+      exclusionPaths: [],
+      defenderExclusionsHelp:
+        "Windows Defender exclusions are opt-in and require UAC (default off).",
+    };
+  }
+  return api.getPerformanceSettings();
+}
+
+export async function setDefenderExclusions(
+  enabled: boolean,
+): Promise<import("./types").PerformanceSettings> {
+  if (useMock()) {
+    return {
+      defenderExclusions: enabled,
+      defenderExclusionsSupported: false,
+      exclusionPaths: [],
+      defenderExclusionsHelp:
+        "Windows Defender exclusions are opt-in and require UAC (default off).",
+    };
+  }
+  return api.setDefenderExclusions(enabled);
 }
 
 export async function listInstalled(
