@@ -394,15 +394,45 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
         ))
     });
 
-    rec.check("hosting.tools", "Hosting tools / rsync note", || {
+    rec.check("hosting.tools", "Hosting tools / SFTP fallback note", || {
         let tools = hosting_sync::tool_status(&MemoryStore::default());
-        if cfg!(windows) && !tools.rsync {
+        if !tools.rsync {
             let joined = tools.notes.join(" ");
-            if !joined.to_ascii_lowercase().contains("rsync") {
-                return Err(format!("no rsync note: {joined}"));
+            if !joined.to_ascii_lowercase().contains("sftp") {
+                return Err(format!("no SFTP fallback note: {joined}"));
             }
         }
         Ok(format!("ssh={} rsync={}", tools.ssh, tools.rsync))
+    });
+
+    rec.check("tray.menu_spec", "Tray menu builder (Start/Stop/Open/Quit)", || {
+        let state = lock(ctx);
+        let spec = crate::tray::menu_spec(&state);
+        let ids = crate::tray::menu_action_ids(&spec);
+        for need in ["toggle_stack", "open", "quit"] {
+            if !ids.iter().any(|id| id == need) {
+                return Err(format!("missing {need} in {ids:?}"));
+            }
+        }
+        Ok(format!("{} action(s)", ids.len()))
+    });
+
+    rec.check("tray.toggle_stack", "Tray Start/Stop stack handler", || {
+        let stopped = tauri::async_runtime::block_on(crate::tray::dispatch_headless(
+            ctx,
+            "toggle_stack",
+        ))
+        .map_err(|e| e)?;
+        let started = tauri::async_runtime::block_on(crate::tray::dispatch_headless(
+            ctx,
+            "toggle_stack",
+        ))
+        .map_err(|e| e)?;
+        let open = tauri::async_runtime::block_on(crate::tray::dispatch_headless(ctx, "open"))
+            .map_err(|e| e)?;
+        let quit = tauri::async_runtime::block_on(crate::tray::dispatch_headless(ctx, "quit"))
+            .map_err(|e| e)?;
+        Ok(format!("stop={stopped} start={started} open={open} quit={quit}"))
     });
 
     rec.check("metrics.snapshot", "Perf metrics snapshot", || {
@@ -507,11 +537,133 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
         Ok(url)
     });
 
-    rec.check("spx.status", "SPX profiler status", || {
-        let state = lock(ctx);
+    rec.check("spx.status", "SPX profiler / Xdebug offer", || {
+        let mut state = lock(ctx);
         let spx = metrics::spx_status(&ctx.paths, &state, None);
-        Ok(format!("available={} enabled={}", spx.available, spx.enabled))
+        if cfg!(windows) {
+            if spx.available {
+                return Ok(format!("dll present enabled={}", spx.enabled));
+            }
+            if !spx.suggest_xdebug_profiling {
+                return Err("Windows without SPX must suggest Xdebug profiling".into());
+            }
+            if metrics::spx_download_url(
+                spx.php_version.as_deref().unwrap_or("8.3"),
+                "windows",
+                "x86_64",
+            )
+            .is_some()
+            {
+                return Err("Windows must not advertise an official SPX DLL URL".into());
+            }
+            let after = metrics::enable_xdebug_profiling(&ctx.paths, &mut state, None)
+                .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "unavailable → xdebug offer notes={}",
+                after.notes.len()
+            ))
+        } else {
+            Ok(format!(
+                "available={} enabled={} url={:?}",
+                spx.available, spx.enabled, spx.download_url
+            ))
+        }
     });
+
+    // Live hosting SFTP against local OpenSSH when CI sets DEVSTACK_HOSTING_SSH_*.
+    if let Ok(host) = std::env::var("DEVSTACK_HOSTING_SSH_HOST") {
+        rec.check("hosting.sftp_live", "Hosting SFTP dry-run + push/pull", || {
+            let port: u16 = std::env::var("DEVSTACK_HOSTING_SSH_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(22);
+            let user = std::env::var("DEVSTACK_HOSTING_SSH_USER")
+                .unwrap_or_else(|_| whoami_fallback());
+            let key = std::env::var("DEVSTACK_HOSTING_SSH_KEY").map_err(|_| "DEVSTACK_HOSTING_SSH_KEY missing")?;
+            let remote = std::env::var("DEVSTACK_HOSTING_SSH_REMOTE")
+                .unwrap_or_else(|_| format!("/tmp/devstack-hosting-{}", std::process::id()));
+            let site_id = {
+                let state = lock(ctx);
+                let sid = state
+                    .sites
+                    .first()
+                    .map(|s| s.id.clone())
+                    .ok_or("no site for hosting")?;
+                let profile = hosting_sync::HostingProfile {
+                    id: "matrix-local".into(),
+                    name: "Matrix local".into(),
+                    host: host.clone(),
+                    port,
+                    user: user.clone(),
+                    auth: "key".into(),
+                    key_path: Some(key),
+                    remote_path: remote.clone(),
+                    remote_url: None,
+                    site_id: Some(sid.clone()),
+                    excludes: vec![".git/".into()],
+                    remote_db: None,
+                    has_password: false,
+                    has_db_password: false,
+                };
+                let store = MemoryStore::default();
+                hosting_sync::save_profile(&ctx.paths, &store, profile, None, None)
+                    .map_err(|e| e.to_string())?;
+                sid
+            };
+            let state = lock(ctx);
+            let store = MemoryStore::default();
+            let plan = hosting_sync::preview(
+                &ctx.paths,
+                &state,
+                &store,
+                "matrix-local",
+                hosting_sync::Direction::Push,
+                false,
+            )
+            .map_err(|e| e.to_string())?;
+            if plan.tool != "sftp" && plan.tool != "rsync" {
+                return Err(format!("unexpected tool {}", plan.tool));
+            }
+            let progress = noop_job_progress();
+            let push = hosting_sync::run_sync(
+                &ctx.paths,
+                &state,
+                &store,
+                "matrix-local",
+                hosting_sync::Direction::Push,
+                false,
+                false,
+                &progress,
+                "matrix-hosting-push",
+            )
+            .map_err(|e| e.to_string())?;
+            let pull = hosting_sync::run_sync(
+                &ctx.paths,
+                &state,
+                &store,
+                "matrix-local",
+                hosting_sync::Direction::Pull,
+                false,
+                false,
+                &progress,
+                "matrix-hosting-pull",
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "site={site_id} dry={} push_files={} pull_files={} tool={}",
+                plan.entries.len(),
+                push.files_transferred,
+                pull.files_transferred,
+                plan.tool
+            ))
+        });
+    } else {
+        rec.disabled(
+            "hosting.sftp_live",
+            "Hosting SFTP dry-run + push/pull",
+            "DEVSTACK_HOSTING_SSH_* not set (CI enables OpenSSH and re-runs)",
+        );
+    }
 
     rec.check("sites.clone", "Clone / duplicate site", || {
         let mut state = lock(ctx);
@@ -580,15 +732,12 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
         if which::which("rsync").is_ok() {
             return Ok("rsync present — dry-run path available".into());
         }
-        // No profile needed: preview short-circuits when rsync missing after profile resolve.
-        // Validate tool_status note + local-only preview path via tool_status notes already covered;
-        // here assert preview helper returns a plan with the scp note when given a temp profile.
         let tools = hosting_sync::tool_status(&MemoryStore::default());
         let joined = tools.notes.join(" ");
-        if !joined.to_ascii_lowercase().contains("rsync") {
-            return Err(format!("missing rsync note: {joined}"));
+        if !joined.to_ascii_lowercase().contains("sftp") {
+            return Err(format!("missing SFTP fallback note: {joined}"));
         }
-        Ok("rsync missing — UI note present; dry-run falls back cleanly".into())
+        Ok("rsync missing — built-in SFTP note present".into())
     });
 
     {
@@ -721,7 +870,8 @@ fn write_markdown(json_path: &Path, report: &MatrixReport) -> Result<(), String>
     md.push_str("## Features disabled on Windows (clear UI)\n\n");
     md.push_str("| Feature | UI message |\n| --- | --- |\n");
     md.push_str("| Typesense | Not available on Windows — Typesense does not publish Windows binaries. |\n");
-    md.push_str("| Hosting dry-run without rsync | rsync not found on Windows: dry-run unavailable; scp fallback without excludes. |\n\n");
+    md.push_str("| SPX profiler | No official php_spx.dll — UI offers Xdebug profiling instead. |\n");
+    md.push_str("| Hosting without rsync | Built-in SFTP dry-run + pull/push (size-based); rsync preferred when installed. |\n\n");
     md.push_str("## Feature results (actual)\n\n");
     md.push_str("| Status | Feature | ms | Detail |\n| --- | --- | ---: | --- |\n");
     for f in &report.features {
@@ -740,6 +890,12 @@ fn write_markdown(json_path: &Path, report: &MatrixReport) -> Result<(), String>
     fs::write(&md_path, md).map_err(|e| e.to_string())?;
     println!("Wrote {}", md_path.display());
     Ok(())
+}
+
+fn whoami_fallback() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "runner".into())
 }
 
 fn create_blank(ctx: &AppCtx) -> Result<String, String> {

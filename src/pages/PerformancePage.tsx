@@ -215,21 +215,50 @@ export function PerformancePage({ active = true }: { active?: boolean }) {
             >
               Open report folder
             </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy || !spx || (!spx.available && !spx.enabled)}
-              onClick={() => void guard(async () => setSpx(await client.setSpxEnabled(!spx?.enabled)))}
-            >
-              {spx?.enabled ? "Disable" : "Enable"}
-            </button>
+            {!spx?.available && !spx?.suggestXdebugProfiling ? (
+              <button
+                type="button"
+                className="btn btn-install"
+                disabled={busy || !spx}
+                onClick={() =>
+                  void guard(async () => setSpx(await client.ensureSpxExtension()))
+                }
+              >
+                Install SPX
+              </button>
+            ) : null}
+            {spx?.suggestXdebugProfiling ? (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy || !spx}
+                onClick={() =>
+                  void guard(async () =>
+                    setSpx(await client.enableXdebugProfiling()),
+                  )
+                }
+              >
+                Use Xdebug profiling instead
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy || !spx || (!spx.available && !spx.enabled)}
+                onClick={() => void guard(async () => setSpx(await client.setSpxEnabled(!spx?.enabled)))}
+              >
+                {spx?.enabled ? "Disable" : "Enable"}
+              </button>
+            )}
           </div>
         </div>
         <div className="settings-row settings-row-block">
           <span className="hint">
             {spx?.available
               ? `Add ${spx.uiQuery} to any site URL to open the SPX control panel.`
-              : "Install the php-spx extension to enable profiling."}
+              : spx?.suggestXdebugProfiling
+                ? "SPX has no Windows builds — enable Xdebug profiling as the supported alternative."
+                : "Install the php-spx extension to enable profiling."}
           </span>
           {spx?.notes.map((n) => (
             <span key={n} className="hint">

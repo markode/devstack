@@ -401,6 +401,8 @@ pub fn run() {
             commands_v030::set_slow_query_log,
             commands_v030::get_spx_status,
             commands_v030::set_spx_enabled,
+            commands_v030::ensure_spx_extension,
+            commands_v030::enable_xdebug_profiling,
             commands_v030::export_config,
             commands_v030::inspect_config_archive,
             commands_v030::import_config,

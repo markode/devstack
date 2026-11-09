@@ -326,6 +326,43 @@ pub async fn set_spx_enabled(
     crate::services::metrics::set_spx(&ctx.paths, &mut state, php_version.as_deref(), enabled)
 }
 
+#[tauri::command]
+pub async fn ensure_spx_extension(
+    ctx: Ctx<'_>,
+    php_version: Option<String>,
+) -> Result<SpxStatus> {
+    let state = ctx.state.lock().await.clone();
+    let installed = crate::services::metrics::ensure_spx_extension(
+        &ctx.paths,
+        &state,
+        ctx.registry.client(),
+        php_version.as_deref(),
+    )
+    .await?;
+    let mut status = crate::services::metrics::spx_status(&ctx.paths, &state, php_version.as_deref());
+    if !installed && status.suggest_xdebug_profiling {
+        status.notes.push(
+            "No official php-spx Windows build exists — use “Use Xdebug profiling instead”.".into(),
+        );
+    } else if !installed {
+        status.notes.push("php-spx download/install did not produce a loadable extension.".into());
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn enable_xdebug_profiling(
+    ctx: Ctx<'_>,
+    php_version: Option<String>,
+) -> Result<SpxStatus> {
+    let mut state = ctx.state.lock().await;
+    crate::services::metrics::enable_xdebug_profiling(
+        &ctx.paths,
+        &mut state,
+        php_version.as_deref(),
+    )
+}
+
 // --- 9. Config export / import ---------------------------------------------------
 
 #[tauri::command]

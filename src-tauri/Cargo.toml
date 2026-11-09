@@ -47,6 +47,7 @@ tauri-plugin-dialog = "2.8.4"
 dunce = "1"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 
 [profile.release]
 codegen-units = 1

@@ -426,15 +426,9 @@ pub fn tool_status(secrets: &dyn SecretStore) -> HostingTools {
     secrets.delete(probe);
     let mut notes = Vec::new();
     if !has("rsync") {
-        if cfg!(windows) {
-            notes.push(
-                "rsync not found on Windows: dry-run preview is unavailable; pulls/pushes fall back to scp (excludes and --delete are not applied). Install cwRsync or use WSL rsync for full sync.".into(),
-            );
-        } else {
-            notes.push(
-                "rsync not found: dry-run preview is unavailable and pulls use scp without excludes.".into(),
-            );
-        }
+        notes.push(
+            "rsync not found — using built-in SFTP for dry-run and pull/push (excludes applied; size-based diff). Install rsync/cwRsync for faster delta sync.".into(),
+        );
     }
     if !has("ssh") {
         notes.push("OpenSSH client not found — install it to use hosting sync.".into());
@@ -659,16 +653,7 @@ pub fn preview(
     let site = site_for_profile(state, &profile)?;
     let local = crate::paths_util::expand_home(&site.path);
     if which::which("rsync").is_err() {
-        let mut plan = summarize(
-            &profile.id,
-            direction,
-            true,
-            if direction == Direction::Push { local_push_listing(&local, &profile.excludes) } else { vec![] },
-            profile.excludes.clone(),
-            "local-listing",
-        );
-        plan.notes.push("rsync not installed: showing local files only; remote differences cannot be previewed.".into());
-        return Ok(plan);
+        return crate::services::hosting_sftp::preview(&profile, secrets, direction, &local);
     }
     let pw = secrets.get(&ssh_secret_key(&profile.id));
     let args = rsync_args(&profile, direction, true, &local, delete);
@@ -985,9 +970,29 @@ pub fn run_sync(
         deleted = d;
         bytes = b;
     } else {
-        emit(progress, job_id, "transfer", "Transferring with scp…", 0, None);
-        scp_fallback(paths, &profile, secrets, direction, &local)?;
-        notes.push("rsync not installed — used scp (excludes and --delete are not applied).".into());
+        emit(progress, job_id, "transfer", "Transferring with SFTP…", 0, None);
+        match crate::services::hosting_sftp::transfer(
+            &profile,
+            secrets,
+            direction,
+            &local,
+            delete,
+            progress,
+            job_id,
+        ) {
+            Ok((f, d, b, n)) => {
+                files = f;
+                deleted = d;
+                bytes = b;
+                notes.extend(n);
+            }
+            Err(e) => {
+                // Last resort: legacy scp (no excludes).
+                emit(progress, job_id, "transfer", "SFTP failed — falling back to scp…", 0, None);
+                scp_fallback(paths, &profile, secrets, direction, &local)?;
+                notes.push(format!("SFTP failed ({e}); used scp without excludes."));
+            }
+        }
     }
 
     let mut database_synced = false;

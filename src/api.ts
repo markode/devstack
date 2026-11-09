@@ -797,6 +797,22 @@ export async function setSpxEnabled(
   return invoke<SpxStatus>("set_spx_enabled", { enabled, phpVersion: phpVersion ?? null });
 }
 
+export async function ensureSpxExtension(
+  phpVersion?: string | null,
+): Promise<SpxStatus> {
+  return invoke<SpxStatus>("ensure_spx_extension", {
+    phpVersion: phpVersion ?? null,
+  });
+}
+
+export async function enableXdebugProfiling(
+  phpVersion?: string | null,
+): Promise<SpxStatus> {
+  return invoke<SpxStatus>("enable_xdebug_profiling", {
+    phpVersion: phpVersion ?? null,
+  });
+}
+
 export async function exportConfig(
   destPath: string,
   includeDatabases = false,

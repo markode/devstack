@@ -689,6 +689,9 @@ export interface SpxStatus {
   reportDir: string;
   uiQuery: string;
   notes: string[];
+  /** When SPX cannot be installed (e.g. Windows), offer Xdebug profiling instead. */
+  suggestXdebugProfiling?: boolean;
+  downloadUrl?: string | null;
 }
 
 export interface ConfigArchiveMeta {

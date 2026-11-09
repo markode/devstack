@@ -778,6 +778,20 @@ export async function setSpxEnabled(
   return api.setSpxEnabled(enabled, phpVersion);
 }
 
+export async function ensureSpxExtension(
+  phpVersion?: string | null,
+): Promise<SpxStatus> {
+  if (useMock()) return mock.mockEnsureSpx();
+  return api.ensureSpxExtension(phpVersion);
+}
+
+export async function enableXdebugProfiling(
+  phpVersion?: string | null,
+): Promise<SpxStatus> {
+  if (useMock()) return mock.mockEnableXdebugProfiling();
+  return api.enableXdebugProfiling(phpVersion);
+}
+
 export async function exportConfig(
   destPath: string,
   includeDatabases = false,

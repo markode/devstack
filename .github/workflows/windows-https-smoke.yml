@@ -65,6 +65,19 @@ jobs:
           npx playwright install chromium
           npm run test:e2e
 
+      - name: Enable OpenSSH Server for hosting SFTP E2E
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\windows-sshd-hosting.ps1
+          # Persist for the next step via GITHUB_ENV
+          "DEVSTACK_HOSTING_SSH_HOST=$($env:DEVSTACK_HOSTING_SSH_HOST)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DEVSTACK_HOSTING_SSH_PORT=$($env:DEVSTACK_HOSTING_SSH_PORT)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DEVSTACK_HOSTING_SSH_USER=$($env:DEVSTACK_HOSTING_SSH_USER)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DEVSTACK_HOSTING_SSH_KEY=$($env:DEVSTACK_HOSTING_SSH_KEY)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DEVSTACK_HOSTING_SSH_REMOTE=$($env:DEVSTACK_HOSTING_SSH_REMOTE)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip + Windows feature matrix
         working-directory: src-tauri
         timeout-minutes: 50

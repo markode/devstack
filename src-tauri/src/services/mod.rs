@@ -9,6 +9,7 @@ pub mod dump;
 pub mod extras;
 pub mod extras_v030;
 pub mod hosting_sync;
+pub mod hosting_sftp;
 pub mod httpd;
 pub mod mobile_preview;
 pub mod metrics;
