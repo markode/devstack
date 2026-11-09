@@ -37,31 +37,54 @@ function Set-SshdPasswordAuth {
   param([string]$ConfigPath, [string]$UserName)
   $lines = @(Get-Content -LiteralPath $ConfigPath -ErrorAction Stop)
   $out = New-Object System.Collections.Generic.List[string]
-  $skipMatch = $false
+  $skipMatchUser = $false
   foreach ($line in $lines) {
     $trim = $line.Trim()
     if ($trim -match "^Match\s+") {
-      # Entering any Match block ends our previous Match User skip.
-      $skipMatch = $trim -match "^Match User\s+$([regex]::Escape($UserName))\b"
-      if ($skipMatch) { continue }
-    } elseif ($skipMatch) {
-      # Skip body of our previous Match User block (indented directives).
+      $skipMatchUser = $trim -match "^Match User\s+$([regex]::Escape($UserName))\b"
+      if ($skipMatchUser) { continue }
+    } elseif ($skipMatchUser) {
       if ($trim -eq '' -or $line -match '^\s+') { continue }
-      $skipMatch = $false
+      $skipMatchUser = $false
     }
-    # Drop global PasswordAuthentication / KbdInteractive lines (commented or not).
+    # Drop prior global auth toggles and AllowGroups/AllowUsers we manage.
     if ($trim -match '^(#\s*)?PasswordAuthentication\b') { continue }
     if ($trim -match '^(#\s*)?KbdInteractiveAuthentication\b') { continue }
     if ($trim -match '^(#\s*)?ChallengeResponseAuthentication\b') { continue }
+    if ($trim -match '^(#\s*)?AllowGroups\b') { continue }
+    if ($trim -match '^(#\s*)?AllowUsers\b') { continue }
     $out.Add($line) | Out-Null
   }
-  $out.Add('') | Out-Null
-  $out.Add('PasswordAuthentication yes') | Out-Null
-  $out.Add('KbdInteractiveAuthentication yes') | Out-Null
-  $out.Add("Match User $UserName") | Out-Null
-  $out.Add('    PasswordAuthentication yes') | Out-Null
-  $out.Add('    PubkeyAuthentication yes') | Out-Null
-  Set-Content -LiteralPath $ConfigPath -Value $out -Encoding ascii
+
+  # OpenSSH Match blocks run until the next Match. Insert GLOBAL auth settings
+  # before the first Match so PasswordAuthentication applies to non-admins.
+  $final = New-Object System.Collections.Generic.List[string]
+  $inserted = $false
+  foreach ($line in $out) {
+    if (-not $inserted -and $line.Trim() -match '^Match\s+') {
+      $final.Add('') | Out-Null
+      $final.Add('PasswordAuthentication yes') | Out-Null
+      $final.Add('KbdInteractiveAuthentication yes') | Out-Null
+      # GHA images ship AllowGroups administrators "openssh users" — without
+      # membership, non-admin logins get Permission denied even with a valid password.
+      $final.Add('AllowGroups administrators "openssh users"') | Out-Null
+      $final.Add("AllowUsers $UserName") | Out-Null
+      $inserted = $true
+    }
+    $final.Add($line) | Out-Null
+  }
+  if (-not $inserted) {
+    $final.Add('') | Out-Null
+    $final.Add('PasswordAuthentication yes') | Out-Null
+    $final.Add('KbdInteractiveAuthentication yes') | Out-Null
+    $final.Add('AllowGroups administrators "openssh users"') | Out-Null
+    $final.Add("AllowUsers $UserName") | Out-Null
+  }
+  $final.Add('') | Out-Null
+  $final.Add("Match User $UserName") | Out-Null
+  $final.Add('    PasswordAuthentication yes') | Out-Null
+  $final.Add('    PubkeyAuthentication yes') | Out-Null
+  Set-Content -LiteralPath $ConfigPath -Value $final -Encoding ascii
 }
 
 $sshUser = 'devstackssh'
@@ -85,17 +108,35 @@ Set-Service -Name sshd -StartupType Automatic
 if (-not (Get-LocalUser -Name $sshUser -ErrorAction SilentlyContinue)) {
   New-LocalUser -Name $sshUser -Password $secure -PasswordNeverExpires -UserMayNotChangePassword |
     Out-Null
-  Add-LocalGroupMember -Group 'Users' -Member $sshUser -ErrorAction SilentlyContinue
 } else {
   Set-LocalUser -Name $sshUser -Password $secure
 }
-# Ensure account is active and password is what we expect (net user is authoritative on Windows).
 & net user $sshUser $plain /active:yes | Out-Host
+
+# Required by stock GHA sshd_config: AllowGroups administrators "openssh users"
+$opensshGroup = 'OpenSSH Users'
+if (-not (Get-LocalGroup -Name $opensshGroup -ErrorAction SilentlyContinue)) {
+  New-LocalGroup -Name $opensshGroup -Description 'Users permitted to log on via OpenSSH' | Out-Null
+}
+Add-LocalGroupMember -Group 'Users' -Member $sshUser -ErrorAction SilentlyContinue
+Add-LocalGroupMember -Group $opensshGroup -Member $sshUser -ErrorAction SilentlyContinue
+# Confirm membership (hard-fail if still missing — otherwise sshd AllowGroups denies login).
+$member = Get-LocalGroupMember -Group $opensshGroup -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -like "*\$sshUser" -or $_.Name -eq $sshUser }
+if (-not $member) {
+  # Fallback: net localgroup (some images reject Add-LocalGroupMember for this name).
+  & net localgroup "$opensshGroup" $sshUser /add | Out-Host
+  $member = Get-LocalGroupMember -Group $opensshGroup -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "*\$sshUser" -or $_.Name -eq $sshUser }
+}
+if (-not $member) {
+  throw "Failed to add $sshUser to '$opensshGroup' (required by sshd AllowGroups)"
+}
+Write-Host "$sshUser is a member of '$opensshGroup'"
 
 $userProfile = Join-Path 'C:\Users' $sshUser
 if (-not (Test-Path -LiteralPath $userProfile)) {
   New-Item -ItemType Directory -Force -Path $userProfile | Out-Null
-  # Seed a minimal profile so OpenSSH can resolve the home directory.
   New-Item -ItemType Directory -Force -Path (Join-Path $userProfile '.ssh') | Out-Null
 }
 
@@ -111,11 +152,9 @@ Start-Sleep -Seconds 3
 $remote = Join-Path $userProfile 'devstack-hosting-remote'
 New-Item -ItemType Directory -Force -Path $remote | Out-Null
 icacls $remote /grant:r "${sshUser}:(OI)(CI)F" /grant:r "Administrators:(OI)(CI)F" /grant:r "SYSTEM:(OI)(CI)F" | Out-Null
-# Home + .ssh must be traversable by the user for password sessions.
 icacls $userProfile /grant:r "${sshUser}:(OI)(CI)F" | Out-Null
 $remotePosix = ($remote -replace '\\', '/')
 
-# Port must be open.
 $listening = Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue
 if (-not $listening) {
   try {
@@ -127,8 +166,7 @@ if (-not $listening) {
   }
 }
 
-# Password auth probe. Use a .cmd askpass with delayed-expansion disabled so the
-# password is echoed literally (prior failure: Permission denied with askpass).
+# Password auth probe with delayed-expansion-safe askpass.
 $ask = Join-Path $env:TEMP 'devstack-ssh-askpass.cmd'
 @(
   '@echo off'
@@ -161,8 +199,10 @@ try {
     Start-Sleep -Seconds 2
   }
   if (-not $probeOk) {
-    Write-Host '--- sshd_config (tail) ---'
-    Get-Content -LiteralPath $sshdConfig -Tail 40 | Out-Host
+    Write-Host '--- sshd_config ---'
+    Get-Content -LiteralPath $sshdConfig | Out-Host
+    Write-Host '--- local groups for user ---'
+    & net user $sshUser | Out-Host
     throw "ssh password probe to ${sshUser}@127.0.0.1 failed after retries ($lastErr)"
   }
 }
