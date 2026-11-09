@@ -7,6 +7,7 @@ pub mod packages;
 pub mod paths_util;
 pub mod php;
 pub mod services;
+pub mod tray;
 
 use std::sync::Arc;
 
@@ -28,6 +29,11 @@ use commands::{
     start_dev_stack, start_managed_service, stop_dev_stack, stop_managed_service,
     uninstall_package, update_db_files_settings, update_developer_settings, update_package,
     update_ports_config, update_site_environment,
+    backup_site_full, clear_php_dumps, delete_site_backup_cmd, get_backup_settings,
+    get_dump_status, get_share_status, get_sites_settings, get_tools_status, install_dev_tools,
+    list_php_dumps, list_site_backups_cmd, restore_site_backup_cmd, run_due_site_backups_cmd,
+    set_site_xdebug, start_site_share, stop_site_share, sync_parked_sites_cmd,
+    update_backup_settings, update_sites_settings,
 };
 use config::default_data_root;
 use services::db_files::{
@@ -55,6 +61,9 @@ pub fn run() {
 
     let ctx = bootstrap_ctx(default_data_root()).expect("failed to init DevStack data dir");
     let ctx = Arc::new(ctx);
+    if let Err(e) = services::dump::start_dump_server(&ctx.paths) {
+        eprintln!("devstack dump receiver: {e}");
+    }
     prefetch_version_lists(ctx.clone());
     // Auto-sync hosts+CA on launch when the DevStack block is missing (may prompt UAC),
     // and regenerate managed php.ini (Windows extension_dir + modules).
@@ -92,6 +101,11 @@ pub fn run() {
                         &state,
                         before,
                     );
+                }
+                if let Ok(n) = crate::services::parked::sync_parked_sites(&launch_ctx.paths, &mut state) {
+                    if n > 0 {
+                        let _ = crate::config::save_state(&launch_ctx.paths.state_file, &state);
+                    }
                 }
                 let _ = crate::php::regenerate_all_php_ini(&launch_ctx.paths, &state);
                 match crate::services::dns::ensure_hosts_if_needed(&launch_ctx.paths, &state) {
@@ -185,6 +199,21 @@ pub fn run() {
         .manage(ctx)
         .setup(|app| {
             let handle = app.handle().clone();
+            {
+                let dump_handle = handle.clone();
+                crate::services::dump::attach_emitter(move |entry| {
+                    use tauri::Emitter;
+                    let _ = dump_handle.emit("php-dump", entry);
+                });
+            }
+            {
+                use tauri::Manager;
+                let ctx: Arc<commands::AppCtx> = app.state::<Arc<commands::AppCtx>>().inner().clone();
+                if let Err(e) = tray::setup(&handle, &ctx) {
+                    crate::applog::warn("tray", format!("tray unavailable: {e}"));
+                }
+                spawn_background_jobs(handle.clone(), ctx);
+            }
             crate::applog::attach_emitter(move |entry| {
                 use tauri::Emitter;
                 let _ = handle.emit("app-log", entry);
@@ -266,6 +295,25 @@ pub fn run() {
             append_app_log,
             get_developer_settings,
             update_developer_settings,
+            get_sites_settings,
+            update_sites_settings,
+            sync_parked_sites_cmd,
+            get_share_status,
+            start_site_share,
+            stop_site_share,
+            get_dump_status,
+            list_php_dumps,
+            clear_php_dumps,
+            get_tools_status,
+            install_dev_tools,
+            get_backup_settings,
+            update_backup_settings,
+            backup_site_full,
+            list_site_backups_cmd,
+            restore_site_backup_cmd,
+            delete_site_backup_cmd,
+            run_due_site_backups_cmd,
+            set_site_xdebug,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");
@@ -273,3 +321,36 @@ pub fn run() {
 
 pub use commands::AppCtx as DevStackCtx;
 pub use config::default_data_root as data_root;
+
+/// Parked-folder watcher + scheduled full-site backups.
+fn spawn_background_jobs(app: tauri::AppHandle, ctx: Arc<commands::AppCtx>) {
+    let (watch, dirs) = tauri::async_runtime::block_on(async {
+        let s = ctx.state.lock().await;
+        (s.sites_settings.watch_enabled, s.sites_settings.parked_dirs.clone())
+    });
+    if watch {
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (app, ctx) = (app.clone(), ctx.clone());
+        let _ = services::parked::spawn_parked_watcher(dirs, running, move || {
+            let (app, ctx) = (app.clone(), ctx.clone());
+            tauri::async_runtime::spawn(async move {
+                let _ = commands::sync_parked_now(Some(&app), &ctx).await;
+            });
+        });
+    }
+
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        let snapshot = tauri::async_runtime::block_on(async {
+            let s = ctx.state.lock().await;
+            (s.backup_settings.interval_secs > 0).then(|| s.clone())
+        });
+        let Some(state) = snapshot else { continue };
+        let emit_app = app.clone();
+        let progress: services::progress::JobProgressFn = Arc::new(move |ev| {
+            use tauri::Emitter;
+            let _ = emit_app.emit("job-progress", ev);
+        });
+        let _ = services::site_backup::run_due_backups(&ctx.paths, &state, &progress);
+    });
+}

@@ -14,6 +14,7 @@ use crate::services::ports::{
     PortRemapNotice, PortSnapshot,
 };
 use crate::services::process::is_running;
+use crate::services::progress::{emit, noop_job_progress, JobProgressFn};
 use crate::services::sites::refresh_site_metadata;
 use crate::services::tls::ensure_root_ca;
 
@@ -111,7 +112,34 @@ pub fn refresh_site_process_status(state: &mut AppState) {
     }
 }
 
+/// Job id used for stack start/apply progress events.
+pub const STACK_JOB_ID: &str = "stack";
+
+/// Ordered phases emitted by [`apply_stack_with_progress`].
+pub const STACK_PHASES: &[&str] = &["ports", "dns", "database", "php", "nginx", "apache", "done"];
+
+fn stack_phase(progress: &JobProgressFn, phase: &str, message: &str) {
+    let idx = STACK_PHASES.iter().position(|p| *p == phase).unwrap_or(0) as u64;
+    emit(
+        progress,
+        STACK_JOB_ID,
+        phase,
+        message,
+        idx,
+        Some(STACK_PHASES.len() as u64 - 1),
+    );
+}
+
 pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
+    apply_stack_with_progress(paths, state, &noop_job_progress())
+}
+
+pub fn apply_stack_with_progress(
+    paths: &Paths,
+    state: &mut AppState,
+    progress: &JobProgressFn,
+) -> Result<StackStatus> {
+    stack_phase(progress, "ports", "Checking ports…");
     refresh_site_metadata(state);
 
     state.runtime.stack_intentionally_stopped = false;
@@ -134,6 +162,7 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
         save_state(&paths.state_file, state)?;
     }
 
+    stack_phase(progress, "dns", "Starting DNS and trusting certificates…");
     ensure_root_ca(paths)?;
     // Single UAC on Windows for hosts + CA trust; unix uses helper/sudo separately.
     let _ = sync_hosts_and_trust_ca(paths, state);
@@ -149,6 +178,7 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
         }
     }
 
+    stack_phase(progress, "database", "Starting database…");
     let engine = state.active_database.clone().or_else(|| {
         if state.installed.contains_key("mariadb") {
             Some("mariadb".into())
@@ -174,6 +204,7 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     // Catch install/toggle mismatches even when ports did not remap this start.
     let _ = crate::services::wp_url::repair_mismatched_wp_urls(paths, state);
 
+    stack_phase(progress, "php", "Preparing PHP…");
     if !state.installed.contains_key("php") {
         let _ = register_system_php(state, paths);
     }
@@ -182,7 +213,9 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     // Start Nginx then Apache sequentially but without blocking the UI event
     // loop longer than necessary — callers already hold the stack mutex.
     // Never auto-open a browser from Start stack — the Sites UI owns that.
+    stack_phase(progress, "nginx", "Starting Nginx…");
     let nginx_err = start_nginx(paths, state).err();
+    stack_phase(progress, "apache", "Starting Apache…");
     let apache_err = start_apache(paths, state).err();
     refresh_site_process_status(state);
     if let Some(ref e) = nginx_err.as_ref().or(apache_err.as_ref()) {
@@ -194,6 +227,7 @@ pub fn apply_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     if let Some(e) = nginx_err.or(apache_err) {
         return Err(e);
     }
+    stack_phase(progress, "done", "Stack ready");
     Ok(stack_status(state))
 }
 
@@ -201,7 +235,16 @@ pub fn start_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     apply_stack(paths, state)
 }
 
+pub fn start_stack_with_progress(
+    paths: &Paths,
+    state: &mut AppState,
+    progress: &JobProgressFn,
+) -> Result<StackStatus> {
+    apply_stack_with_progress(paths, state, progress)
+}
+
 pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
+    let _ = crate::services::share::stop_share(paths, state);
     let _ = stop_nginx(paths, state);
     let _ = stop_apache(paths, state);
     let _ = stop_database(paths, state);
@@ -390,4 +433,22 @@ fn rewrite_wp_urls_for_https_toggle(
         Err(e) => crate::applog::warn("wordpress", &format!("https-toggle URL repair: {e}")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn stack_phases_are_ordered_and_end_with_done() {
+        assert_eq!(STACK_PHASES.first(), Some(&"ports"));
+        assert_eq!(STACK_PHASES.last(), Some(&"done"));
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let progress: JobProgressFn = Arc::new(move |ev| sink.lock().unwrap().push(ev.phase));
+        stack_phase(&progress, "ports", "x");
+        stack_phase(&progress, "done", "y");
+        assert_eq!(*seen.lock().unwrap(), vec!["ports", "done"]);
+    }
 }

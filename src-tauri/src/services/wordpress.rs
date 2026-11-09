@@ -337,6 +337,8 @@ pub async fn create_wordpress_site(
         database_password: None,
         status: "running".into(),
         is_template: false,
+        parked: false,
+        xdebug: false,
     };
     let public_url = crate::services::ports::canonical_site_url(&provisional, state);
     let db_host = crate::services::ports::mysql_db_host(
@@ -431,6 +433,8 @@ pub async fn create_wordpress_site(
         database_password: Some(db_pass),
         status: "running".into(),
         is_template: false,
+        parked: false,
+        xdebug: false,
     };
     let details = detect_site(&site);
     site.framework = Some(details.framework);

@@ -373,6 +373,8 @@ pub async fn duplicate_from_source(
         database_password: Some(db_pass),
         status: "running".into(),
         is_template: false,
+        parked: false,
+        xdebug: false,
     };
     let details = detect_site(&site);
     site.framework = Some(details.framework);

@@ -1370,6 +1370,8 @@ mod tests {
             database_password: None,
             status: "stopped".into(),
             is_template: false,
+            parked: false,
+            xdebug: false,
         };
         assert_eq!(canonical_site_url(&site, &state), "http://test.test:8088");
     }

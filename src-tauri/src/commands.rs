@@ -49,7 +49,8 @@ use crate::services::sites::{
     create_site, delete_site, detect_site, refresh_site_metadata, SiteDetails,
 };
 use crate::services::stack::{
-    apply_stack, reload_sites, stack_status, start_stack, stop_stack, StackStatus,
+    apply_stack_with_progress, reload_sites, stack_status, start_stack_with_progress, stop_stack,
+    StackStatus,
 };
 use crate::services::templates::{
     duplicate_from_source, list_templates, mark_site_as_template, DuplicateRequest,
@@ -493,60 +494,75 @@ pub async fn get_stack_status(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus
     Ok(stack_status(&state))
 }
 
-#[tauri::command]
-pub async fn start_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+pub async fn run_start_stack(app: &AppHandle, ctx: &Arc<AppCtx>) -> Result<StackStatus> {
     crate::applog::command_call("start_dev_stack", "{}");
     let _guard = StackOpGuard::try_acquire()?;
+    let progress = job_progress_emitter(app.clone());
     let mut state = ctx.state.lock().await;
-    match start_stack(&ctx.paths, &mut state) {
-        Ok(s) => {
-            crate::applog::command_ok(
-                "start_dev_stack",
-                &format!(
-                    "nginx={} apache={} db={:?}",
-                    s.nginx, s.apache, s.database_engine
-                ),
-            );
-            Ok(s)
-        }
-        Err(e) => {
-            crate::applog::command_err("start_dev_stack", &format!("{e:#}"));
-            Err(e)
-        }
+    let res = start_stack_with_progress(&ctx.paths, &mut state, &progress);
+    match &res {
+        Ok(s) => crate::applog::command_ok(
+            "start_dev_stack",
+            &format!(
+                "nginx={} apache={} db={:?}",
+                s.nginx, s.apache, s.database_engine
+            ),
+        ),
+        Err(e) => crate::applog::command_err("start_dev_stack", &format!("{e:#}")),
     }
+    drop(state);
+    notify_stack_changed(app, ctx, res.as_ref().ok()).await;
+    res
 }
 
-#[tauri::command]
-pub async fn stop_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+pub async fn run_stop_stack(app: &AppHandle, ctx: &Arc<AppCtx>) -> Result<StackStatus> {
     crate::applog::command_call("stop_dev_stack", "{}");
     let _guard = StackOpGuard::try_acquire()?;
     let mut state = ctx.state.lock().await;
-    match stop_stack(&ctx.paths, &mut state) {
-        Ok(s) => {
-            crate::applog::command_ok("stop_dev_stack", "stopped");
-            Ok(s)
-        }
-        Err(e) => {
-            crate::applog::command_err("stop_dev_stack", &format!("{e:#}"));
-            Err(e)
-        }
+    let res = stop_stack(&ctx.paths, &mut state);
+    match &res {
+        Ok(_) => crate::applog::command_ok("stop_dev_stack", "stopped"),
+        Err(e) => crate::applog::command_err("stop_dev_stack", &format!("{e:#}")),
     }
+    drop(state);
+    notify_stack_changed(app, ctx, res.as_ref().ok()).await;
+    res
+}
+
+pub async fn run_apply_stack(app: &AppHandle, ctx: &Arc<AppCtx>) -> Result<StackStatus> {
+    crate::applog::command_call("apply_dev_stack", "{}");
+    let progress = job_progress_emitter(app.clone());
+    let mut state = ctx.state.lock().await;
+    let res = apply_stack_with_progress(&ctx.paths, &mut state, &progress);
+    match &res {
+        Ok(_) => crate::applog::command_ok("apply_dev_stack", "ok"),
+        Err(e) => crate::applog::command_err("apply_dev_stack", &format!("{e:#}")),
+    }
+    drop(state);
+    notify_stack_changed(app, ctx, res.as_ref().ok()).await;
+    res
+}
+
+async fn notify_stack_changed(app: &AppHandle, ctx: &Arc<AppCtx>, status: Option<&StackStatus>) {
+    if let Some(s) = status {
+        let _ = app.emit("stack-status", s);
+    }
+    crate::tray::refresh(app, ctx).await;
 }
 
 #[tauri::command]
-pub async fn apply_dev_stack(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
-    crate::applog::command_call("apply_dev_stack", "{}");
-    let mut state = ctx.state.lock().await;
-    match apply_stack(&ctx.paths, &mut state) {
-        Ok(s) => {
-            crate::applog::command_ok("apply_dev_stack", "ok");
-            Ok(s)
-        }
-        Err(e) => {
-            crate::applog::command_err("apply_dev_stack", &format!("{e:#}"));
-            Err(e)
-        }
-    }
+pub async fn start_dev_stack(app: AppHandle, ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    run_start_stack(&app, ctx.inner()).await
+}
+
+#[tauri::command]
+pub async fn stop_dev_stack(app: AppHandle, ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    run_stop_stack(&app, ctx.inner()).await
+}
+
+#[tauri::command]
+pub async fn apply_dev_stack(app: AppHandle, ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus> {
+    run_apply_stack(&app, ctx.inner()).await
 }
 
 #[tauri::command]
@@ -1324,4 +1340,260 @@ pub async fn update_developer_settings(
     }
     save_state(&ctx.paths.state_file, &state)?;
     Ok(state.developer.clone())
+}
+
+// --- v0.2.9: parked sites, share, dumps, tools, site backups, xdebug ------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParkedSyncResult {
+    pub added: usize,
+    pub sites: Vec<SiteRecord>,
+}
+
+/// Rescan parked folders, persist, and refresh hosts/vhosts only when sites changed.
+pub async fn sync_parked_now(app: Option<&AppHandle>, ctx: &Arc<AppCtx>) -> Result<ParkedSyncResult> {
+    let mut state = ctx.state.lock().await;
+    let before: Vec<String> = state.sites.iter().map(|s| s.id.clone()).collect();
+    let added = crate::services::parked::sync_parked_sites(&ctx.paths, &mut state)?;
+    let changed = added > 0 || before.len() != state.sites.len();
+    if changed {
+        save_state(&ctx.paths.state_file, &state)?;
+        let _ = dns::sync_hosts_if_needed(&ctx.paths, &state);
+        let _ = reload_sites(&ctx.paths, &mut state);
+    }
+    let sites = state.sites.clone();
+    drop(state);
+    if changed {
+        if let Some(app) = app {
+            let _ = app.emit("sites-changed", added);
+            crate::tray::refresh(app, ctx).await;
+        }
+    }
+    Ok(ParkedSyncResult { added, sites })
+}
+
+#[tauri::command]
+pub async fn get_sites_settings(ctx: State<'_, Arc<AppCtx>>) -> Result<crate::config::SitesSettings> {
+    Ok(ctx.state.lock().await.sites_settings.clone())
+}
+
+#[tauri::command]
+pub async fn update_sites_settings(
+    ctx: State<'_, Arc<AppCtx>>,
+    parked_dirs: Option<Vec<String>>,
+    watch_enabled: Option<bool>,
+    opt_in_path: Option<bool>,
+) -> Result<crate::config::SitesSettings> {
+    let mut state = ctx.state.lock().await;
+    if let Some(dirs) = parked_dirs {
+        state.sites_settings.parked_dirs = dirs
+            .into_iter()
+            .filter(|d| !d.trim().is_empty())
+            .map(PathBuf::from)
+            .collect();
+    }
+    if let Some(v) = watch_enabled {
+        state.sites_settings.watch_enabled = v;
+    }
+    if let Some(v) = opt_in_path {
+        if v != state.sites_settings.opt_in_path {
+            let _ = crate::services::tools::write_shims(&ctx.paths, &state);
+            crate::services::tools::apply_path_opt_in(&ctx.paths, v)?;
+            state.sites_settings.opt_in_path = v;
+        }
+    }
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(state.sites_settings.clone())
+}
+
+#[tauri::command]
+pub async fn sync_parked_sites_cmd(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<ParkedSyncResult> {
+    sync_parked_now(Some(&app), ctx.inner()).await
+}
+
+// Share (Cloudflare quick tunnel)
+
+#[tauri::command]
+pub async fn get_share_status(ctx: State<'_, Arc<AppCtx>>) -> Result<crate::services::share::ShareInfo> {
+    let state = ctx.state.lock().await;
+    Ok(crate::services::share::share_info(&state))
+}
+
+#[tauri::command]
+pub async fn start_site_share(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+) -> Result<crate::services::share::ShareInfo> {
+    let progress = job_progress_emitter(app);
+    let bin = crate::services::share::ensure_cloudflared(&ctx.paths, &progress, "share").await?;
+    let mut state = ctx.state.lock().await;
+    let info = crate::services::share::start_share(&ctx.paths, &mut state, &site_id, &bin)?;
+    crate::services::progress::emit(&progress, "share", "done", "Sharing", 100, Some(100));
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn stop_site_share(ctx: State<'_, Arc<AppCtx>>) -> Result<crate::services::share::ShareInfo> {
+    let mut state = ctx.state.lock().await;
+    crate::services::share::stop_share(&ctx.paths, &mut state)
+}
+
+// PHP dump()
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DumpStatus {
+    pub port: Option<u16>,
+    pub helper_path: String,
+}
+
+#[tauri::command]
+pub async fn get_dump_status(ctx: State<'_, Arc<AppCtx>>) -> Result<DumpStatus> {
+    Ok(DumpStatus {
+        port: crate::services::dump::dump_port(),
+        helper_path: crate::services::dump::php_helper_path(&ctx.paths)
+            .display()
+            .to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn list_php_dumps(limit: Option<usize>) -> Result<Vec<crate::services::dump::DumpEntry>> {
+    Ok(crate::services::dump::list_dumps(limit))
+}
+
+#[tauri::command]
+pub async fn clear_php_dumps() -> Result<()> {
+    crate::services::dump::clear_dumps();
+    Ok(())
+}
+
+// Dev tools (composer / wp / node shims)
+
+#[tauri::command]
+pub async fn get_tools_status(
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<crate::services::tools::ToolsStatus> {
+    let state = ctx.state.lock().await;
+    Ok(crate::services::tools::tools_status(&ctx.paths, &state))
+}
+
+#[tauri::command]
+pub async fn install_dev_tools(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<crate::services::tools::ToolsStatus> {
+    let progress = job_progress_emitter(app);
+    crate::services::tools::ensure_composer(&ctx.paths, &progress, "tools").await?;
+    crate::services::tools::ensure_wp_cli(&ctx.paths, &progress, "tools").await?;
+    let state = ctx.state.lock().await;
+    crate::services::tools::write_shims(&ctx.paths, &state)?;
+    crate::services::progress::emit(&progress, "tools", "done", "Tools ready", 100, Some(100));
+    Ok(crate::services::tools::tools_status(&ctx.paths, &state))
+}
+
+// Full-site backups
+
+#[tauri::command]
+pub async fn get_backup_settings(ctx: State<'_, Arc<AppCtx>>) -> Result<crate::config::BackupSettings> {
+    Ok(ctx.state.lock().await.backup_settings.clone())
+}
+
+#[tauri::command]
+pub async fn update_backup_settings(
+    ctx: State<'_, Arc<AppCtx>>,
+    folder: Option<String>,
+    interval_secs: Option<u64>,
+    retain: Option<u32>,
+) -> Result<crate::config::BackupSettings> {
+    let mut state = ctx.state.lock().await;
+    if let Some(f) = folder {
+        state.backup_settings.folder = if f.trim().is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(f))
+        };
+    }
+    if let Some(v) = interval_secs {
+        state.backup_settings.interval_secs = v;
+    }
+    if let Some(v) = retain {
+        state.backup_settings.retain = v;
+    }
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(state.backup_settings.clone())
+}
+
+#[tauri::command]
+pub async fn backup_site_full(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+) -> Result<crate::services::site_backup::SiteBackupRecord> {
+    let progress = job_progress_emitter(app);
+    let state = ctx.state.lock().await.clone();
+    crate::services::site_backup::backup_site(&ctx.paths, &state, &site_id, &progress, "site-backup")
+}
+
+#[tauri::command]
+pub async fn list_site_backups_cmd(
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: Option<String>,
+) -> Result<Vec<crate::services::site_backup::SiteBackupRecord>> {
+    let state = ctx.state.lock().await;
+    Ok(crate::services::site_backup::list_site_backups(
+        &ctx.paths,
+        &state,
+        site_id.as_deref(),
+    ))
+}
+
+#[tauri::command]
+pub async fn restore_site_backup_cmd(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+    backup_id: String,
+) -> Result<crate::services::site_backup::SiteBackupRecord> {
+    let progress = job_progress_emitter(app);
+    let state = ctx.state.lock().await.clone();
+    crate::services::site_backup::restore_site_backup(
+        &ctx.paths,
+        &state,
+        &backup_id,
+        &progress,
+        "site-restore",
+    )
+}
+
+#[tauri::command]
+pub async fn delete_site_backup_cmd(ctx: State<'_, Arc<AppCtx>>, backup_id: String) -> Result<()> {
+    let state = ctx.state.lock().await;
+    crate::services::site_backup::delete_site_backup(&ctx.paths, &state, &backup_id)
+}
+
+#[tauri::command]
+pub async fn run_due_site_backups_cmd(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+) -> Result<Vec<crate::services::site_backup::SiteBackupRecord>> {
+    let progress = job_progress_emitter(app);
+    let state = ctx.state.lock().await.clone();
+    crate::services::site_backup::run_due_backups(&ctx.paths, &state, &progress)
+}
+
+// Per-site Xdebug
+
+#[tauri::command]
+pub async fn set_site_xdebug(
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+    enabled: bool,
+) -> Result<crate::services::xdebug_site::SiteXdebugView> {
+    let mut state = ctx.state.lock().await;
+    crate::services::xdebug_site::set_site_xdebug(&ctx.paths, &mut state, &site_id, enabled)
 }
