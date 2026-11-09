@@ -313,13 +313,15 @@ mod tests {
     #[test]
     fn unix_shims_reference_tools_dir_and_fall_back() {
         let tools = PathBuf::from("/data/DevStack/tools");
+        let phar = tools.join("composer.phar");
         let s = unix_php_phar_shim(&tools, "composer", "composer.phar", Some((Path::new("/p/php"), None)));
-        assert!(s.contains("/data/DevStack/tools/composer.phar"));
-        assert!(s.contains("/p/php"));
+        // Use Path::display so the assertion matches Windows `\…` vs Unix `/…`.
+        assert!(s.contains(&phar.display().to_string()), "{s}");
+        assert!(s.contains(&Path::new("/p/php").display().to_string()));
         assert!(s.contains("exec composer"));
         let n = unix_node_shim(&tools, "npm", Some(Path::new("/n/bin")));
-        assert!(n.contains("/n/bin/npm"));
-        assert!(n.contains("/data/DevStack/tools"));
+        assert!(n.contains(&format!("{}/npm", Path::new("/n/bin").display())));
+        assert!(n.contains(&tools.display().to_string()));
     }
 
     #[test]
@@ -327,7 +329,7 @@ mod tests {
         let tools = PathBuf::from("C:/DevStack/tools");
         let s = windows_php_phar_shim(&tools, "wp", "wp-cli.phar", Some((Path::new("C:/php/php.exe"), None)));
         assert!(s.contains("wp-cli.phar"));
-        assert!(s.contains("C:/DevStack/tools"));
+        assert!(s.contains(&tools.display().to_string()), "{s}");
         assert!(s.contains("%*"));
     }
 
