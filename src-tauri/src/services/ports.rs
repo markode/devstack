@@ -39,6 +39,72 @@ pub struct PortsConfig {
     pub dns: u16,
     /// URL port for phpMyAdmin (served by Nginx — mirrors nginx HTTPS).
     pub phpmyadmin: u16,
+    #[serde(default = "default_memcached")]
+    pub memcached: u16,
+    #[serde(default = "default_meilisearch")]
+    pub meilisearch: u16,
+    #[serde(default = "default_typesense")]
+    pub typesense: u16,
+    #[serde(default = "default_minio_api")]
+    pub minio_api: u16,
+    #[serde(default = "default_minio_console")]
+    pub minio_console: u16,
+    #[serde(default = "default_reverb")]
+    pub reverb: u16,
+}
+
+fn default_memcached() -> u16 {
+    StackPreferences::default().memcached_port
+}
+fn default_meilisearch() -> u16 {
+    StackPreferences::default().meilisearch_port
+}
+fn default_typesense() -> u16 {
+    StackPreferences::default().typesense_port
+}
+fn default_minio_api() -> u16 {
+    StackPreferences::default().minio_port
+}
+fn default_minio_console() -> u16 {
+    StackPreferences::default().minio_console_port
+}
+fn default_reverb() -> u16 {
+    StackPreferences::default().reverb_port
+}
+
+/// v0.3.0 one-click services: (port field, human label).
+pub const EXTRA_SERVICE_PORTS: &[(&str, &str)] = &[
+    ("memcached", "Memcached"),
+    ("meilisearch", "Meilisearch"),
+    ("typesense", "Typesense"),
+    ("minioApi", "MinIO API"),
+    ("minioConsole", "MinIO console"),
+    ("reverb", "Reverb"),
+];
+
+pub fn extra_port_get(stack: &StackPreferences, field: &str) -> Option<u16> {
+    Some(match field {
+        "memcached" => stack.memcached_port,
+        "meilisearch" => stack.meilisearch_port,
+        "typesense" => stack.typesense_port,
+        "minioApi" => stack.minio_port,
+        "minioConsole" => stack.minio_console_port,
+        "reverb" => stack.reverb_port,
+        _ => return None,
+    })
+}
+
+pub fn extra_port_set(stack: &mut StackPreferences, field: &str, port: u16) -> bool {
+    match field {
+        "memcached" => stack.memcached_port = port,
+        "meilisearch" => stack.meilisearch_port = port,
+        "typesense" => stack.typesense_port = port,
+        "minioApi" => stack.minio_port = port,
+        "minioConsole" => stack.minio_console_port = port,
+        "reverb" => stack.reverb_port = port,
+        _ => return false,
+    }
+    true
 }
 
 impl PortsConfig {
@@ -59,6 +125,12 @@ impl PortsConfig {
             mailpit_ui: stack.mailpit_ui_port,
             dns: stack.dns_port,
             phpmyadmin: stack.https_port,
+            memcached: stack.memcached_port,
+            meilisearch: stack.meilisearch_port,
+            typesense: stack.typesense_port,
+            minio_api: stack.minio_port,
+            minio_console: stack.minio_console_port,
+            reverb: stack.reverb_port,
         }
     }
 
@@ -77,6 +149,12 @@ impl PortsConfig {
         stack.mailpit_smtp_port = self.mailpit_smtp;
         stack.mailpit_ui_port = self.mailpit_ui;
         stack.dns_port = self.dns;
+        stack.memcached_port = self.memcached;
+        stack.meilisearch_port = self.meilisearch;
+        stack.typesense_port = self.typesense;
+        stack.minio_port = self.minio_api;
+        stack.minio_console_port = self.minio_console;
+        stack.reverb_port = self.reverb;
     }
 
     pub fn defaults() -> Self {
@@ -100,6 +178,12 @@ impl PortsConfig {
             mailpit_ui: 8026,
             dns: 5354,
             phpmyadmin: ALT_HTTPS,
+            memcached: default_memcached(),
+            meilisearch: default_meilisearch(),
+            typesense: default_typesense(),
+            minio_api: default_minio_api(),
+            minio_console: default_minio_console(),
+            reverb: default_reverb(),
         }
     }
 }
@@ -247,6 +331,12 @@ fn stack_reserved_ports(stack: &StackPreferences, except: &[&str]) -> Vec<u16> {
         ("mailpitSmtp", stack.mailpit_smtp_port),
         ("mailpitUi", stack.mailpit_ui_port),
         ("dns", stack.dns_port),
+        ("memcached", stack.memcached_port),
+        ("meilisearch", stack.meilisearch_port),
+        ("typesense", stack.typesense_port),
+        ("minioApi", stack.minio_port),
+        ("minioConsole", stack.minio_console_port),
+        ("reverb", stack.reverb_port),
     ];
     all.retain(|(name, _)| !except.contains(name));
     let mut ports: Vec<u16> = all.into_iter().map(|(_, p)| p).collect();
@@ -255,7 +345,7 @@ fn stack_reserved_ports(stack: &StackPreferences, except: &[&str]) -> Vec<u16> {
     ports
 }
 
-fn candidate_ports_for(field: &str, current: u16) -> Vec<u16> {
+pub fn candidate_ports_for(field: &str, current: u16) -> Vec<u16> {
     let presets: &[u16] = match field {
         "nginxHttp" | "http" => &[8080, 8081, 8888, 8000, 9080],
         // Keep clear of Apache defaults (8088/8444).
@@ -272,6 +362,12 @@ fn candidate_ports_for(field: &str, current: u16) -> Vec<u16> {
         "mailpitUi" => &[8026, 8027, 8028, 18025],
         "mailpitSmtp" => &[1026, 1027, 1028, 11025],
         "dns" => &[5354, 5355, 5356, 15353],
+        "memcached" => &[11212, 11213, 11214, 21211],
+        "meilisearch" => &[7701, 7702, 7703, 17700],
+        "typesense" => &[8109, 8110, 8111, 18108],
+        "minioApi" => &[9110, 9120, 9130, 19100],
+        "minioConsole" => &[9111, 9121, 9131, 19101],
+        "reverb" => &[8086, 8087, 6002, 6003],
         _ => &[],
     };
     let mut out: Vec<u16> = presets.iter().copied().filter(|p| *p != current).collect();
@@ -535,6 +631,14 @@ pub fn service_ports(stack: &StackPreferences, service_id: &str) -> Vec<(String,
             ("mailpitUi".into(), stack.mailpit_ui_port),
         ],
         "dns" => vec![("dns".into(), stack.dns_port)],
+        "memcached" => vec![("memcached".into(), stack.memcached_port)],
+        "meilisearch" => vec![("meilisearch".into(), stack.meilisearch_port)],
+        "typesense" => vec![("typesense".into(), stack.typesense_port)],
+        "minio" => vec![
+            ("minioApi".into(), stack.minio_port),
+            ("minioConsole".into(), stack.minio_console_port),
+        ],
+        "reverb" => vec![("reverb".into(), stack.reverb_port)],
         "phpmyadmin" => vec![("nginxHttps".into(), stack.https_port)],
         _ => vec![],
     }
@@ -622,7 +726,9 @@ pub fn apply_suggested_ports(
             "mailpitSmtp" => stack.mailpit_smtp_port = *port,
             "mailpitUi" => stack.mailpit_ui_port = *port,
             "dns" => stack.dns_port = *port,
-            _ => {}
+            other => {
+                extra_port_set(stack, other, *port);
+            }
         }
     }
     Ok(())
@@ -1019,6 +1125,24 @@ pub fn auto_separate_busy_ports(
         stack.dns_port = alt;
     }
 
+    for (field, label) in EXTRA_SERVICE_PORTS {
+        let current = extra_port_get(stack, field).unwrap_or(0);
+        if let Some(occ) = foreign_occupant(current, owned_pids, runtime) {
+            let reserved = stack_reserved_ports(stack, &[field]);
+            let alt = find_next_free_excluding(
+                current,
+                &candidate_ports_for(field, current),
+                &reserved,
+            );
+            messages.push(format!(
+                "{} detected on :{}, DevStack {label} uses :{alt}",
+                who_label(&occ),
+                occ.port
+            ));
+            extra_port_set(stack, field, alt);
+        }
+    }
+
     let after = PortSnapshot::from_stack(stack);
     let changed = before.nginx_http != after.nginx_http
         || before.nginx_https != after.nginx_https
@@ -1032,7 +1156,13 @@ pub fn auto_separate_busy_ports(
         || previous.redis != stack.redis_port
         || previous.mailpit_smtp != stack.mailpit_smtp_port
         || previous.mailpit_ui != stack.mailpit_ui_port
-        || previous.dns != stack.dns_port;
+        || previous.dns != stack.dns_port
+        || previous.memcached != stack.memcached_port
+        || previous.meilisearch != stack.meilisearch_port
+        || previous.typesense != stack.typesense_port
+        || previous.minio_api != stack.minio_port
+        || previous.minio_console != stack.minio_console_port
+        || previous.reverb != stack.reverb_port;
 
     if changed {
         stack.coexistence_mode = true;
@@ -1066,6 +1196,11 @@ pub fn owned_runtime_pids(runtime: &crate::config::RuntimeState) -> Vec<u32> {
         runtime.postgresql_pid,
         runtime.redis_pid,
         runtime.mailpit_pid,
+        runtime.memcached_pid,
+        runtime.meilisearch_pid,
+        runtime.typesense_pid,
+        runtime.minio_pid,
+        runtime.reverb_pid,
     ]
     .into_iter()
     .flatten()
@@ -1085,6 +1220,7 @@ pub fn owned_runtime_pids_with_files(
     let mut pids = owned_runtime_pids(runtime);
     for name in [
         "nginx", "apache", "mariadb", "mysql", "mongodb", "postgresql", "redis", "mailpit", "dns",
+        "memcached", "meilisearch", "typesense", "minio", "reverb",
     ] {
         if let Some(pid) = crate::services::process::read_pid(&paths.pid_file(name)) {
             if crate::services::process::is_running(pid) {
@@ -1377,5 +1513,100 @@ mod tests {
             wildcard: false,
         };
         assert_eq!(canonical_site_url(&site, &state), "http://test.test:8088");
+    }
+
+    #[test]
+    fn v030_service_default_ports() {
+        let d = StackPreferences::default();
+        assert_eq!(d.memcached_port, 11211);
+        assert_eq!(d.meilisearch_port, 7700);
+        assert_eq!(d.typesense_port, 8108);
+        assert_eq!(d.minio_port, 9100);
+        assert_eq!(d.minio_console_port, 9101);
+        assert_eq!(d.reverb_port, 8085);
+        let cfg = PortsConfig::defaults();
+        assert_eq!(cfg.memcached, 11211);
+        assert_eq!(cfg.minio_api, 9100);
+        assert_eq!(cfg.minio_console, 9101);
+    }
+
+    #[test]
+    fn v030_service_candidate_ports_exclude_current_and_are_distinct() {
+        for (field, _) in EXTRA_SERVICE_PORTS {
+            let stack = StackPreferences::default();
+            let cur = extra_port_get(&stack, field).unwrap();
+            let c = candidate_ports_for(field, cur);
+            assert!(!c.is_empty(), "{field}");
+            assert!(!c.contains(&cur), "{field}");
+        }
+        assert_eq!(candidate_ports_for("memcached", 11211)[0], 11212);
+        assert_eq!(candidate_ports_for("meilisearch", 7700)[0], 7701);
+        assert_ne!(
+            candidate_ports_for("minioApi", 9100),
+            candidate_ports_for("minioConsole", 9101)
+        );
+    }
+
+    #[test]
+    fn v030_service_ports_match_stack() {
+        let mut stack = StackPreferences::default();
+        stack.memcached_port = 11300;
+        stack.minio_port = 9200;
+        stack.minio_console_port = 9201;
+        assert_eq!(
+            service_ports(&stack, "memcached"),
+            vec![("memcached".to_string(), 11300)]
+        );
+        assert_eq!(
+            service_ports(&stack, "minio"),
+            vec![("minioApi".to_string(), 9200), ("minioConsole".to_string(), 9201)]
+        );
+        assert_eq!(service_ports(&stack, "meilisearch")[0].1, 7700);
+        assert_eq!(service_ports(&stack, "typesense")[0].1, 8108);
+        assert_eq!(service_ports(&stack, "reverb")[0].1, 8085);
+    }
+
+    #[test]
+    fn v030_apply_suggested_updates_new_fields() {
+        let mut stack = StackPreferences::default();
+        let mut sug = BTreeMap::new();
+        sug.insert("minioApi".to_string(), 9110u16);
+        sug.insert("typesense".to_string(), 8109u16);
+        apply_suggested_ports(&mut stack, &sug).unwrap();
+        assert_eq!(stack.minio_port, 9110);
+        assert_eq!(stack.typesense_port, 8109);
+    }
+
+    #[test]
+    fn v030_busy_ports_remap_without_stealing() {
+        let holders: Vec<TcpListener> = (0..3)
+            .filter_map(|_| TcpListener::bind(("127.0.0.1", 0)).ok())
+            .collect();
+        if holders.len() < 3 {
+            return;
+        }
+        let ports: Vec<u16> = holders.iter().map(|h| h.local_addr().unwrap().port()).collect();
+        let mut stack = StackPreferences::default();
+        stack.memcached_port = ports[0];
+        stack.minio_port = ports[1];
+        stack.minio_console_port = ports[2];
+        let runtime = crate::config::RuntimeState::default();
+        let notice = auto_separate_busy_ports(&mut stack, &[], &runtime);
+        assert!(notice.changed);
+        assert_ne!(stack.memcached_port, ports[0]);
+        assert_ne!(stack.minio_port, ports[1]);
+        assert_ne!(stack.minio_console_port, ports[2]);
+        assert_ne!(stack.minio_port, stack.minio_console_port);
+        assert!(notice.messages.iter().any(|m| m.contains("Memcached")));
+    }
+
+    #[test]
+    fn ports_config_patch_without_new_fields_still_parses() {
+        let mut v = serde_json::to_value(PortsConfig::defaults()).unwrap();
+        for k in ["memcached", "meilisearch", "typesense", "minioApi", "minioConsole", "reverb"] {
+            v.as_object_mut().unwrap().remove(k);
+        }
+        let cfg = parse_ports_patch(&v).unwrap();
+        assert_eq!(cfg.memcached, 11211);
     }
 }
