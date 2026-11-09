@@ -375,17 +375,9 @@ pub fn stop(paths: &Paths, state: &mut AppState, id: &str) -> Result<()> {
             }
             #[cfg(windows)]
             {
-                // PowerShell: find owning PID via Get-NetTCPConnection and taskkill.
-                let _ = crate::services::process::command("powershell")
-                    .args([
-                        "-NoProfile",
-                        "-Command",
-                        &format!(
-                            "$p = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; \
-                             if ($p) {{ $p | ForEach-Object {{ taskkill /PID $_ /T /F | Out-Null }} }}"
-                        ),
-                    ])
-                    .status();
+                // Prefer netstat — Get-NetTCPConnection regularly hangs for minutes
+                // on Windows CI (CIM). Parse `TCP  127.0.0.1:PORT ... LISTENING  PID`.
+                kill_windows_listeners(port);
             }
             let _ = crate::services::perf::poll_backoff(
                 std::time::Duration::from_millis(5),
@@ -396,6 +388,45 @@ pub fn stop(paths: &Paths, state: &mut AppState, id: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn kill_windows_listeners(port: u16) {
+    let Ok(out) = crate::services::process::command("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+    else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut killed = std::collections::HashSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("TCP") || !line.contains("LISTENING") {
+            continue;
+        }
+        // Columns: TCP  local  foreign  state  pid
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let local = cols[1];
+        let Some(local_port) = local
+            .rsplit_once(':')
+            .map(|(_, p)| p.trim_end_matches(']'))
+            .and_then(|p| p.parse::<u16>().ok())
+        else {
+            continue;
+        };
+        if local_port != port {
+            continue;
+        }
+        let Ok(pid) = cols[4].parse::<u32>() else { continue };
+        if pid == 0 || !killed.insert(pid) {
+            continue;
+        }
+        let _ = stop_pid(pid);
+    }
 }
 
 #[cfg(test)]

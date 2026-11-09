@@ -11,7 +11,7 @@ on:
 jobs:
   windows-smoke:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +20,7 @@ jobs:
 
       - name: Cargo test (incl. CREATE_NO_WINDOW / hosts / php.ini / paths)
         working-directory: src-tauri
+        timeout-minutes: 20
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -35,6 +36,7 @@ jobs:
 
       - name: Process flag + hosts + php.ini unit checks
         working-directory: src-tauri
+        timeout-minutes: 10
         shell: pwsh
         run: |
           cargo test --lib services::process::tests -- --nocapture
@@ -47,6 +49,7 @@ jobs:
           cargo test --lib services::httpd::tests -- --nocapture
 
       - name: Frontend typecheck + vitest
+        timeout-minutes: 10
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -55,6 +58,7 @@ jobs:
           npm test
 
       - name: Playwright responsive header screenshots
+        timeout-minutes: 10
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -63,6 +67,7 @@ jobs:
 
       - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip
         working-directory: src-tauri
+        timeout-minutes: 40
         shell: pwsh
         env:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}\devstack-e2e
@@ -75,6 +80,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "devstack_smoke --e2e failed ($LASTEXITCODE)" }
 
       - name: Launch built exe — window responds + UI within 3s
+        timeout-minutes: 25
         shell: pwsh
         env:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}\devstack-launch-ui
@@ -82,7 +88,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           # Real Tauri app (not smoke bin): catches AppHangB1 / "Tauri App" title / blocked setup.
           npm run build
-          npx tauri build --no-bundle -- --release
+          npx tauri build --no-bundle
           $exe = Join-Path (Get-Location) 'src-tauri\target\release\devstack.exe'
           if (-not (Test-Path $exe)) {
             $exe = Get-ChildItem -Path 'src-tauri\target\release' -Filter 'devstack.exe' -Recurse -ErrorAction SilentlyContinue |
@@ -136,6 +142,7 @@ jobs:
           }
 
       - name: Synthetic HTTPS probe (hosts + openssl s_server + curl)
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'

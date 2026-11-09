@@ -309,18 +309,35 @@ pub fn start_stack_with_progress(
     apply_stack_with_progress(paths, state, progress)
 }
 
-/// Stop nginx/apache/dns/PHP (and extras) but leave the database running.
-/// Used for warm `apply_stack` measurements so Windows does not re-pay InnoDB start.
-pub fn stop_web_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
-    let _ = crate::services::share::stop_share(paths, state);
+fn stop_running_extras(paths: &Paths, state: &mut AppState) {
     let extras_ids: Vec<&'static str> = crate::services::extras_v030::NEW_SERVICE_IDS
         .iter()
         .copied()
         .chain(["redis", "mailpit", "mongodb", "postgresql"])
         .collect();
-    for id in &extras_ids {
-        let _ = crate::services::extras::stop_service(paths, state, id);
+    for id in extras_ids {
+        let pid = match id {
+            "redis" => state.runtime.redis_pid,
+            "mailpit" => state.runtime.mailpit_pid,
+            "mongodb" => state.runtime.mongodb_pid,
+            "postgresql" => state.runtime.postgresql_pid,
+            other => crate::services::extras_v030::pid_of(state, other),
+        };
+        let alive = pid.map(is_running).unwrap_or(false)
+            || crate::services::process::read_pid(&paths.pid_file(id))
+                .map(is_running)
+                .unwrap_or(false);
+        if alive {
+            let _ = crate::services::extras::stop_service(paths, state, id);
+        }
     }
+}
+
+/// Stop nginx/apache/dns/PHP (and extras) but leave the database running.
+/// Used for warm `apply_stack` measurements so Windows does not re-pay InnoDB start.
+pub fn stop_web_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
+    let _ = crate::services::share::stop_share(paths, state);
+    stop_running_extras(paths, state);
     let _ = stop_nginx(paths, state);
     let _ = stop_apache(paths, state);
     let _ = stop_dns(paths, state);
@@ -341,11 +358,6 @@ pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     let mut db_snapshot = state.clone();
     // One-click extras (meilisearch etc.) are independent of the web stack but must
     // still die with "Stop Stack" so they cannot outlive the session.
-    let extras_ids: Vec<&'static str> = crate::services::extras_v030::NEW_SERVICE_IDS
-        .iter()
-        .copied()
-        .chain(["redis", "mailpit", "mongodb", "postgresql"])
-        .collect();
     // Clone before the scoped threads so front-end stops can mutate `state` freely.
     let mut extras_snapshot = state.clone();
     std::thread::scope(|scope| {
@@ -353,9 +365,7 @@ pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
             let _ = stop_database(paths, &mut db_snapshot);
         });
         let extras_h = scope.spawn(|| {
-            for id in &extras_ids {
-                let _ = crate::services::extras::stop_service(paths, &mut extras_snapshot, id);
-            }
+            stop_running_extras(paths, &mut extras_snapshot);
         });
         let _ = stop_nginx(paths, state);
         let _ = stop_apache(paths, state);
