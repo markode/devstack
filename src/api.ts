@@ -3,6 +3,17 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
   BackupResult,
+  BackupSettings,
+  BackupSettingsPatch,
+  ParkedSyncResult,
+  PhpDump,
+  ShareStatus,
+  SiteBackup,
+  SitesSettings,
+  SitesSettingsPatch,
+  DumpStatus,
+  ToolsStatus,
+  XdebugLaunchHints,
   CreateWordPressRequest,
   CreateWordPressResult,
   DeveloperSettings,
@@ -447,4 +458,159 @@ export async function updateDeveloperSettings(patch: {
     showLogsTab: patch.showLogsTab ?? null,
     redactSecrets: patch.redactSecrets ?? null,
   });
+}
+
+/** Tauri reports unregistered commands as `Command <name> not found`. */
+export function isMissingCommand(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /command .* not found|unknown command/i.test(msg);
+}
+
+/** Try each command name in order; later names cover backend renames. */
+async function invokeAny<T>(
+  cmds: string[],
+  args?: Record<string, unknown>,
+): Promise<T> {
+  let last: unknown;
+  for (const cmd of cmds) {
+    try {
+      return await invoke<T>(cmd, args);
+    } catch (e) {
+      if (!isMissingCommand(e)) throw e;
+      last = e;
+    }
+  }
+  throw last;
+}
+
+export async function getSitesSettings(): Promise<SitesSettings> {
+  return invoke<SitesSettings>("get_sites_settings");
+}
+
+export async function updateSitesSettings(
+  patch: SitesSettingsPatch,
+): Promise<SitesSettings> {
+  return invoke<SitesSettings>("update_sites_settings", {
+    parkedDirs: patch.parkedDirs ?? null,
+    watchEnabled: patch.watchEnabled ?? null,
+    optInPath: patch.optInPath ?? null,
+  });
+}
+
+export async function syncParkedSites(): Promise<ParkedSyncResult> {
+  return invokeAny<ParkedSyncResult>(["sync_parked_sites_cmd", "sync_parked_sites"]);
+}
+
+export async function startSiteShare(siteId: string): Promise<ShareStatus> {
+  return invoke<ShareStatus>("start_site_share", { siteId });
+}
+
+export async function stopSiteShare(): Promise<ShareStatus> {
+  return invoke<ShareStatus>("stop_site_share");
+}
+
+export async function getShareStatus(): Promise<ShareStatus> {
+  return invoke<ShareStatus>("get_share_status");
+}
+
+export async function listPhpDumps(limit?: number): Promise<PhpDump[]> {
+  return invoke<PhpDump[]>("list_php_dumps", { limit: limit ?? null });
+}
+
+export async function clearPhpDumps(): Promise<void> {
+  return invoke("clear_php_dumps");
+}
+
+export async function getDumpStatus(): Promise<DumpStatus> {
+  return invoke<DumpStatus>("get_dump_status");
+}
+
+export async function onPhpDump(
+  handler: (dump: PhpDump) => void,
+): Promise<UnlistenFn> {
+  return listen<PhpDump>("php-dump", (e) => handler(e.payload));
+}
+
+export async function listSiteBackups(siteId?: string): Promise<SiteBackup[]> {
+  return invokeAny<SiteBackup[]>(["list_site_backups_cmd", "list_site_backups"], {
+    siteId: siteId ?? null,
+  });
+}
+
+export async function createSiteBackup(siteId: string): Promise<SiteBackup> {
+  return invokeAny<SiteBackup>(["backup_site_full", "create_site_backup"], {
+    siteId,
+  });
+}
+
+export async function restoreSiteBackup(backupId: string): Promise<SiteBackup> {
+  return invokeAny<SiteBackup>(
+    ["restore_site_backup_cmd", "restore_site_backup"],
+    { backupId },
+  );
+}
+
+export async function deleteSiteBackup(backupId: string): Promise<void> {
+  return invokeAny<void>(["delete_site_backup_cmd", "delete_site_backup"], {
+    backupId,
+  });
+}
+
+export async function getBackupSettings(): Promise<BackupSettings> {
+  return invoke<BackupSettings>("get_backup_settings");
+}
+
+export async function updateBackupSettings(
+  patch: BackupSettingsPatch,
+): Promise<BackupSettings> {
+  return invoke<BackupSettings>("update_backup_settings", {
+    folder: patch.folder ?? null,
+    intervalSecs: patch.intervalSecs ?? null,
+    retain: patch.retain ?? null,
+  });
+}
+
+export async function setSiteXdebug(
+  siteId: string,
+  enabled: boolean,
+): Promise<XdebugLaunchHints> {
+  return invoke<XdebugLaunchHints>("set_site_xdebug", { siteId, enabled });
+}
+
+/**
+ * Read-only hints for an already-enabled site. Falls back to re-applying the
+ * (idempotent) enable when the backend has no dedicated getter.
+ */
+export async function getXdebugLaunchHints(
+  siteId: string,
+): Promise<XdebugLaunchHints> {
+  try {
+    return await invoke<XdebugLaunchHints>("get_xdebug_launch_hints", { siteId });
+  } catch (e) {
+    if (!isMissingCommand(e)) throw e;
+    return setSiteXdebug(siteId, true);
+  }
+}
+
+export async function ensureDevTools(): Promise<ToolsStatus> {
+  return invokeAny<ToolsStatus>(["install_dev_tools", "ensure_dev_tools"]);
+}
+
+export async function getToolsStatus(): Promise<ToolsStatus> {
+  return invoke<ToolsStatus>("get_tools_status");
+}
+
+export async function openSiteTerminal(siteId: string): Promise<void> {
+  return invoke("open_site_terminal", { siteId });
+}
+
+export async function cloneSite(
+  request: DuplicateRequest,
+): Promise<DuplicateResult> {
+  try {
+    return await invoke<DuplicateResult>("clone_site", { request });
+  } catch (e) {
+    if (isMissingCommand(e)) return duplicateSite(request);
+    throw e;
+  }
 }

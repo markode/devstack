@@ -3,6 +3,17 @@ import * as mock from "./mock";
 import type {
   AppInfo,
   BackupResult,
+  BackupSettings,
+  BackupSettingsPatch,
+  ParkedSyncResult,
+  PhpDump,
+  ShareStatus,
+  SiteBackup,
+  SitesSettings,
+  SitesSettingsPatch,
+  DumpStatus,
+  ToolsStatus,
+  XdebugLaunchHints,
   CreateWordPressRequest,
   CreateWordPressResult,
   DuplicateRequest,
@@ -446,4 +457,128 @@ export async function updateDeveloperSettings(patch: {
     return { ...mock.mockDeveloperSettingsState };
   }
   return api.updateDeveloperSettings(patch);
+}
+
+export async function getSitesSettings(): Promise<SitesSettings> {
+  if (useMock()) return mock.mockGetSitesSettings();
+  return api.getSitesSettings();
+}
+
+export async function updateSitesSettings(
+  patch: SitesSettingsPatch,
+): Promise<SitesSettings> {
+  if (useMock()) return mock.mockUpdateSitesSettings(patch);
+  return api.updateSitesSettings(patch);
+}
+
+export async function syncParkedSites(): Promise<ParkedSyncResult> {
+  if (useMock()) return mock.mockSyncParkedSites();
+  return api.syncParkedSites();
+}
+
+export async function startSiteShare(siteId: string): Promise<ShareStatus> {
+  if (useMock()) return mock.mockStartShare(siteId);
+  return api.startSiteShare(siteId);
+}
+
+export async function stopSiteShare(): Promise<ShareStatus> {
+  if (useMock()) return mock.mockStopShare();
+  return api.stopSiteShare();
+}
+
+export async function getShareStatus(): Promise<ShareStatus> {
+  if (useMock()) return mock.mockGetShareStatus();
+  return api.getShareStatus();
+}
+
+export async function listPhpDumps(limit?: number): Promise<PhpDump[]> {
+  if (useMock()) return mock.mockListDumps(limit);
+  return api.listPhpDumps(limit);
+}
+
+export async function clearPhpDumps(): Promise<void> {
+  if (useMock()) return mock.mockClearDumps();
+  return api.clearPhpDumps();
+}
+
+export async function getDumpStatus(): Promise<DumpStatus> {
+  if (useMock()) return { port: 9912, helperPath: "/tmp/DevStack/devstack_dump.php" };
+  return api.getDumpStatus();
+}
+
+export async function onPhpDump(
+  handler: (dump: PhpDump) => void,
+): Promise<() => void> {
+  if (useMock()) return () => undefined;
+  return api.onPhpDump(handler);
+}
+
+export async function listSiteBackups(siteId?: string): Promise<SiteBackup[]> {
+  if (useMock()) return mock.mockListBackups(siteId);
+  return api.listSiteBackups(siteId);
+}
+
+export async function createSiteBackup(siteId: string): Promise<SiteBackup> {
+  if (useMock()) return mock.mockCreateBackup(siteId);
+  return api.createSiteBackup(siteId);
+}
+
+export async function restoreSiteBackup(backupId: string): Promise<SiteBackup> {
+  if (useMock()) return mock.mockRestoreBackup(backupId);
+  return api.restoreSiteBackup(backupId);
+}
+
+export async function deleteSiteBackup(backupId: string): Promise<void> {
+  if (useMock()) return mock.mockDeleteBackup(backupId);
+  return api.deleteSiteBackup(backupId);
+}
+
+export async function getBackupSettings(): Promise<BackupSettings> {
+  if (useMock()) return mock.mockGetBackupSettings();
+  return api.getBackupSettings();
+}
+
+export async function updateBackupSettings(
+  patch: BackupSettingsPatch,
+): Promise<BackupSettings> {
+  if (useMock()) return mock.mockUpdateBackupSettings(patch);
+  return api.updateBackupSettings(patch);
+}
+
+export async function setSiteXdebug(
+  siteId: string,
+  enabled: boolean,
+): Promise<XdebugLaunchHints> {
+  if (useMock()) return mock.mockSetSiteXdebug(siteId, enabled);
+  return api.setSiteXdebug(siteId, enabled);
+}
+
+export async function getXdebugLaunchHints(
+  siteId: string,
+): Promise<XdebugLaunchHints> {
+  if (useMock()) return mock.mockXdebugHints(siteId);
+  return api.getXdebugLaunchHints(siteId);
+}
+
+export async function ensureDevTools(): Promise<ToolsStatus> {
+  if (useMock()) return mock.mockToolsStatus();
+  return api.ensureDevTools();
+}
+
+export async function getToolsStatus(): Promise<ToolsStatus> {
+  if (useMock()) return mock.mockToolsStatus();
+  return api.getToolsStatus();
+}
+
+export async function openSiteTerminal(siteId: string): Promise<void> {
+  if (useMock()) return;
+  return api.openSiteTerminal(siteId);
+}
+
+/** Clone a site or template (backend `clone_site`, falls back to `duplicate_site`). */
+export async function cloneSite(
+  request: DuplicateRequest,
+): Promise<DuplicateResult> {
+  if (useMock()) return mock.mockDuplicateSite(request);
+  return api.cloneSite(request);
 }

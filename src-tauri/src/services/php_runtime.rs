@@ -354,7 +354,7 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
         .ok_or_else(|| DevStackError::Message("php-cgi binary not found".into()))?;
     let listen = runtime.listen.clone();
     // Ensure managed php.ini exists (absolute extension_dir on Windows; honor xdebug).
-    let mut opts = crate::php::PhpIniOptions::default();
+    let mut opts = crate::php::PhpIniOptions::default().with_dump_helper(paths);
     if let Some(settings) = state.php_extensions.get(&runtime.version) {
         opts.xdebug = settings.xdebug;
     }

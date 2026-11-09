@@ -36,6 +36,53 @@ pub struct AppState {
     /// Set after the first-launch `welcome.test` site has been seeded (or
     /// skipped). Prevents recreating the site after the user deletes it.
     pub welcome_site_seeded: bool,
+    /// Valet-style parked folders (`~/Sites/*` → `*.test`).
+    pub sites_settings: SitesSettings,
+    /// Full-site backup folder / schedule.
+    pub backup_settings: BackupSettings,
+}
+
+/// Parked-folder + tooling preferences for the Sites panel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SitesSettings {
+    pub parked_dirs: Vec<PathBuf>,
+    /// Watch parked dirs and auto-sync new subfolders.
+    pub watch_enabled: bool,
+    /// Add `{tools}/bin` (composer/wp/node/npm shims) to the user PATH. Off by default.
+    pub opt_in_path: bool,
+}
+
+impl Default for SitesSettings {
+    fn default() -> Self {
+        Self {
+            parked_dirs: vec![default_sites_root()],
+            watch_enabled: true,
+            opt_in_path: false,
+        }
+    }
+}
+
+/// Scheduled / manual full-site backups (files + database).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackupSettings {
+    /// Override root; default `{data}/backups`.
+    pub folder: Option<PathBuf>,
+    /// Auto-backup every N seconds (0 = off).
+    pub interval_secs: u64,
+    /// Keep the newest N backups per site.
+    pub retain: u32,
+}
+
+impl Default for BackupSettings {
+    fn default() -> Self {
+        Self {
+            folder: None,
+            interval_secs: 0,
+            retain: 10,
+        }
+    }
 }
 
 /// Developer diagnostics — full-fidelity Logs during development.
@@ -187,6 +234,13 @@ pub struct RuntimeState {
     /// Human-readable last start failure (cleared on successful start/stop).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_start_error: Option<String>,
+    /// Running `cloudflared` quick-tunnel process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflared_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_site_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +288,12 @@ pub struct SiteRecord {
     /// True when this site is also exposed as a reusable starter template.
     #[serde(default)]
     pub is_template: bool,
+    /// Discovered from a parked folder (not manually added).
+    #[serde(default)]
+    pub parked: bool,
+    /// Xdebug requested for this site's PHP version.
+    #[serde(default)]
+    pub xdebug: bool,
 }
 
 impl SiteRecord {
@@ -475,6 +535,8 @@ header('Content-Type: text/html; charset=utf-8');
         database_password: None,
         status: "stopped".into(),
         is_template: false,
+        parked: false,
+        xdebug: false,
     };
     site.ensure_domain();
     state.sites.push(site);
@@ -489,7 +551,7 @@ pub fn ensure_demo_site(state: &mut AppState) {
     }
 }
 
-fn default_sites_root() -> PathBuf {
+pub fn default_sites_root() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Sites")

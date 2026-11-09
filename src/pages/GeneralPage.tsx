@@ -7,7 +7,10 @@ import type {
   DeveloperSettings,
   HostsStatus,
   PortsConfig,
+  ToolsStatus,
 } from "../types";
+import { browseFolder } from "../open";
+import { ParkedDirsSection } from "../components/ParkedDirsSection";
 
 const PORT_FIELDS: {
   key: keyof PortsConfig;
@@ -54,6 +57,20 @@ export function GeneralPage({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [tools, setTools] = useState<ToolsStatus | null>(null);
+
+  const ensureTools = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setTools(await client.ensureDevTools());
+      setNote("Command-line tools are ready");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const refresh = async () => {
     try {
@@ -75,6 +92,7 @@ export function GeneralPage({
       setHosts(h);
       setDeveloper(d);
       onDeveloperChange?.(d);
+      void client.getToolsStatus().then(setTools).catch(() => {});
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -237,6 +255,49 @@ export function GeneralPage({
             </span>
           </label>
           <span className="muted">{client.useMock() ? "Mock" : "Live"}</span>
+        </div>
+      </div>
+
+      <ParkedDirsSection
+        pickFolder={() => browseFolder({ title: "Park a directory" })}
+        onNote={setNote}
+        onError={setError}
+      />
+
+      <div className="section-head" style={{ marginTop: 22 }}>
+        <h2>Command-line tools</h2>
+        <p>
+          <code>php</code>, <code>composer</code>, <code>wp</code> and{" "}
+          <code>node</code> shims for your terminals.
+        </p>
+      </div>
+      <div className="panel-card settings-list" data-testid="tools-status">
+        <div className="settings-row">
+          <label>
+            Tools
+            <span className="hint">
+              {tools
+                ? [
+                    ["Composer", tools.composer],
+                    ["WP-CLI", tools.wpCli],
+                    ["Node", tools.node],
+                    ["Shims", tools.shims],
+                  ]
+                    .map(([name, ok]) => `${name} ${ok ? "ready" : "missing"}`)
+                    .join(" · ")
+                : "Status unavailable"}
+            </span>
+          </label>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={busy}
+            onClick={() => void ensureTools()}
+          >
+            {tools?.composer && tools.wpCli && tools.shims
+              ? "Re-check tools"
+              : "Install tools"}
+          </button>
         </div>
       </div>
 

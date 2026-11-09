@@ -591,6 +591,8 @@ pub fn create_site(
         database_password: None,
         status: "stopped".into(),
         is_template: false,
+        parked: false,
+        xdebug: false,
     };
     let details = detect_site(&site);
     site.framework = Some(details.framework);

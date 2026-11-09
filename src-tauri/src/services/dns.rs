@@ -944,6 +944,8 @@ mod tests {
             database_password: None,
             status: "stopped".into(),
             is_template: false,
+            parked: false,
+            xdebug: false,
         }];
         let d = site_domains(&sites);
         assert!(d.contains(&"a.test".into()));

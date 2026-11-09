@@ -8,6 +8,10 @@ import { ServicesPage } from "./pages/ServicesPage";
 import { SitesPage } from "./pages/SitesPage";
 import { LogsPage } from "./pages/LogsPage";
 import { AboutPage } from "./pages/AboutPage";
+import { BackupsPage } from "./pages/BackupsPage";
+import { DumpsPage } from "./pages/DumpsPage";
+import { MailpitPage } from "./pages/MailpitPage";
+import { SharingPage } from "./pages/SharingPage";
 import { AppDataProvider, useAppData } from "./store/AppData";
 import * as client from "./client";
 import { detectPlatform, type AppPlatform } from "./platform";
@@ -23,12 +27,23 @@ const TITLES: Record<SectionId, string> = {
   ai: "AI",
   pro: "Pro",
   sharing: "Sharing",
+  mail: "Mail",
+  dumps: "Dumps",
+  backups: "Backups",
   shortcuts: "Shortcuts",
   about: "About",
 };
 
 /** Sections kept mounted (hidden) after first visit so local + cached state survives. */
-const KEEP_ALIVE: SectionId[] = ["sites", "services", "php", "javascript", "logs"];
+const KEEP_ALIVE: SectionId[] = [
+  "sites",
+  "services",
+  "php",
+  "javascript",
+  "logs",
+  "mail",
+  "dumps",
+];
 
 const SECTIONS = Object.keys(TITLES) as SectionId[];
 
@@ -211,6 +226,12 @@ function AppShell() {
           <KeepAlivePane id="logs" active={section} visited={visited}>
             <LogsPage active={section === "logs"} />
           </KeepAlivePane>
+          <KeepAlivePane id="mail" active={section} visited={visited}>
+            <MailpitPage active={section === "mail"} />
+          </KeepAlivePane>
+          <KeepAlivePane id="dumps" active={section} visited={visited}>
+            <DumpsPage active={section === "dumps"} />
+          </KeepAlivePane>
           {ephemeral ? (
             <>
               {section === "general" && (
@@ -228,12 +249,8 @@ function AppShell() {
                   blurb="Placeholder — Pro features will land here."
                 />
               )}
-              {section === "sharing" && (
-                <PlaceholderPage
-                  title="Sharing"
-                  blurb="Placeholder — public URL sharing for local sites."
-                />
-              )}
+              {section === "sharing" && <SharingPage />}
+              {section === "backups" && <BackupsPage active />}
               {section === "shortcuts" && (
                 <PlaceholderPage
                   title="Shortcuts"

@@ -110,7 +110,7 @@ fn write_repair_script(paths: &Paths) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn site_is_wordpress(site: &SiteRecord) -> bool {
+pub fn site_is_wordpress(site: &SiteRecord) -> bool {
     if site.framework.as_deref() == Some("wordpress") {
         return true;
     }
@@ -340,6 +340,8 @@ mod tests {
             database_password: None,
             status: "stopped".into(),
             is_template: false,
+            parked: false,
+            xdebug: false,
         };
         assert_eq!(
             canonical_site_url(&site, &state),

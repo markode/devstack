@@ -1,6 +1,15 @@
 import type {
   AppInfo,
   BackupResult,
+  BackupSettings,
+  BackupSettingsPatch,
+  ParkedSyncResult,
+  PhpDump,
+  ShareStatus,
+  SiteBackup,
+  SitesSettings,
+  ToolsStatus,
+  XdebugLaunchHints,
   CreateWordPressRequest,
   CreateWordPressResult,
   DuplicateRequest,
@@ -757,4 +766,163 @@ export async function mockStopService(
 
 export async function mockServiceLog(serviceId: string): Promise<string> {
   return `[devstack] mock log for ${serviceId}\nready for connections`;
+}
+
+let mockSitesSettings: SitesSettings = {
+  parkedDirs: [],
+  watchEnabled: true,
+  optInPath: false,
+};
+
+export function mockGetSitesSettings(): SitesSettings {
+  return { ...mockSitesSettings, parkedDirs: [...mockSitesSettings.parkedDirs] };
+}
+
+export function mockUpdateSitesSettings(patch: {
+  parkedDirs?: string[];
+  watchEnabled?: boolean;
+  optInPath?: boolean;
+}): SitesSettings {
+  mockSitesSettings = {
+    parkedDirs: patch.parkedDirs ?? mockSitesSettings.parkedDirs,
+    watchEnabled: patch.watchEnabled ?? mockSitesSettings.watchEnabled,
+    optInPath: patch.optInPath ?? mockSitesSettings.optInPath,
+  };
+  return mockGetSitesSettings();
+}
+
+export function mockSyncParkedSites(): ParkedSyncResult {
+  return { added: 0, sites };
+}
+
+let mockShare: ShareStatus = { active: false };
+
+export function mockGetShareStatus(): ShareStatus {
+  return { ...mockShare };
+}
+
+export async function mockStartShare(siteId: string): Promise<ShareStatus> {
+  await delay(150);
+  mockShare = {
+    active: true,
+    siteId,
+    url: `https://${siteId}-demo.trycloudflare.com`,
+    pid: 4242,
+  };
+  return { ...mockShare };
+}
+
+export function mockStopShare(): ShareStatus {
+  mockShare = { active: false };
+  return { ...mockShare };
+}
+
+let mockDumps: PhpDump[] = [];
+
+export function mockListDumps(limit?: number): PhpDump[] {
+  return limit ? mockDumps.slice(-limit) : [...mockDumps];
+}
+
+export function mockClearDumps(): void {
+  mockDumps = [];
+}
+
+let mockBackups: SiteBackup[] = [];
+let mockBackupSettings: BackupSettings = {
+  folder: null,
+  intervalSecs: 0,
+  retain: 10,
+};
+
+export function mockListBackups(siteId?: string): SiteBackup[] {
+  return mockBackups.filter((b) => !siteId || b.siteId === siteId);
+}
+
+export async function mockCreateBackup(siteId: string): Promise<SiteBackup> {
+  await delay(200);
+  const site = sites.find((s) => s.id === siteId);
+  const stamp = Date.now();
+  const dir = `/tmp/DevStack/backups/${siteId}/${stamp}`;
+  const backup: SiteBackup = {
+    id: `bk-${stamp}`,
+    siteId,
+    siteName: site?.name ?? siteId,
+    domain: site?.domain ?? `${siteId}.test`,
+    createdAt: new Date().toISOString(),
+    dir,
+    filesArchive: `${dir}/files.tar.zst`,
+    dbArchive: site?.databaseName ? `${dir}/db.sql.zst` : null,
+    dbName: site?.databaseName ?? null,
+    dbEngine: site?.databaseEngine ?? null,
+    sizeBytes: 12_400_000,
+    warnings: [],
+  };
+  mockBackups = [backup, ...mockBackups];
+  return backup;
+}
+
+export async function mockRestoreBackup(backupId: string): Promise<SiteBackup> {
+  await delay(200);
+  return mockBackups.find((b) => b.id === backupId) ?? mockBackups[0];
+}
+
+export function mockDeleteBackup(backupId: string): void {
+  mockBackups = mockBackups.filter((b) => b.id !== backupId);
+}
+
+export function mockGetBackupSettings(): BackupSettings {
+  return { ...mockBackupSettings };
+}
+
+export function mockUpdateBackupSettings(
+  patch: BackupSettingsPatch,
+): BackupSettings {
+  mockBackupSettings = {
+    folder:
+      patch.folder === undefined
+        ? mockBackupSettings.folder
+        : patch.folder || null,
+    intervalSecs: patch.intervalSecs ?? mockBackupSettings.intervalSecs,
+    retain: patch.retain ?? mockBackupSettings.retain,
+  };
+  return { ...mockBackupSettings };
+}
+
+export function mockXdebugHints(siteId: string): XdebugLaunchHints {
+  const site = sites.find((s) => s.id === siteId);
+  const root = site?.path.replace("~", "/Users/dev") ?? "/Users/dev/Sites/app";
+  return {
+    siteId,
+    phpVersion: site?.phpVersion ?? "8.5",
+    enabled: Boolean(site?.xdebug),
+    port: 9003,
+    launchJson: `${root}/.vscode/launch.json`,
+    phpstorm: {
+      serverName: site?.domain ?? `${siteId}.test`,
+      host: site?.domain ?? `${siteId}.test`,
+      port: site?.https === false ? 80 : 443,
+      localPath: root,
+      remotePath: root,
+      ideKey: "PHPSTORM",
+    },
+  };
+}
+
+export async function mockSetSiteXdebug(
+  siteId: string,
+  enabled: boolean,
+): Promise<XdebugLaunchHints> {
+  await mockUpdateSite(siteId, { xdebug: enabled });
+  return mockXdebugHints(siteId);
+}
+
+export function mockToolsStatus(): ToolsStatus {
+  return {
+    binDir: "/Users/dev/Library/Application Support/DevStack/tools/bin",
+    composer: true,
+    wpCli: true,
+    node: true,
+    shims: true,
+    optInPath: false,
+  };
 }

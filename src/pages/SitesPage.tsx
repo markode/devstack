@@ -6,6 +6,11 @@ import {
   useAsyncJob,
 } from "../components/AsyncModal";
 import { PortConflictDialog } from "../components/PortConflictDialog";
+import { SiteBackupsPanel } from "../components/SiteBackupsPanel";
+import { SiteTile } from "../components/SiteTile";
+import { SitesEmptyState } from "../components/SitesEmptyState";
+import { SitesStatusBanner } from "../components/SitesStatusBanner";
+import { XdebugHints } from "../components/XdebugHints";
 import {
   browseDatabaseDump,
   browseFolder,
@@ -14,6 +19,7 @@ import {
   openInFileManager,
 } from "../open";
 import { humanizeError, parsePortBusy } from "../portBusy";
+import { formatSiteUrl } from "../siteUrl";
 import { useAppData } from "../store/AppData";
 import type {
   CreateWordPressResult,
@@ -21,6 +27,7 @@ import type {
   JobProgress,
   PortCheckResult,
   SiteDetails,
+  StackStatus,
 } from "../types";
 
 export function SitesPage({
@@ -64,7 +71,9 @@ export function SitesPage({
     useState<CreateWordPressResult | null>(null);
   const [lastBackup, setLastBackup] = useState<string | null>(null);
   const [patching, setPatching] = useState(false);
-  const [logOpenId, setLogOpenId] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startPhases, setStartPhases] = useState<JobProgress[]>([]);
+  const startingRef = useRef(false);
   const wasActive = useRef(active);
   /** Sync guard — `busy` state alone can race before the next render. */
   const stackOpInflight = useRef(false);
@@ -111,9 +120,22 @@ export function SitesPage({
       setError(e instanceof Error ? e.message : String(e)),
     );
     let unlisten: (() => void) | undefined;
-    void client.onJobProgress((ev) => setProgress(ev)).then((u) => {
-      unlisten = u;
-    });
+    void client
+      .onJobProgress((ev) => {
+        setProgress(ev);
+        if (startingRef.current) {
+          setStartPhases((prev) => {
+            const i = prev.findIndex((p) => p.phase === ev.phase);
+            if (i === -1) return [...prev, ev];
+            const next = [...prev];
+            next[i] = ev;
+            return next;
+          });
+        }
+      })
+      .then((u) => {
+        unlisten = u;
+      });
     return () => {
       unlisten?.();
     };
@@ -186,8 +208,14 @@ export function SitesPage({
     setBusy(true);
     setError(null);
     setPortConflict(null);
+    const willStart = !stackRunning;
+    if (willStart) {
+      startingRef.current = true;
+      setStartPhases([]);
+      setStarting(true);
+    }
     try {
-      if (stackRunning) {
+      if (!willStart) {
         setStack(await client.stopDevStack());
       } else {
         // Auto-separates busy ports — do not block on a preflight modal, and
@@ -207,7 +235,49 @@ export function SitesPage({
       await refresh();
     } finally {
       stackOpInflight.current = false;
+      startingRef.current = false;
+      setStarting(false);
+      setStartPhases([]);
+      setProgress(null);
       setBusy(false);
+    }
+  };
+
+  const tileTerminal = async (siteId: string, path: string) => {
+    try {
+      await client.openSiteTerminal(siteId);
+    } catch (e) {
+      try {
+        await openInFileManager(path);
+      } catch {
+        setError(humanizeError(e instanceof Error ? e.message : String(e)));
+      }
+    }
+  };
+
+  const tileDatabase = async (siteId: string) => {
+    try {
+      await openInBrowser(await client.mintPhpmyadminSignonUrl(siteId));
+    } catch (e) {
+      setError(humanizeError(e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  const toggleXdebug = async (siteId: string, enabled: boolean) => {
+    setError(null);
+    setDetails(
+      details.map((d) =>
+        d.site.id === siteId
+          ? { ...d, site: { ...d.site, xdebug: enabled } }
+          : d,
+      ),
+    );
+    try {
+      await client.setSiteXdebug(siteId, enabled);
+      await refresh();
+    } catch (e) {
+      setError(humanizeError(e instanceof Error ? e.message : String(e)));
+      await refresh();
     }
   };
 
@@ -265,6 +335,7 @@ export function SitesPage({
       <>
         <SiteDetail
           details={selected}
+          stack={stack}
           phpInstalled={phpInstalled}
           nodeInstalled={nodeInstalled}
           busy={busy || patching}
@@ -293,6 +364,10 @@ export function SitesPage({
           onOpenInBrowser={(url) => void openWithHostsCheck(url)}
           onFixHosts={() => void repairHosts()}
           onToast={setError}
+          onXdebug={(on) => void toggleXdebug(selected.site.id, on)}
+          onTerminal={() =>
+            void tileTerminal(selected.site.id, selected.absolutePath)
+          }
         />
         {showDuplicate ? (
           <DuplicateModal
@@ -310,7 +385,7 @@ export function SitesPage({
             phpInstalled={phpInstalled}
             onClose={() => setShowDuplicate(false)}
             onSubmit={async (req) => {
-              const r = await client.duplicateSite(req);
+              const r = await client.cloneSite(req);
               setShowDuplicate(false);
               await refresh();
               openSite(r.site.id);
@@ -357,33 +432,22 @@ export function SitesPage({
 
   return (
     <div>
+      {stack || starting ? (
+        <SitesStatusBanner
+          running={stackRunning}
+          starting={starting}
+          phases={startPhases}
+          stack={stack}
+          busy={busy}
+          onStart={() => void toggleStack()}
+          onStop={() => void toggleStack()}
+        />
+      ) : null}
       <div className="sites-toolbar">
         <p className="sites-toolbar-blurb muted">
           Local projects on .test domains — click a tile for details.
         </p>
         <div className="sites-toolbar-actions">
-          <span
-            className="stack-status-pill"
-            title={
-              stackRunning
-                ? [
-                    stack?.nginx ? "Nginx" : null,
-                    stack?.apache ? "Apache" : null,
-                    stack?.database
-                      ? stack.databaseEngine ?? "database"
-                      : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ") || "Running"
-                : "Stack stopped — Start"
-            }
-          >
-            <span
-              className={`status-dot ${stackRunning ? "on" : ""}`}
-              aria-hidden
-            />
-            {stackRunning ? "Running" : "Stopped"}
-          </span>
           {sitesRefreshing ? (
             <span className="muted" style={{ fontSize: 11 }} data-testid="sites-updating">
               Updating…
@@ -402,9 +466,10 @@ export function SitesPage({
             type="button"
             className="btn btn-install"
             disabled={busy}
+            title="Clone (duplicate) a site or template into a new site"
             onClick={() => setShowDuplicate(true)}
           >
-            Duplicate
+            Clone
           </button>
           <button
             type="button"
@@ -413,15 +478,6 @@ export function SitesPage({
             onClick={() => setShowNewWp(true)}
           >
             New WordPress
-          </button>
-          <button
-            type="button"
-            className="btn btn-install"
-            disabled={busy}
-            title={stackRunning ? "Stop Nginx/Apache/database" : "Start the local stack"}
-            onClick={() => void toggleStack()}
-          >
-            {stackRunning ? "Stop stack" : "Start stack"}
           </button>
         </div>
       </div>
@@ -452,129 +508,44 @@ export function SitesPage({
         </div>
       ) : null}
       {error ? <div className="error-banner">{error}</div> : null}
-      {progress ? <ProgressToast progress={progress} /> : null}
+      {progress && !starting ? <ProgressToast progress={progress} /> : null}
       {!sitesLoaded ? (
         <div className="loading" data-testid="sites-loading">
           Loading sites…
         </div>
       ) : details.length === 0 ? (
-        <div
-          className="empty-state"
-          data-testid="sites-empty"
-          style={{ padding: "48px 24px", textAlign: "center" }}
-        >
-          <h3 style={{ marginTop: 0 }}>No sites yet</h3>
-          <p className="muted">
-            Add an empty PHP site, link an existing folder, or create WordPress
-            in one click.
-          </p>
-          <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy}
-              onClick={() => setShowAddSite(true)}
-            >
-              Add site
-            </button>
-            <button
-              type="button"
-              className="btn btn-install"
-              disabled={busy}
-              onClick={() => setShowNewWp(true)}
-            >
-              New WordPress
-            </button>
-          </div>
-        </div>
+        <SitesEmptyState
+          busy={busy}
+          onAddFolder={() => setShowAddSite(true)}
+          onCreateWordPress={() => setShowNewWp(true)}
+          onImport={() => {
+            if (templates.length > 0) setShowDuplicate(true);
+            else window.location.hash = "#/backups";
+          }}
+        />
       ) : (
         <div className="sites-grid" data-testid="sites-grid">
-          {details.map((d) => {
-            const state = d.reachability?.state ?? d.site.status ?? "stopped";
-            const isError = state === "error";
-            const isWarn = state === "warning";
-            const isOn = state === "running";
-            return (
-              <button
-                key={d.site.id}
-                type="button"
-                className="site-tile"
-                onClick={() => openSite(d.site.id)}
-              >
-                <div className="site-tile-top">
-                  <span
-                    className={`fw-icon fw-${d.framework}`}
-                    title={d.framework}
-                  >
-                    {d.frameworkIcon}
-                  </span>
-                  <span
-                    className={`status-dot ${
-                      isOn ? "on" : isError ? "error" : isWarn ? "warn" : ""
-                    }`}
-                    title={
-                      d.reachability?.message ?? state
-                    }
-                  />
-                </div>
-                <div className="site-tile-name">
-                  {d.site.name}
-                  {d.site.isTemplate ? (
-                    <span className="tpl-badge">template</span>
-                  ) : null}
-                </div>
-                <div className="site-tile-domain">{d.site.domain}</div>
-                {d.reachability?.message ? (
-                  <div
-                    className="site-tile-meta"
-                    style={{
-                      color: isError || isWarn
-                        ? "var(--danger, #ff3b30)"
-                        : "var(--text-secondary)",
-                    }}
-                  >
-                    {d.reachability.message}
-                  </div>
-                ) : null}
-                {d.reachability?.logExcerpt ? (
-                  <div
-                    className="site-tile-meta"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setLogOpenId((id) =>
-                        id === d.site.id ? null : d.site.id,
-                      );
-                    }}
-                  >
-                    <span className="muted" style={{ textDecoration: "underline" }}>
-                      {logOpenId === d.site.id ? "Hide log" : "Show log"}
-                    </span>
-                    {logOpenId === d.site.id ? (
-                      <pre
-                        style={{
-                          margin: "6px 0 0",
-                          fontSize: 10,
-                          whiteSpace: "pre-wrap",
-                          textAlign: "left",
-                          maxHeight: 120,
-                          overflow: "auto",
-                        }}
-                      >
-                        {d.reachability.logExcerpt}
-                      </pre>
-                    ) : null}
-                  </div>
-                ) : null}
-                <div className="site-tile-meta">
-                  <span>PHP {d.site.phpVersion ?? "—"}</span>
-                  <span className="muted">
-                    {(d.site.webServer ?? "nginx").toUpperCase()}
-                  </span>
-                  <span className="muted">{d.framework}</span>
-                </div>
-              </button>
-            );
-          })}
+          {details.map((d) => (
+            <SiteTile
+              key={d.site.id}
+              details={d}
+              stack={stack}
+              phpOptions={phpInstalled.map((p) => runtimeValue(p))}
+              busy={busy || patching}
+              onOpenDetail={() => openSite(d.site.id)}
+              onOpenUrl={(url) => void openWithHostsCheck(url)}
+              onFolder={() =>
+                void openInFileManager(d.absolutePath).catch((e) =>
+                  setError(e instanceof Error ? e.message : String(e)),
+                )
+              }
+              onTerminal={() => void tileTerminal(d.site.id, d.absolutePath)}
+              onDatabase={() => void tileDatabase(d.site.id)}
+              onHttps={(https) => void patch(d.site.id, { https })}
+              onPhp={(phpVersion) => void patch(d.site.id, { phpVersion })}
+              onXdebug={(on) => void toggleXdebug(d.site.id, on)}
+            />
+          ))}
         </div>
       )}
 
@@ -643,7 +614,7 @@ export function SitesPage({
           phpInstalled={phpInstalled}
           onClose={() => setShowDuplicate(false)}
           onSubmit={async (req) => {
-            const r = await client.duplicateSite(req);
+            const r = await client.cloneSite(req);
             setShowDuplicate(false);
             await refresh();
             openSite(r.site.id);
@@ -1071,7 +1042,7 @@ function DuplicateModal({
 
   return (
     <AsyncModal
-      title="Duplicate site"
+      title="Clone / duplicate site"
       description={
         <>
           Copies files, streams the database import, then runs serialized-safe{" "}
@@ -1115,8 +1086,8 @@ function DuplicateModal({
           >
             <BusyLabel
               busy={job.busy}
-              idle="Duplicate"
-              busyText="Duplicating…"
+              idle="Clone"
+              busyText="Cloning…"
               progress={job.progress}
             />
           </button>
@@ -1246,6 +1217,7 @@ function CredentialsModal({
 
 function SiteDetail({
   details,
+  stack,
   phpInstalled,
   nodeInstalled,
   busy,
@@ -1261,8 +1233,11 @@ function SiteDetail({
   onOpenInBrowser,
   onFixHosts,
   onToast,
+  onXdebug,
+  onTerminal,
 }: {
   details: SiteDetails;
+  stack: StackStatus | null;
   phpInstalled: InstalledPackage[];
   nodeInstalled: InstalledPackage[];
   busy: boolean;
@@ -1283,8 +1258,11 @@ function SiteDetail({
   onOpenInBrowser: (url: string) => void;
   onFixHosts: () => void;
   onToast: (message: string | null) => void;
+  onXdebug: (enabled: boolean) => void;
+  onTerminal: () => void;
 }) {
   const site = details.site;
+  const siteUrl = formatSiteUrl(site, stack);
   const [restorePath, setRestorePath] = useState("");
   const [importPath, setImportPath] = useState("");
   const [srFrom, setSrFrom] = useState("");
@@ -1353,9 +1331,7 @@ function SiteDetail({
           <button
             type="button"
             className="btn btn-primary"
-            onClick={() =>
-              onOpenInBrowser(site.https ? details.httpsUrl : details.url)
-            }
+            onClick={() => onOpenInBrowser(siteUrl)}
           >
             Open in browser
           </button>
@@ -1367,27 +1343,7 @@ function SiteDetail({
           <div className="settings-row" style={{ background: "#fafafa" }}>
             <label>Environment</label>
           </div>
-          <div className="settings-row">
-            <label>
-              Web server
-              {patching ? (
-                <span className="hint btn-busy-label">
-                  <span className="btn-spinner" aria-hidden />
-                  Applying…
-                </span>
-              ) : null}
-            </label>
-            <select
-              className="native"
-              value={webServer === "apache" ? "apache" : "nginx"}
-              disabled={busy}
-              onChange={(e) => onPatch({ webServer: e.target.value })}
-            >
-              <option value="apache">Apache (full .htaccess)</option>
-              <option value="nginx">Nginx</option>
-            </select>
-          </div>
-          <div className="settings-row">
+          <div className="settings-row settings-row-prominent" data-testid="site-php-row">
             <label>
               PHP
               {phpInstalled.length === 0 ? (
@@ -1421,6 +1377,26 @@ function SiteDetail({
                 ))}
               </select>
             )}
+          </div>
+          <div className="settings-row">
+            <label>
+              Web server
+              {patching ? (
+                <span className="hint btn-busy-label">
+                  <span className="btn-spinner" aria-hidden />
+                  Applying…
+                </span>
+              ) : null}
+            </label>
+            <select
+              className="native"
+              value={webServer === "apache" ? "apache" : "nginx"}
+              disabled={busy}
+              onChange={(e) => onPatch({ webServer: e.target.value })}
+            >
+              <option value="apache">Apache (full .htaccess)</option>
+              <option value="nginx">Nginx</option>
+            </select>
           </div>
           <div className="settings-row">
             <label>
@@ -1475,6 +1451,27 @@ function SiteDetail({
               onClick={() => onPatch({ https: !site.https })}
             />
           </div>
+          <div className="settings-row" data-testid="site-xdebug-row">
+            <label>
+              Xdebug
+              <span className="hint">
+                Step debugging for this site (port 9003)
+              </span>
+            </label>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={Boolean(site.xdebug)}
+              className={`toggle ${site.xdebug ? "on" : ""}`}
+              disabled={busy}
+              onClick={() => onXdebug(!site.xdebug)}
+            />
+          </div>
+          {site.xdebug ? (
+            <div className="settings-row settings-row-block">
+              <XdebugHints siteId={site.id} enabled={Boolean(site.xdebug)} />
+            </div>
+          ) : null}
         </div>
 
         <div className="panel-card settings-list">
@@ -1507,6 +1504,22 @@ function SiteDetail({
               onClick={() => runOpen(() => openInEditor(details.absolutePath))}
             >
               Open in editor
+            </button>
+          </div>
+          <div className="settings-row">
+            <label>
+              Terminal
+              <span className="hint">
+                Shell in the site folder with this site's PHP, Composer and
+                Node on PATH
+              </span>
+            </label>
+            <button
+              type="button"
+              className="btn btn-install"
+              onClick={onTerminal}
+            >
+              Open terminal
             </button>
           </div>
           <div className="settings-row">
@@ -1575,7 +1588,7 @@ function SiteDetail({
         </div>
         <div className="settings-row">
           <label>
-            Starter template
+            Starter template &amp; clone
             <span className="hint">
               Snapshot files + streaming DB dump (no size limit)
             </span>
@@ -1595,7 +1608,7 @@ function SiteDetail({
               disabled={busy}
               onClick={onDuplicate}
             >
-              Duplicate…
+              Clone / Duplicate…
             </button>
           </div>
         </div>
@@ -1760,6 +1773,8 @@ function SiteDetail({
           </div>
         </div>
       </div>
+
+      <SiteBackupsPanel siteId={site.id} />
 
       <div className="danger-zone" style={{ marginTop: 16 }}>
         <button type="button" className="danger-btn" disabled>

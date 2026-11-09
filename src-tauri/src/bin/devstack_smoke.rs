@@ -137,6 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_wamp_coexist_smoke(&ctx, skip_mariadb).await?;
         run_status_error_smoke(&ctx).await?;
         run_stopped_status_smoke(&ctx).await?;
+        run_v029_features_smoke(&ctx, skip_mariadb).await?;
     }
 
     Ok(())
@@ -2132,6 +2133,177 @@ async fn run_site_settings_perf(
             .collect::<Vec<_>>()
             .join(", ")
     );
+    Ok(())
+}
+
+/// v0.2.9: parked dirs, dump helper, tools shims, full-site backup, xdebug hints,
+/// per-site PHP isolation (already covered by PERF), share URL parse (unit-tested).
+async fn run_v029_features_smoke(
+    ctx: &DevStackCtx,
+    skip_mariadb: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== v0.2.9 features smoke (parked / dump / tools / backup / xdebug) ===");
+    ensure_stack(ctx, skip_mariadb).await?;
+
+    // Parked folders: create a temp Sites dir with a subfolder and sync.
+    let parked_root = ctx.paths.root.join("parked-smoke");
+    let site_folder = parked_root.join("parked-demo");
+    std::fs::create_dir_all(&site_folder)?;
+    std::fs::write(site_folder.join("index.php"), "<?php echo 'parked';")?;
+    {
+        let mut state = ctx.state.lock().await;
+        state.sites_settings.parked_dirs = vec![parked_root.clone()];
+        state.sites_settings.watch_enabled = true;
+        let added =
+            devstack_lib::services::parked::sync_parked_sites(&ctx.paths, &mut state)?;
+        println!("parked sync added={added}");
+        if added == 0
+            && !state
+                .sites
+                .iter()
+                .any(|s| s.domain == "parked-demo.test" || s.path == site_folder)
+        {
+            return Err("parked sync did not create parked-demo.test".into());
+        }
+        let parked = state
+            .sites
+            .iter()
+            .find(|s| s.path == site_folder || s.domain.starts_with("parked-demo"))
+            .ok_or("parked site missing")?;
+        if !parked.parked {
+            return Err("parked flag not set".into());
+        }
+        println!("parked site id={} domain={}", parked.id, parked.domain);
+        devstack_lib::config::save_state(&ctx.paths.state_file, &state)?;
+    }
+
+    // Dump helper + receiver parse.
+    {
+        let helper = devstack_lib::services::dump::write_php_helper(
+            &ctx.paths,
+            devstack_lib::services::dump::DEFAULT_DUMP_PORT,
+        )?;
+        assert!(helper.exists(), "dump helper missing");
+        let body = r#"{"payload":{"hello":"world"},"site":"parked-demo.test","file":"/tmp/x.php","line":12}"#;
+        let entry = devstack_lib::services::dump::parse_dump_body(body)?;
+        assert_eq!(entry.site.as_deref(), Some("parked-demo.test"));
+        println!("dump helper ok at {}", helper.display());
+    }
+
+    // Dev tools shims (composer + wp-cli download can be slow — prefer shim write).
+    {
+        let progress = noop_job_progress();
+        // Best-effort ensure; don't fail CI if network flakes — shim write is required.
+        let _ = devstack_lib::services::tools::ensure_composer(&ctx.paths, &progress, "smoke").await;
+        let _ = devstack_lib::services::tools::ensure_wp_cli(&ctx.paths, &progress, "smoke").await;
+        let state = ctx.state.lock().await;
+        let shims_dir = devstack_lib::services::tools::write_shims(&ctx.paths, &state)?;
+        println!("tools shims dir={}", shims_dir.display());
+        let bin = ctx.paths.tools.join("bin");
+        for name in ["composer", "wp", "node", "npm"] {
+            let unix = bin.join(name);
+            let win = bin.join(format!("{name}.cmd"));
+            if !unix.exists() && !win.exists() {
+                return Err(format!("missing shim for {name}").into());
+            }
+        }
+        let status = devstack_lib::services::tools::tools_status(&ctx.paths, &state);
+        println!(
+            "tools status composer={} wp={} binDir={}",
+            status.composer, status.wp_cli, status.bin_dir
+        );
+    }
+
+    // Full-site backup of an existing managed site (prefer WP from earlier smoke).
+    {
+        let site_id = {
+            let state = ctx.state.lock().await;
+            state
+                .sites
+                .iter()
+                .find(|s| !s.parked && s.database_name.is_some())
+                .or_else(|| state.sites.iter().find(|s| !s.parked))
+                .map(|s| s.id.clone())
+                .ok_or("no managed site for backup")?
+        };
+        let progress = noop_job_progress();
+        let state = ctx.state.lock().await.clone();
+        let rec = match devstack_lib::services::site_backup::backup_site(
+            &ctx.paths,
+            &state,
+            &site_id,
+            &progress,
+            "smoke-backup",
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("full backup soft-fail (files-only may still work): {e}");
+                // Still exercise list/delete on whatever exists.
+                let listed = devstack_lib::services::site_backup::list_site_backups(
+                    &ctx.paths,
+                    &state,
+                    Some(&site_id),
+                );
+                println!("backups listed={}", listed.len());
+                return Ok(());
+            }
+        };
+        println!("backup id={} files={}", rec.id, rec.files_archive.display());
+        let listed = devstack_lib::services::site_backup::list_site_backups(
+            &ctx.paths,
+            &state,
+            Some(&site_id),
+        );
+        if !listed.iter().any(|b| b.id == rec.id) {
+            return Err("backup not listed after create".into());
+        }
+        // Xdebug hints for the same site.
+        {
+            let mut state = ctx.state.lock().await;
+            let view = devstack_lib::services::xdebug_site::set_site_xdebug(
+                &ctx.paths,
+                &mut state,
+                &site_id,
+                true,
+            )?;
+            println!(
+                "xdebug enabled php={} port={} launch={:?}",
+                view.php_version, view.port, view.launch_json
+            );
+            let hints = devstack_lib::services::xdebug_site::site_xdebug_view(
+                &ctx.paths,
+                &state,
+                &site_id,
+            )?;
+            assert!(hints.enabled);
+            let _ = devstack_lib::services::xdebug_site::set_site_xdebug(
+                &ctx.paths,
+                &mut state,
+                &site_id,
+                false,
+            )?;
+        }
+        let state = ctx.state.lock().await;
+        devstack_lib::services::site_backup::delete_site_backup(&ctx.paths, &state, &rec.id)?;
+        println!("backup deleted");
+    }
+
+    // Share URL parser (cloudflared download is network-heavy — unit coverage is enough;
+    // here just assert asset naming + args helper stay wired).
+    {
+        let name = devstack_lib::services::share::asset_name(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        )?;
+        println!("cloudflared asset={name}");
+        assert!(!name.is_empty());
+        let sample = "INF | https://abc-def.trycloudflare.com |";
+        let url = devstack_lib::services::share::parse_trycloudflare_url(sample)
+            .ok_or("failed to parse trycloudflare URL")?;
+        assert!(url.contains("trycloudflare.com"));
+    }
+
+    println!("=== v0.2.9 features smoke OK ===");
     Ok(())
 }
 

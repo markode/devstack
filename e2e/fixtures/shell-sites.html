@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DevStack Sites v0.2.9 fixture</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell platform-windows" data-platform="windows" data-testid="app-shell">
+      <aside class="sidebar platform-windows" data-testid="sidebar">
+        <div class="sidebar-top" data-tauri-drag-region>
+          <div class="brand"><div class="brand-mark">DS</div><div class="brand-name">DevStack</div></div>
+        </div>
+        <nav class="sidebar-nav" aria-label="Main">
+          <button type="button" class="nav-item active" data-nav="sites"><span class="nav-icon" style="background:#007aff">W</span><span class="nav-label">Sites</span></button>
+          <button type="button" class="nav-item" data-nav="mail"><span class="nav-icon" style="background:#0a84ff">M</span><span class="nav-label">Mail</span></button>
+          <button type="button" class="nav-item" data-nav="dumps"><span class="nav-icon" style="background:#ff6b35">D</span><span class="nav-label">Dumps</span></button>
+          <button type="button" class="nav-item" data-nav="backups"><span class="nav-icon" style="background:#30a46c">B</span><span class="nav-label">Backups</span></button>
+          <button type="button" class="nav-item" data-nav="sharing"><span class="nav-icon" style="background:#30b0c7">↗</span><span class="nav-label">Sharing</span></button>
+        </nav>
+      </aside>
+      <main class="content">
+        <header class="content-header platform-windows" data-testid="page-header">
+          <div class="content-title">Sites</div>
+        </header>
+        <div class="content-body">
+          <div class="stack-banner stack-banner-stopped" data-testid="stack-banner" data-state="stopped">
+            <div class="stack-banner-body">
+              <strong>Stack stopped, sites are not running</strong>
+              <span class="muted">Start the web server and database to serve your .test domains.</span>
+            </div>
+            <button type="button" class="btn btn-primary">Start</button>
+          </div>
+          <div class="stack-banner stack-banner-compact" data-testid="stack-banner-running" data-state="running">
+            <span class="status-dot on"></span>
+            <span class="stack-banner-text">Running · Nginx · MariaDB</span>
+          </div>
+          <div class="sites-grid">
+            <article class="site-tile" data-testid="site-tile">
+              <div class="site-tile-top">
+                <span class="fw-icon fw-wordpress">WP</span>
+                <div class="site-tile-heading">
+                  <div class="site-tile-name">blog</div>
+                  <div class="site-tile-domain" data-testid="site-tile-url">blog.test:8443</div>
+                </div>
+                <span class="site-tile-status"><span class="status-dot on"></span>Running</span>
+              </div>
+              <div class="site-tile-env">
+                <label class="site-tile-php"><span class="muted">PHP</span><select class="native"><option>8.4</option></select></label>
+                <span class="chip">Nginx</span>
+                <button type="button" class="chip chip-toggle on">Xdebug</button>
+                <span class="site-tile-https"><span class="muted">HTTPS</span><button type="button" class="toggle on"></button></span>
+              </div>
+              <div class="site-tile-actions">
+                <button type="button" class="btn btn-install">Open</button>
+                <button type="button" class="btn btn-install">Folder</button>
+                <button type="button" class="btn btn-install">Terminal</button>
+                <button type="button" class="btn btn-install">Database</button>
+                <button type="button" class="btn btn-install">Logs</button>
+              </div>
+            </article>
+          </div>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>
