@@ -27,6 +27,7 @@ pub mod wordpress;
 pub mod wp_url;
 pub mod vhost_ext;
 pub mod site_php_ini;
+pub mod site_templates;
 pub mod tld;
 pub mod xdebug_site;
 

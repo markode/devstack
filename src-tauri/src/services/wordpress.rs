@@ -190,7 +190,7 @@ async fn fetch_wp_version(client: &reqwest::Client) -> Option<String> {
     })
 }
 
-fn random_password(len: usize) -> String {
+pub fn random_password(len: usize) -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(len)
@@ -198,7 +198,7 @@ fn random_password(len: usize) -> String {
         .collect()
 }
 
-fn safe_db_ident(input: &str) -> String {
+pub fn safe_db_ident(input: &str) -> String {
     let mut s: String = input
         .chars()
         .map(|c| {

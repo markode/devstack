@@ -52,13 +52,43 @@ pub fn detect_framework(path: &Path) -> (String, String) {
     if root.join("wp-config.php").exists() || root.join("wp-config-sample.php").exists() {
         return ("wordpress".into(), "WP".into());
     }
-    if root.join("artisan").exists() && root.join("composer.json").exists() {
+    // Docroots such as `public/` or `web/` sit one level below the project root.
+    let project = project_root_for_docroot(&root);
+    let composer = fs::read_to_string(project.join("composer.json")).unwrap_or_default();
+    if project.join("artisan").exists() && project.join("composer.json").exists() {
+        if composer.contains("statamic/cms") {
+            return ("statamic".into(), "ST".into());
+        }
         return ("laravel".into(), "LV".into());
     }
-    if root.join("composer.json").exists() {
+    if composer.contains("symfony/framework-bundle") || project.join("bin/console").exists() && composer.contains("symfony/") {
+        return ("symfony".into(), "SY".into());
+    }
+    if composer.contains("drupal/core") || project.join("web/core/lib/Drupal.php").exists() {
+        return ("drupal".into(), "DR".into());
+    }
+    if root.join("libraries/src/Version.php").exists() || root.join("configuration.php").exists() && root.join("administrator").exists() {
+        return ("joomla".into(), "JM".into());
+    }
+    if project.join("composer.json").exists() {
         return ("php".into(), "PHP".into());
     }
     ("other".into(), "?".into())
+}
+
+/// `{project}/public` → `{project}` when the folder is a conventional docroot.
+pub fn project_root_for_docroot(root: &Path) -> PathBuf {
+    let is_docroot = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| matches!(n, "public" | "web" | "public_html" | "webroot" | "www"))
+        .unwrap_or(false);
+    if is_docroot {
+        if let Some(parent) = root.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    root.to_path_buf()
 }
 
 pub fn parse_wp_config(path: &Path) -> (Option<String>, Option<String>, Option<String>) {
