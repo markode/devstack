@@ -1105,6 +1105,11 @@ pub fn is_suppressed(set: &SuppressSet, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Per-path repeat-event debounce for `Databases/` (never below `perf::MIN_WATCH_DEBOUNCE_MS`).
+pub const DB_WATCH_DEBOUNCE_MS: u64 = 800;
+/// Settle time so writers finish before we report a changed dump.
+pub const DB_WATCH_SETTLE_MS: u64 = 400;
+
 /// Spawn a background folder watcher. Emits callbacks on the provided channel-like Fn.
 pub fn spawn_folder_watcher<F>(
     root: PathBuf,
@@ -1161,14 +1166,14 @@ where
                             // Debounce
                             let now = Instant::now();
                             if let Some((ref prev, t)) = last {
-                                if prev == &path && now.duration_since(t) < Duration::from_millis(800)
+                                if prev == &path && now.duration_since(t) < Duration::from_millis(DB_WATCH_DEBOUNCE_MS)
                                 {
                                     continue;
                                 }
                             }
                             last = Some((path.clone(), now));
                             // Wait briefly for writers to finish
-                            thread::sleep(Duration::from_millis(400));
+                            thread::sleep(Duration::from_millis(DB_WATCH_SETTLE_MS));
                             if !path.exists() {
                                 continue;
                             }

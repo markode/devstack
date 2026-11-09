@@ -44,18 +44,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let install_node = args.iter().any(|a| a == "--install-node");
     let e2e = args.iter().any(|a| a == "--e2e");
-    let stack = e2e || args.iter().any(|a| a == "--stack");
+    let perf = args.iter().any(|a| a == "--perf");
+    let stack = e2e || perf || args.iter().any(|a| a == "--stack");
     let services_flag = args.iter().any(|a| a == "--services");
     let wordpress = e2e || args.iter().any(|a| a == "--wordpress");
     // Full e2e includes Apache pretty-permalinks + DB files + extras services.
     let apache = e2e || args.iter().any(|a| a == "--apache");
     let db_files = e2e || args.iter().any(|a| a == "--db-files");
     let skip_mariadb = args.iter().any(|a| a == "--skip-mariadb");
+    let v030 = args.iter().any(|a| a == "--v030");
     // Default: services smoke when no mode flag given; --e2e always runs services.
     let services = e2e
         || services_flag
         || (!install_node
+            && !v030
             && !stack
+            && !perf
             && !wordpress
             && !apache
             && !db_files
@@ -63,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.iter().any(|a| a == "--help") {
         eprintln!(
-            "devstack_smoke [--e2e] [--stack] [--wordpress] [--apache] [--db-files] [--services] [--skip-mariadb] [--install-node]"
+            "devstack_smoke [--e2e] [--stack] [--perf] [--wordpress] [--apache] [--db-files] [--services] [--v030] [--skip-mariadb] [--install-node]"
         );
         return Ok(());
     }
@@ -88,6 +92,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "mongodb",
             "postgresql",
             "apache",
+            "memcached",
+            "meilisearch",
+            "typesense",
+            "minio",
         ] {
             let provider = ctx.registry.get(id)?;
             match provider.list_versions(&state).await {
@@ -131,6 +139,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_services_smoke(&ctx).await?;
     }
 
+    if perf && !e2e {
+        run_perf_bench(&ctx).await?;
+    }
+
     if e2e {
         run_persistence_and_sites_smoke(&ctx, skip_mariadb).await?;
         run_dual_frontend_routing_smoke(&ctx).await?;
@@ -138,6 +150,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_status_error_smoke(&ctx).await?;
         run_stopped_status_smoke(&ctx).await?;
         run_v029_features_smoke(&ctx, skip_mariadb).await?;
+        run_v030_features_smoke(&ctx, skip_mariadb).await?;
+        run_perf_bench(&ctx).await?;
+    }
+
+    if v030 && !e2e {
+        run_v030_features_smoke(&ctx, skip_mariadb).await?;
     }
 
     Ok(())
@@ -2304,6 +2322,443 @@ async fn run_v029_features_smoke(
     }
 
     println!("=== v0.2.9 features smoke OK ===");
+    Ok(())
+}
+
+/// CI performance regression bench: warm `apply_stack`, HTTPS toggle, web-server toggle.
+///
+/// Methodology: one warm-up start+stop (primes page cache, certs, php.ini, DB
+/// datadir), then `apply_stack` is timed from a fully stopped stack. We take the
+/// best of two warm runs so a single noisy CI scheduler hiccup cannot fail the
+/// gate while a real regression (which slows *both* runs) still does. Toggles
+/// report the slower direction (on→off / off→on) because both must meet budget.
+async fn run_perf_bench(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::perf::{
+        check_budget, time_ms, toggle_budget_ms, warm_apply_stack_budget_ms,
+    };
+    use devstack_lib::services::sites::delete_site;
+    use devstack_lib::services::stack::{apply_site_environment_change, reload_sites};
+
+    println!("=== Perf bench ===");
+
+    let (site_id, apache_ok) = {
+        let mut state = ctx.state.lock().await;
+        let php_ver = state
+            .installed
+            .get("php")
+            .and_then(|v| v.first())
+            .map(|r| r.version.clone())
+            .unwrap_or_else(|| "8.3".into());
+        let path = ctx.paths.root.join("sites/perfbench");
+        let _ = std::fs::create_dir_all(&path);
+        std::fs::write(path.join("index.php"), "<?php echo 'PERF_BENCH_OK';\n")?;
+        let site = create_site(&mut state, &ctx.paths, "perfbench", path, Some(php_ver))?;
+        let apache_ok = state.installed.contains_key("apache");
+        if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+            s.web_server = Some("nginx".into());
+            s.https = true;
+        }
+        (site.id, apache_ok)
+    };
+
+    // Disable DB-folder export-on-stop so stop/start timing isn't dominated by dumps.
+    {
+        let mut state = ctx.state.lock().await;
+        state.db_files.auto_export_on_stop = false;
+        state.db_files.auto_export_interval_secs = 0;
+    }
+
+    // Warm-up: full start + stop so the measured start only pays steady-state costs.
+    // On Windows, one extra cycle lets InnoDB finish a clean shutdown before we time.
+    let warm_up_cycles = if cfg!(windows) { 2 } else { 1 };
+    let mut cold_ms = 0u128;
+    for i in 0..warm_up_cycles {
+        let mut state = ctx.state.lock().await;
+        let _ = stop_stack(&ctx.paths, &mut state);
+        let (res, ms) = time_ms(|| apply_stack(&ctx.paths, &mut state));
+        res?;
+        if i == 0 {
+            cold_ms = ms;
+        }
+        println!("PERF_BENCH warm_up[{i}] apply_stack_ms={ms}");
+    }
+    let stop_ms = {
+        let mut state = ctx.state.lock().await;
+        let (res, ms) = time_ms(|| stop_stack(&ctx.paths, &mut state));
+        res?;
+        ms
+    };
+
+    let mut warm_runs: Vec<u128> = Vec::new();
+    for _ in 0..2 {
+        let mut state = ctx.state.lock().await;
+        let (res, ms) = time_ms(|| apply_stack(&ctx.paths, &mut state));
+        res?;
+        warm_runs.push(ms);
+        if warm_runs.len() < 2 {
+            let _ = stop_stack(&ctx.paths, &mut state);
+        }
+    }
+    let apply_stack_warm_ms = *warm_runs.iter().min().unwrap_or(&0);
+
+    // Stack is up: toggles go through the fast reload path.
+    let toggle = |site_id: String, apply: Box<dyn Fn(&mut devstack_lib::config::SiteRecord)>| async move {
+        let mut state = ctx.state.lock().await;
+        let (prev_ws, prev_https) = {
+            let site = state
+                .sites
+                .iter_mut()
+                .find(|s| s.id == site_id)
+                .ok_or("perf site missing")?;
+            let prev = (site.web_server.clone(), site.https);
+            apply(site);
+            prev
+        };
+        let (res, ms) = time_ms(|| {
+            apply_site_environment_change(&ctx.paths, &mut state, &site_id, prev_ws, prev_https)
+        });
+        res.map_err(|e| e.to_string())?;
+        Ok::<u128, Box<dyn std::error::Error>>(ms)
+    };
+
+    let mut https_ms = 0u128;
+    for https in [false, true] {
+        let ms = toggle(site_id.clone(), Box::new(move |s| s.https = https)).await?;
+        println!("PERF_BENCH https={https}: {ms}ms");
+        https_ms = https_ms.max(ms);
+    }
+
+    let mut apache_ms: Option<u128> = None;
+    if apache_ok {
+        let mut worst = 0u128;
+        for server in ["apache", "nginx"] {
+            let ms = toggle(
+                site_id.clone(),
+                Box::new(move |s| s.web_server = Some(server.into())),
+            )
+            .await?;
+            println!("PERF_BENCH web_server={server}: {ms}ms");
+            worst = worst.max(ms);
+        }
+        apache_ms = Some(worst);
+    } else {
+        println!("PERF_BENCH apache toggle skipped — apache not installed");
+    }
+
+    {
+        let mut state = ctx.state.lock().await;
+        let _ = delete_site(&ctx.paths, &mut state, &site_id);
+        let _ = reload_sites(&ctx.paths, &mut state);
+        let _ = stop_stack(&ctx.paths, &mut state);
+    }
+
+    println!(
+        "PERF_BENCH apply_stack_warm_ms={apply_stack_warm_ms} https_toggle_ms={https_ms} apache_toggle_ms={} cold_apply_stack_ms={cold_ms} stop_stack_ms={stop_ms} warm_runs={warm_runs:?}",
+        apache_ms.map(|v| v.to_string()).unwrap_or_else(|| "na".into()),
+    );
+
+    check_budget(
+        "warm apply_stack",
+        apply_stack_warm_ms,
+        warm_apply_stack_budget_ms(),
+    )?;
+    check_budget("HTTPS toggle", https_ms, toggle_budget_ms())?;
+    if let Some(ms) = apache_ms {
+        check_budget("web-server (apache) toggle", ms, toggle_budget_ms())?;
+    }
+    println!("SMOKE PASS: perf bench within budget");
+    Ok(())
+}
+
+/// Plain HTTP GET against 127.0.0.1 (no TLS) — used for service health probes.
+fn http_get_local(port: u16, path: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect_timeout(
+        &([127, 0, 0, 1], port).into(),
+        Duration::from_secs(2),
+    )
+    .ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+    s.write_all(format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+        .ok()?;
+    let mut out = String::new();
+    s.read_to_string(&mut out).ok()?;
+    Some(out)
+}
+
+async fn run_v030_features_smoke(
+    ctx: &DevStackCtx,
+    skip_mariadb: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::{
+        config_transfer, dns, metrics, mobile_preview, site_logs, site_php_ini, site_templates, tld,
+        tls,
+    };
+    println!("=== v0.3.0 features smoke (services / php.ini / TLD / templates / config / preview / metrics) ===");
+    ensure_stack(ctx, skip_mariadb).await?;
+
+    // --- 1. One-click service: install + start/stop (Meilisearch; network-soft) -------
+    let mut service_checked = false;
+    match pick_version(ctx, "meilisearch", |_| true).await {
+        Ok(ver) => match install_pkg(ctx, "meilisearch", &ver).await {
+            Ok(()) => {
+                let mut state = ctx.state.lock().await;
+                let status = start_service(&ctx.paths, &mut state, "meilisearch")?;
+                println!("meilisearch running={} ports={:?}", status.running, status.ports);
+                assert!(status.running, "meilisearch did not start");
+                let port = state.stack.meilisearch_port;
+                let health = http_get_local(port, "/health").ok_or("meilisearch /health unreachable")?;
+                assert!(health.contains("available"), "unexpected health body: {health}");
+                let stopped = stop_service(&ctx.paths, &mut state, "meilisearch")?;
+                assert!(!stopped.running, "meilisearch still running after stop");
+                assert!(state.runtime.meilisearch_pid.is_none());
+                service_checked = true;
+                println!("meilisearch start/stop OK on :{port}");
+            }
+            Err(e) => println!("[meilisearch] install soft-fail ({e}) — falling back to port-remap unit coverage"),
+        },
+        Err(e) => println!("[meilisearch] version list soft-fail ({e})"),
+    }
+    if !service_checked {
+        // Port remap + service_ports consistency without a binary.
+        let mut state = ctx.state.lock().await.clone();
+        let busy = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        state.stack.memcached_port = busy.local_addr()?.port();
+        let notice = devstack_lib::services::extras_v030::auto_remap_if_busy(&mut state, "memcached");
+        assert!(notice.is_some(), "busy memcached port must remap");
+        assert_ne!(state.stack.memcached_port, busy.local_addr()?.port());
+    }
+    {
+        let state = ctx.state.lock().await;
+        let listed = devstack_lib::services::extras::list_managed_services(&ctx.paths, &state);
+        for id in ["redis", "memcached", "meilisearch", "typesense", "minio", "reverb"] {
+            assert!(listed.iter().any(|s| s.id == id), "{id} missing from services list");
+        }
+        let minio = listed.iter().find(|s| s.id == "minio").unwrap();
+        assert_eq!(minio.ports.len(), 2, "MinIO exposes API + console ports");
+    }
+
+    // Pick an nginx-served site for the per-site checks.
+    let (site_id, domain) = {
+        let state = ctx.state.lock().await;
+        let site = state
+            .sites
+            .iter()
+            .find(|s| !s.parked && s.web_server.as_deref() != Some("apache"))
+            .or_else(|| state.sites.first())
+            .ok_or("no site available")?;
+        (site.id.clone(), site.domain.clone())
+    };
+
+    // --- 2. Per-site php.ini: set / get / applied to runtime ---------------------------
+    {
+        let mut state = ctx.state.lock().await;
+        let view = site_php_ini::set_site_php_ini(
+            &ctx.paths,
+            &mut state,
+            &site_id,
+            [("memory_limit".to_string(), "321M".to_string())].into(),
+        )?;
+        assert_eq!(view.overrides["memory_limit"], "321M");
+        let got = site_php_ini::get_site_php_ini(&ctx.paths, &state, &site_id)?;
+        assert_eq!(got.sliders.memory_limit_mb, Some(321));
+        assert!(site_php_ini::merged_ini_path(&ctx.paths, &site_id).exists());
+        if !cfg!(windows) {
+            let conf = std::fs::read_to_string(
+                ctx.paths.nginx_sites_dir().join(format!("{site_id}.conf")),
+            )?;
+            assert!(conf.contains("PHP_VALUE"), "vhost lacks PHP_VALUE:\n{conf}");
+            // Live probe through nginx → php-fpm.
+            let docroot = {
+                let site = state.sites.iter().find(|s| s.id == site_id).unwrap();
+                devstack_lib::paths_util::expand_home(&site.path)
+            };
+            let probe = docroot.join("devstack-ini-probe.php");
+            std::fs::write(&probe, "<?php echo 'ML=' . ini_get('memory_limit');")?;
+            let https = state.stack.https_port;
+            // nginx reload is graceful/async — poll until the new workers serve the override.
+            let mut body = String::new();
+            for _ in 0..10 {
+                let out = smoke_command("curl")
+                    .args([
+                        "-sk",
+                        "--max-time",
+                        "10",
+                        "--resolve",
+                        &format!("{domain}:{https}:127.0.0.1"),
+                        &format!("https://{domain}:{https}/devstack-ini-probe.php"),
+                    ])
+                    .output();
+                if let Ok(o) = out {
+                    body = String::from_utf8_lossy(&o.stdout).to_string();
+                    if body.contains("ML=321M") {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+            let _ = std::fs::remove_file(&probe);
+            println!("php.ini live probe → {body}");
+            if !body.is_empty() && !body.contains("ML=321M") {
+                return Err(format!("per-site memory_limit override not applied at runtime: {body}").into());
+            }
+        }
+        site_php_ini::set_site_php_ini(&ctx.paths, &mut state, &site_id, Default::default())?;
+        println!("per-site php.ini set/get OK");
+    }
+
+    // --- 5. TLD + aliases: hosts block, cert SANs, vhost server_name ------------------
+    {
+        let mut state = ctx.state.lock().await;
+        let (site, warnings) = tld::update_site_domain_options(
+            &mut state,
+            &site_id,
+            None,
+            Some(vec!["v030-alias.test".into()]),
+            Some(true),
+        )?;
+        let domains = dns::site_domains(&state.sites);
+        let block = dns::build_hosts_block(&domains);
+        assert!(block.contains("127.0.0.1 v030-alias.test"), "hosts block lacks alias");
+        assert!(block.contains(&format!("127.0.0.1 {}", site.domain)));
+        assert!(!block.contains('*'));
+        let certs = tls::ensure_site_cert_for(&ctx.paths, &site)?;
+        assert!(certs.site_cert.exists());
+        let sans = std::fs::read_to_string(
+            ctx.paths.certs.join("sites").join(&site.domain).join("sans.txt"),
+        )?;
+        assert!(sans.contains("v030-alias.test") && sans.contains(&format!("*.{}", site.domain)));
+        let _ = devstack_lib::services::nginx::reload_nginx(&ctx.paths, &mut state);
+        let conf = std::fs::read_to_string(ctx.paths.nginx_sites_dir().join(format!("{site_id}.conf")))?;
+        assert!(conf.contains("v030-alias.test"), "vhost lacks alias server_name");
+        assert!(tld::tld_warnings("dev").iter().any(|w| w.contains("HTTPS")));
+        println!("TLD/alias OK warnings={warnings:?}");
+        // revert
+        tld::update_site_domain_options(&mut state, &site_id, None, Some(vec![]), Some(false))?;
+        let _ = devstack_lib::services::nginx::reload_nginx(&ctx.paths, &mut state);
+    }
+
+    // --- 3. Site template: scaffold + DB (network skipped) -----------------------------
+    {
+        let progress = noop_job_progress();
+        let mut state = ctx.state.lock().await;
+        let dir = ctx.paths.root.join("tpl-smoke");
+        let _ = std::fs::remove_dir_all(&dir);
+        state.sites.retain(|s| s.id != "tpl-smoke");
+        let res = site_templates::create_from_template_with(
+            &ctx.paths,
+            &mut state,
+            site_templates::CreateFromTemplateRequest {
+                kind: "laravel".into(),
+                name: "tpl-smoke".into(),
+                path: Some(dir.display().to_string()),
+                php_version: None,
+                database_engine: None,
+                web_server: None,
+            },
+            &progress,
+            "smoke-tpl",
+            true,
+        )
+        .await?;
+        assert!(std::path::Path::new(&res.docroot).join("index.php").exists());
+        assert!(res.docroot.ends_with("public"));
+        if skip_mariadb {
+            println!("template DB step skipped (--skip-mariadb): {:?}", res.steps);
+        } else {
+            let db = res.database.as_ref().ok_or("template DB was not created")?;
+            println!("template DB created: {}", db.name);
+            assert!(dir.join(".env").exists() || dir.join(".env.example").exists());
+        }
+        state.sites.retain(|s| s.id != "tpl-smoke");
+        let _ = std::fs::remove_dir_all(&dir);
+        println!("site template scaffold OK soft_failed={}", res.soft_failed);
+    }
+
+    // --- 6. Site logs ---------------------------------------------------------------------
+    {
+        let state = ctx.state.lock().await;
+        let sources = site_logs::list_sources(&ctx.paths, &state, &site_id)?;
+        assert!(sources.iter().any(|s| s.id == "web-error"));
+        let page = site_logs::read_logs(
+            &ctx.paths,
+            &state,
+            &site_id,
+            &site_logs::SiteLogQuery { source: "web-access".into(), ..Default::default() },
+        )?;
+        println!("site logs web-access entries={} cursor={}", page.entries.len(), page.cursor);
+    }
+
+    // --- 9. Config export / import roundtrip into a scratch profile -------------------
+    {
+        let state = ctx.state.lock().await.clone();
+        let zip = ctx.paths.root.join("smoke-config-export.zip");
+        let progress = noop_job_progress();
+        let summary = config_transfer::export_config(&ctx.paths, &state, &zip, false, &progress, "smoke-cfg")?;
+        let meta = config_transfer::inspect_archive(&zip)?;
+        assert_eq!(meta, summary.meta);
+        let scratch = devstack_lib::config::Paths::from_root(ctx.paths.root.join("smoke-config-import"))?;
+        let mut fresh = devstack_lib::config::AppState::default();
+        let report = config_transfer::import_config(
+            &scratch,
+            &mut fresh,
+            &zip,
+            &config_transfer::ImportOptions { restore_settings: true, ..Default::default() },
+            &progress,
+            "smoke-cfg",
+        )?;
+        assert_eq!(fresh.sites.len(), state.sites.len(), "sites roundtrip");
+        assert_eq!(fresh.stack.http_port, state.stack.http_port);
+        println!("config export/import OK sites_added={}", report.sites_added);
+        let _ = std::fs::remove_file(&zip);
+        let _ = std::fs::remove_dir_all(ctx.paths.root.join("smoke-config-import"));
+    }
+
+    // --- 7. Mobile preview: URL builder (+ live bind when a LAN IP exists) ------------
+    {
+        assert_eq!(mobile_preview::preview_url("192.168.0.10", 8300), "http://192.168.0.10:8300");
+        let port = mobile_preview::pick_port().ok_or("no preview port")?;
+        assert!((8300..=8399).contains(&port));
+        assert!(mobile_preview::qr_data_url("http://192.168.0.10:8300")?.starts_with("data:image/svg+xml;base64,"));
+        let mut state = ctx.state.lock().await;
+        match mobile_preview::start(&ctx.paths, &mut state, &site_id) {
+            Ok(info) => {
+                let (ip, p) = (info.lan_ip.clone().unwrap(), info.port.unwrap());
+                println!("mobile preview {} (qr={})", info.url.clone().unwrap_or_default(), info.qr_data_url.is_some());
+                let out = smoke_command("curl")
+                    .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "8", &format!("http://{ip}:{p}/")])
+                    .output();
+                if let Ok(o) = out {
+                    println!("preview HTTP status via LAN IP: {}", String::from_utf8_lossy(&o.stdout));
+                }
+                mobile_preview::stop(&ctx.paths, &mut state)?;
+                assert!(state.runtime.mobile_preview.is_none());
+            }
+            Err(e) => println!("mobile preview live bind soft-skip: {e}"),
+        }
+    }
+
+    // --- 8. Metrics snapshot with the stack running ---------------------------------------
+    {
+        let state = ctx.state.lock().await.clone();
+        let snap = metrics::snapshot(&state);
+        assert!(snap.system.total_memory_bytes > 0);
+        assert!(
+            snap.processes.iter().any(|p| p.running && p.memory_bytes > 0),
+            "expected at least one running managed process, got {:?}",
+            snap.processes
+        );
+        println!(
+            "metrics: {} process(es), total RSS {} MB, cpu {:.1}%",
+            snap.processes.len(),
+            snap.total_memory_bytes / 1024 / 1024,
+            snap.total_cpu_percent
+        );
+        let spx = metrics::spx_status(&ctx.paths, &state, None);
+        println!("spx available={} enabled={}", spx.available, spx.enabled);
+    }
+
+    println!("=== v0.3.0 features smoke OK ===");
     Ok(())
 }
 

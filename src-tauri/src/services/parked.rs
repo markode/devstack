@@ -91,11 +91,8 @@ pub fn sync_parked_sites(_paths: &Paths, state: &mut AppState) -> Result<usize> 
         }
         let slug = slug_for_folder(&name);
         let id = unique_id(&taken_ids, &slug);
-        let domain = if id == slug {
-            domain_for_folder(&name)
-        } else {
-            format!("{id}.test")
-        };
+        let tld = state.developer.default_tld.clone();
+        let domain = format!("{id}.{tld}");
         if taken_domains.contains(&domain) {
             continue;
         }
@@ -117,6 +114,9 @@ pub fn sync_parked_sites(_paths: &Paths, state: &mut AppState) -> Result<usize> 
             is_template: false,
             parked: true,
             xdebug: false,
+            tld,
+            aliases: Vec::new(),
+            wildcard: false,
         };
         let details = detect_site(&site);
         site.framework = Some(details.framework);
@@ -135,6 +135,9 @@ pub fn sync_parked_sites(_paths: &Paths, state: &mut AppState) -> Result<usize> 
     }
     Ok(added)
 }
+
+/// Trailing-edge debounce for parked-folder events (never below `perf::MIN_WATCH_DEBOUNCE_MS`).
+pub const PARKED_DEBOUNCE_MS: u64 = 500;
 
 /// Watch parked directories; `on_change` fires (debounced) when a subfolder is
 /// created/removed/renamed. Dropping `running` to false stops the thread.
@@ -170,7 +173,14 @@ where
         let _watcher = watcher;
         let mut pending: Option<Instant> = None;
         while running.load(Ordering::SeqCst) {
-            match rx.recv_timeout(Duration::from_millis(500)) {
+            // Sleep exactly until the debounce window closes (or block idle for 1s).
+            let wait = match pending {
+                Some(t) => Duration::from_millis(PARKED_DEBOUNCE_MS)
+                    .saturating_sub(t.elapsed())
+                    .max(Duration::from_millis(1)),
+                None => Duration::from_secs(1),
+            };
+            match rx.recv_timeout(wait) {
                 Ok(event) => {
                     use notify::EventKind;
                     if matches!(
@@ -184,7 +194,7 @@ where
                 Err(_) => break,
             }
             if let Some(t) = pending {
-                if t.elapsed() >= Duration::from_secs(1) {
+                if t.elapsed() >= Duration::from_millis(PARKED_DEBOUNCE_MS) {
                     pending = None;
                     on_change();
                 }
@@ -197,6 +207,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parked_debounce_not_below_minimum() {
+        assert!(PARKED_DEBOUNCE_MS >= crate::services::perf::MIN_WATCH_DEBOUNCE_MS);
+    }
 
     #[test]
     fn slug_and_domain_from_folder_name() {
@@ -236,6 +251,9 @@ mod tests {
             is_template: false,
             parked: false,
             xdebug: false,
+            tld: crate::config::default_tld(),
+            aliases: Vec::new(),
+            wildcard: false,
         });
 
         let added = sync_parked_sites(&paths, &mut state).unwrap();

@@ -12,6 +12,8 @@ import { BackupsPage } from "./pages/BackupsPage";
 import { DumpsPage } from "./pages/DumpsPage";
 import { MailpitPage } from "./pages/MailpitPage";
 import { SharingPage } from "./pages/SharingPage";
+import { PerformancePage } from "./pages/PerformancePage";
+import { HostingPage } from "./pages/HostingPage";
 import { AppDataProvider, useAppData } from "./store/AppData";
 import * as client from "./client";
 import { detectPlatform, type AppPlatform } from "./platform";
@@ -30,6 +32,8 @@ const TITLES: Record<SectionId, string> = {
   mail: "Mail",
   dumps: "Dumps",
   backups: "Backups",
+  performance: "Performance",
+  hosting: "Hosting",
   shortcuts: "Shortcuts",
   about: "About",
 };
@@ -43,6 +47,7 @@ const KEEP_ALIVE: SectionId[] = [
   "logs",
   "mail",
   "dumps",
+  "performance",
 ];
 
 const SECTIONS = Object.keys(TITLES) as SectionId[];
@@ -232,6 +237,9 @@ function AppShell() {
           <KeepAlivePane id="dumps" active={section} visited={visited}>
             <DumpsPage active={section === "dumps"} />
           </KeepAlivePane>
+          <KeepAlivePane id="performance" active={section} visited={visited}>
+            <PerformancePage active={section === "performance"} />
+          </KeepAlivePane>
           {ephemeral ? (
             <>
               {section === "general" && (
@@ -250,6 +258,7 @@ function AppShell() {
                 />
               )}
               {section === "sharing" && <SharingPage />}
+              {section === "hosting" && <HostingPage />}
               {section === "backups" && <BackupsPage active />}
               {section === "shortcuts" && (
                 <PlaceholderPage

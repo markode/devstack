@@ -11,6 +11,7 @@ pub mod php;
 mod phpmyadmin;
 mod postgresql;
 mod redis;
+pub mod service_bins;
 pub mod version_cache;
 
 use async_trait::async_trait;
@@ -34,6 +35,7 @@ pub use php::PhpProvider;
 pub use phpmyadmin::PhpMyAdminProvider;
 pub use postgresql::PostgreSqlProvider;
 pub use redis::RedisProvider;
+pub use service_bins::{ServiceBinProvider, ServiceKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +117,10 @@ impl PackageRegistry {
             Arc::new(PostgreSqlProvider::new(client.clone())),
             Arc::new(RedisProvider::new(client.clone())),
             Arc::new(MailpitProvider::new(client.clone())),
+            Arc::new(ServiceBinProvider::new(ServiceKind::Memcached, client.clone())),
+            Arc::new(ServiceBinProvider::new(ServiceKind::Meilisearch, client.clone())),
+            Arc::new(ServiceBinProvider::new(ServiceKind::Typesense, client.clone())),
+            Arc::new(ServiceBinProvider::new(ServiceKind::Minio, client.clone())),
         ];
 
         for p in list {

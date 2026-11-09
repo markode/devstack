@@ -8,9 +8,11 @@ import type {
   ManagedServiceStatus,
   PackageInfo,
   PortCheckResult,
+  SiteRecord,
 } from "../types";
 import { openInBrowser } from "../open";
 import { humanizeError, parsePortBusy } from "../portBusy";
+import { formatServicePorts } from "../v030";
 
 const SERVICE_IDS = [
   "nginx",
@@ -22,6 +24,10 @@ const SERVICE_IDS = [
   "postgresql",
   "redis",
   "mailpit",
+  "memcached",
+  "meilisearch",
+  "typesense",
+  "minio",
 ] as const;
 
 export function ServicesPage() {
@@ -177,9 +183,7 @@ export function ServicesPage() {
                 <strong>{svc.name}</strong>
                 <div className="muted" style={{ fontSize: 12 }}>
                   {svc.version ? `v${svc.version}` : "not installed"}
-                  {svc.ports.length
-                    ? ` · ${svc.ports.map((p) => `:${p}`).join(" ")}`
-                    : ""}
+                  {svc.ports.length ? ` · ${formatServicePorts(svc)}` : ""}
                 </div>
               </div>
               <span className={`status-dot ${svc.running ? "on" : ""}`} />
@@ -189,6 +193,7 @@ export function ServicesPage() {
                 {svc.notes}
               </div>
             ) : null}
+            {svc.id === "reverb" ? <ReverbSitePicker onChanged={() => void refresh()} /> : null}
             <div className="svc-card-actions">
               <button
                 type="button"
@@ -247,6 +252,38 @@ export function ServicesPage() {
         />
       ))}
     </div>
+  );
+}
+
+function ReverbSitePicker({ onChanged }: { onChanged: () => void }) {
+  const [sites, setSites] = useState<SiteRecord[]>([]);
+  const [value, setValue] = useState("");
+  useEffect(() => {
+    void client.getSites().then(setSites).catch(() => {});
+  }, []);
+  const laravel = sites.filter((s) => (s.framework ?? "") === "laravel" || (s.framework ?? "") === "statamic");
+  return (
+    <label className="field" style={{ marginTop: 8 }}>
+      <span className="muted" style={{ fontSize: 12 }}>
+        Laravel site (needs <code>laravel/reverb</code>)
+      </span>
+      <select
+        className="native"
+        aria-label="Reverb site"
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value);
+          void client.setReverbSite(e.target.value || null).then(onChanged);
+        }}
+      >
+        <option value="">Auto-detect</option>
+        {laravel.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.name}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

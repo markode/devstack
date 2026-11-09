@@ -190,14 +190,28 @@ pub fn repair_site_url(
     state: &AppState,
     site: &SiteRecord,
 ) -> Result<String> {
+    let canonical = canonical_site_url(site, state);
+    repair_site_url_to(paths, state, site, &canonical, None, None)
+}
+
+/// Like [`repair_site_url`] but rewrites to an explicit `target` URL.
+/// `from_override` forces the URL to replace (e.g. a remote host URL after a pull);
+/// `db_override` targets another database (e.g. a scratch copy before a push).
+pub fn repair_site_url_to(
+    paths: &Paths,
+    state: &AppState,
+    site: &SiteRecord,
+    target: &str,
+    from_override: Option<&str>,
+    db_override: Option<&str>,
+) -> Result<String> {
     if !site_is_wordpress(site) {
         return Err(DevStackError::Message(
             "Repair site URL is only available for WordPress sites".into(),
         ));
     }
-    let db = site
-        .database_name
-        .as_deref()
+    let db = db_override
+        .or(site.database_name.as_deref())
         .ok_or_else(|| DevStackError::Message("site has no database".into()))?;
     let engine = site
         .database_engine
@@ -210,8 +224,11 @@ pub fn repair_site_url(
         ));
     }
 
-    let canonical = canonical_site_url(site, state);
-    let old = read_wp_option(paths, state, &engine, db, "siteurl").unwrap_or_default();
+    let canonical = target.to_string();
+    let old = match from_override {
+        Some(f) => f.to_string(),
+        None => read_wp_option(paths, state, &engine, db, "siteurl").unwrap_or_default(),
+    };
     let from = if old.is_empty() || old == canonical {
         // Still force siteurl/home even when already matching (no table scan).
         String::new()
@@ -274,6 +291,35 @@ pub fn repair_site_url(
         crate::applog::info("wordpress", &stdout);
     }
     Ok(msg)
+}
+
+/// Like [`repair_site_url`] but a no-op (`Ok(None)`) for non-WordPress sites, sites
+/// without a database, and sites whose stored siteurl already equals the canonical URL.
+pub fn repair_site_url_if_changed(
+    paths: &Paths,
+    state: &AppState,
+    site: &SiteRecord,
+) -> Result<Option<String>> {
+    if !site_is_wordpress(site) {
+        return Ok(None);
+    }
+    let Some(db) = site.database_name.as_deref() else {
+        return Ok(None);
+    };
+    let engine = site
+        .database_engine
+        .clone()
+        .or_else(|| state.active_database.clone())
+        .unwrap_or_else(|| "mariadb".into());
+    if matches!(engine.as_str(), "mysql" | "mariadb") {
+        let canonical = canonical_site_url(site, state);
+        if let Ok(current) = read_wp_option(paths, state, &engine, db, "siteurl") {
+            if current == canonical {
+                return Ok(None);
+            }
+        }
+    }
+    repair_site_url(paths, state, site).map(Some)
 }
 
 /// On app start / after port remap: repair any WP site whose siteurl ≠ canonical.
@@ -342,6 +388,9 @@ mod tests {
             is_template: false,
             parked: false,
             xdebug: false,
+            tld: crate::config::default_tld(),
+            aliases: Vec::new(),
+            wildcard: false,
         };
         assert_eq!(
             canonical_site_url(&site, &state),

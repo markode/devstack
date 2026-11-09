@@ -6,7 +6,15 @@ import {
   useAsyncJob,
 } from "../components/AsyncModal";
 import { PortConflictDialog } from "../components/PortConflictDialog";
+import { MobilePreviewModal } from "../components/MobilePreviewModal";
 import { SiteBackupsPanel } from "../components/SiteBackupsPanel";
+import { SiteDomainPanel } from "../components/SiteDomainPanel";
+import { SiteLogsPanel } from "../components/SiteLogsPanel";
+import { SitePhpIniPanel } from "../components/SitePhpIniPanel";
+import {
+  TemplatePickerModal,
+  TemplateResultModal,
+} from "../components/TemplatePickerModal";
 import { SiteTile } from "../components/SiteTile";
 import { SitesEmptyState } from "../components/SitesEmptyState";
 import { SitesStatusBanner } from "../components/SitesStatusBanner";
@@ -22,6 +30,7 @@ import { humanizeError, parsePortBusy } from "../portBusy";
 import { formatSiteUrl } from "../siteUrl";
 import { useAppData } from "../store/AppData";
 import type {
+  CreateFromTemplateResult,
   CreateWordPressResult,
   InstalledPackage,
   JobProgress,
@@ -41,6 +50,7 @@ export function SitesPage({
   const {
     sites: sitesCache,
     loadSites,
+    ensureSites,
     setSitesDetails,
     setStack,
     patchSitesCache,
@@ -64,6 +74,12 @@ export function SitesPage({
   const [showNewWp, setShowNewWp] = useState(false);
   const [showAddSite, setShowAddSite] = useState(false);
   const [showDuplicate, setShowDuplicate] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [templateResult, setTemplateResult] =
+    useState<CreateFromTemplateResult | null>(null);
+  const [mobileSite, setMobileSite] = useState<{ id: string; name: string } | null>(
+    null,
+  );
   const [portConflict, setPortConflict] = useState<PortCheckResult | null>(
     null,
   );
@@ -116,7 +132,8 @@ export function SitesPage({
   };
 
   useEffect(() => {
-    void loadSites({ probe: true }).catch((e) =>
+    // AppData already boots the cache; only (re)load here when nothing real is cached.
+    void ensureSites().catch((e) =>
       setError(e instanceof Error ? e.message : String(e)),
     );
     let unlisten: (() => void) | undefined;
@@ -139,7 +156,7 @@ export function SitesPage({
     return () => {
       unlisten?.();
     };
-  }, [loadSites]);
+  }, [ensureSites]);
 
   // Soft background refresh when returning to Sites — cached tiles stay visible.
   useEffect(() => {
@@ -368,7 +385,18 @@ export function SitesPage({
           onTerminal={() =>
             void tileTerminal(selected.site.id, selected.absolutePath)
           }
+          onRefresh={() => void refresh()}
+          onMobilePreview={() =>
+            setMobileSite({ id: selected.site.id, name: selected.site.name })
+          }
         />
+        {mobileSite ? (
+          <MobilePreviewModal
+            siteId={mobileSite.id}
+            siteName={mobileSite.name}
+            onClose={() => setMobileSite(null)}
+          />
+        ) : null}
         {showDuplicate ? (
           <DuplicateModal
             sources={[
@@ -473,6 +501,16 @@ export function SitesPage({
           </button>
           <button
             type="button"
+            className="btn btn-install"
+            disabled={busy}
+            title="Laravel, Symfony, Statamic, Drupal, Joomla, WooCommerce"
+            data-testid="new-from-template"
+            onClick={() => setShowTemplates(true)}
+          >
+            From template
+          </button>
+          <button
+            type="button"
             className="btn btn-primary"
             disabled={busy}
             onClick={() => setShowNewWp(true)}
@@ -518,6 +556,7 @@ export function SitesPage({
           busy={busy}
           onAddFolder={() => setShowAddSite(true)}
           onCreateWordPress={() => setShowNewWp(true)}
+          onTemplates={() => setShowTemplates(true)}
           onImport={() => {
             if (templates.length > 0) setShowDuplicate(true);
             else window.location.hash = "#/backups";
@@ -544,6 +583,9 @@ export function SitesPage({
               onHttps={(https) => void patch(d.site.id, { https })}
               onPhp={(phpVersion) => void patch(d.site.id, { phpVersion })}
               onXdebug={(on) => void toggleXdebug(d.site.id, on)}
+              onMobilePreview={() =>
+                setMobileSite({ id: d.site.id, name: d.site.name })
+              }
             />
           ))}
         </div>
@@ -619,6 +661,37 @@ export function SitesPage({
             await refresh();
             openSite(r.site.id);
           }}
+        />
+      ) : null}
+
+      {showTemplates ? (
+        <TemplatePickerModal
+          phpOptions={phpInstalled.map((p) => runtimeValue(p))}
+          onClose={() => setShowTemplates(false)}
+          onCreated={async (result) => {
+            setShowTemplates(false);
+            await refresh();
+            setTemplateResult(result);
+          }}
+        />
+      ) : null}
+
+      {templateResult ? (
+        <TemplateResultModal
+          result={templateResult}
+          onClose={() => {
+            const id = templateResult.site.id;
+            setTemplateResult(null);
+            openSite(id);
+          }}
+        />
+      ) : null}
+
+      {mobileSite ? (
+        <MobilePreviewModal
+          siteId={mobileSite.id}
+          siteName={mobileSite.name}
+          onClose={() => setMobileSite(null)}
         />
       ) : null}
 
@@ -1235,6 +1308,8 @@ function SiteDetail({
   onToast,
   onXdebug,
   onTerminal,
+  onRefresh,
+  onMobilePreview,
 }: {
   details: SiteDetails;
   stack: StackStatus | null;
@@ -1260,6 +1335,8 @@ function SiteDetail({
   onToast: (message: string | null) => void;
   onXdebug: (enabled: boolean) => void;
   onTerminal: () => void;
+  onRefresh: () => void;
+  onMobilePreview: () => void;
 }) {
   const site = details.site;
   const siteUrl = formatSiteUrl(site, stack);
@@ -1774,6 +1851,26 @@ function SiteDetail({
         </div>
       </div>
 
+      <div className="panel-card settings-list" style={{ marginTop: 16 }}>
+        <div className="settings-row">
+          <label>
+            Mobile preview
+            <span className="hint">Open this site on a phone over Wi-Fi (QR code)</span>
+          </label>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={busy}
+            onClick={onMobilePreview}
+          >
+            Preview on phone
+          </button>
+        </div>
+      </div>
+
+      <SiteDomainPanel site={site} onChanged={onRefresh} />
+      <SitePhpIniPanel siteId={site.id} />
+      <SiteLogsPanel siteId={site.id} />
       <SiteBackupsPanel siteId={site.id} />
 
       <div className="danger-zone" style={{ marginTop: 16 }}>

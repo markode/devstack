@@ -13,6 +13,7 @@ use crate::error::{DevStackError, Result};
 use crate::services::process::{
     find_bin, is_running, read_pid, spawn_logged, stop_pid, write_pid,
 };
+use crate::services::extras_v030;
 use crate::services::tls::ensure_site_cert;
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +41,11 @@ pub fn default_ports(id: &str) -> Vec<u16> {
         "mysql" => vec![d.mysql_port],
         "nginx" => vec![d.http_port, d.https_port],
         "apache" => vec![d.apache_http_port, d.apache_https_port],
+        "memcached" => vec![d.memcached_port],
+        "meilisearch" => vec![d.meilisearch_port],
+        "typesense" => vec![d.typesense_port],
+        "minio" => vec![d.minio_port, d.minio_console_port],
+        "reverb" => vec![d.reverb_port],
         _ => vec![],
     }
 }
@@ -48,7 +54,7 @@ fn install_root(state: &AppState, id: &str) -> Option<PathBuf> {
     latest_installed(state, id).map(|r| r.path.clone())
 }
 
-fn port_open(port: u16) -> bool {
+pub(crate) fn port_open(port: u16) -> bool {
     TcpStream::connect(("127.0.0.1", port)).is_ok()
 }
 
@@ -114,13 +120,20 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
             ],
             None,
         ),
+        other if extras_v030::is_new_service(other) => (
+            extras_v030::display_name(other),
+            extras_v030::pid_of(state, other),
+            extras_v030::ports_of(state, other),
+            extras_v030::ui_url(state, other),
+        ),
         other => (other, None, default_ports(other), None),
     };
 
     let running = pid.map(is_running).unwrap_or(false)
         || ports.iter().any(|p| port_open(*p));
     let installed = state.installed.contains_key(id)
-        || matches!(id, "nginx" | "apache" | "mariadb" | "mysql");
+        || matches!(id, "nginx" | "apache" | "mariadb" | "mysql")
+        || (extras_v030::is_new_service(id) && extras_v030::is_installed(state, id));
     let version = latest_installed(state, id).map(|r| r.version.clone());
     let log_path = Some(paths.logs.join(format!("{id}.err")).display().to_string());
 
@@ -142,6 +155,7 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
                 "TCP :{} — PHP session / cache backend",
                 state.stack.redis_port
             )),
+            other if extras_v030::is_new_service(other) => extras_v030::notes(state, other),
             "apache" => Some(format!(
                 "HTTP :{} · HTTPS :{} (alongside Nginx :{}/:{})",
                 state.stack.apache_http_port,
@@ -164,6 +178,11 @@ pub fn list_managed_services(paths: &Paths, state: &AppState) -> Vec<ManagedServ
         "postgresql",
         "redis",
         "mailpit",
+        "memcached",
+        "meilisearch",
+        "typesense",
+        "minio",
+        "reverb",
         "phpmyadmin",
     ]
     .into_iter()
@@ -206,6 +225,9 @@ pub fn start_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Ma
         "postgresql" => state.runtime.postgresql_pid.map(is_running).unwrap_or(false),
         "redis" => state.runtime.redis_pid.map(is_running).unwrap_or(false),
         "mailpit" => state.runtime.mailpit_pid.map(is_running).unwrap_or(false),
+        other if extras_v030::is_new_service(other) => extras_v030::pid_of(state, other)
+            .map(is_running)
+            .unwrap_or(false),
         "mysql" => {
             state.runtime.database_engine.as_deref() == Some("mysql")
                 && state.runtime.database_pid.map(is_running).unwrap_or(false)
@@ -217,6 +239,9 @@ pub fn start_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Ma
         _ => false,
     };
     if !our_pid_alive {
+        if extras_v030::is_new_service(id) {
+            extras_v030::auto_remap_if_busy(state, id);
+        }
         crate::services::ports::ensure_ports_free(&state.stack, id)?;
     }
     match id {
@@ -224,6 +249,7 @@ pub fn start_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Ma
         "postgresql" => start_postgresql(paths, state)?,
         "redis" => start_redis(paths, state)?,
         "mailpit" => start_mailpit(paths, state)?,
+        other if extras_v030::is_new_service(other) => extras_v030::start(paths, state, other)?,
         "mariadb" => crate::services::database::start_database(paths, state, "mariadb")?,
         "mysql" => crate::services::database::start_database(paths, state, "mysql")?,
         "nginx" => {
@@ -296,6 +322,7 @@ pub fn stop_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Man
                 let _ = stop_pid(pid);
             }
         }
+        other if extras_v030::is_new_service(other) => extras_v030::stop(paths, state, other)?,
         "mariadb" | "mysql" => crate::services::database::stop_database(paths, state)?,
         "nginx" => crate::services::nginx::stop_nginx(paths, state)?,
         "apache" => crate::services::httpd::stop_apache(paths, state)?,

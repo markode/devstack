@@ -35,6 +35,32 @@ import type {
   VersionListResponse,
   VersionsUpdatedEvent,
 } from "./types";
+import type {
+  ConfigArchiveMeta,
+  ConfigExportSummary,
+  ConfigImportOptions,
+  ConfigImportReport,
+  CreateFromTemplateRequest,
+  CreateFromTemplateResult,
+  HostingProfile,
+  HostingTools,
+  LogSourceInfo,
+  MetricsSnapshot,
+  MobilePreviewInfo,
+  PhpIniSliders,
+  QueueStatus,
+  SiteDomainUpdate,
+  SiteLogPage,
+  SiteLogQuery,
+  SitePhpIniView,
+  SiteTemplateInfo,
+  SlowQueryInfo,
+  SpxStatus,
+  SyncDirection,
+  SyncPlan,
+  SyncResult,
+  TldSettings,
+} from "./types";
 
 export const isTauri = (): boolean =>
   typeof window !== "undefined" &&
@@ -613,4 +639,178 @@ export async function cloneSite(
     if (isMissingCommand(e)) return duplicateSite(request);
     throw e;
   }
+}
+
+// --- v0.3.0 ---------------------------------------------------------------------
+
+export async function setReverbSite(siteId: string | null): Promise<ManagedServiceStatus> {
+  return invoke<ManagedServiceStatus>("set_reverb_site", { siteId });
+}
+
+export async function getSitePhpIni(siteId: string): Promise<SitePhpIniView> {
+  return invoke<SitePhpIniView>("get_site_php_ini", { siteId });
+}
+
+export async function setSitePhpIni(
+  siteId: string,
+  overrides: Record<string, string>,
+): Promise<SitePhpIniView> {
+  return invoke<SitePhpIniView>("set_site_php_ini", { siteId, overrides });
+}
+
+export async function setSitePhpIniSliders(
+  siteId: string,
+  sliders: PhpIniSliders,
+): Promise<SitePhpIniView> {
+  return invoke<SitePhpIniView>("set_site_php_ini_sliders", { siteId, sliders });
+}
+
+export async function listSiteTemplateKinds(): Promise<SiteTemplateInfo[]> {
+  return invoke<SiteTemplateInfo[]>("list_site_template_kinds");
+}
+
+export async function createSiteFromTemplate(
+  request: CreateFromTemplateRequest,
+): Promise<CreateFromTemplateResult> {
+  return invoke<CreateFromTemplateResult>("create_site_from_template", { request });
+}
+
+export async function hostingToolsStatus(): Promise<HostingTools> {
+  return invoke<HostingTools>("hosting_tools_status");
+}
+
+export async function hostingListProfiles(): Promise<HostingProfile[]> {
+  return invoke<HostingProfile[]>("hosting_list_profiles");
+}
+
+export async function hostingSaveProfile(
+  profile: HostingProfile,
+  password?: string | null,
+  dbPassword?: string | null,
+): Promise<HostingProfile> {
+  return invoke<HostingProfile>("hosting_save_profile", {
+    profile,
+    password: password ?? null,
+    dbPassword: dbPassword ?? null,
+  });
+}
+
+export async function hostingDeleteProfile(profileId: string): Promise<void> {
+  return invoke("hosting_delete_profile", { profileId });
+}
+
+export async function hostingTestConnection(profileId: string): Promise<string> {
+  return invoke<string>("hosting_test_connection", { profileId });
+}
+
+export async function hostingPreview(
+  profileId: string,
+  direction: SyncDirection,
+  del = false,
+): Promise<SyncPlan> {
+  return invoke<SyncPlan>("hosting_preview", { profileId, direction, delete: del });
+}
+
+export async function hostingRunSync(
+  profileId: string,
+  direction: SyncDirection,
+  opts: { delete?: boolean; includeDatabase?: boolean } = {},
+): Promise<SyncResult> {
+  return invoke<SyncResult>("hosting_run_sync", {
+    profileId,
+    direction,
+    delete: opts.delete ?? false,
+    includeDatabase: opts.includeDatabase ?? false,
+  });
+}
+
+export async function getTldSettings(): Promise<TldSettings> {
+  return invoke<TldSettings>("get_tld_settings");
+}
+
+export async function setDefaultTld(tld: string): Promise<TldSettings> {
+  return invoke<TldSettings>("set_default_tld", { tld });
+}
+
+export async function updateSiteDomain(
+  siteId: string,
+  patch: { tld?: string; aliases?: string[]; wildcard?: boolean },
+): Promise<SiteDomainUpdate> {
+  return invoke<SiteDomainUpdate>("update_site_domain", {
+    siteId,
+    tld: patch.tld ?? null,
+    aliases: patch.aliases ?? null,
+    wildcard: patch.wildcard ?? null,
+  });
+}
+
+export async function listSiteLogSources(siteId: string): Promise<LogSourceInfo[]> {
+  return invoke<LogSourceInfo[]>("list_site_log_sources", { siteId });
+}
+
+export async function readSiteLogs(
+  siteId: string,
+  query: SiteLogQuery,
+): Promise<SiteLogPage> {
+  return invoke<SiteLogPage>("read_site_logs", { siteId, query });
+}
+
+export async function getSiteQueueStatus(siteId: string): Promise<QueueStatus> {
+  return invoke<QueueStatus>("get_site_queue_status", { siteId });
+}
+
+export async function getMobilePreviewStatus(): Promise<MobilePreviewInfo> {
+  return invoke<MobilePreviewInfo>("get_mobile_preview_status");
+}
+
+export async function startMobilePreview(siteId: string): Promise<MobilePreviewInfo> {
+  return invoke<MobilePreviewInfo>("start_mobile_preview", { siteId });
+}
+
+export async function stopMobilePreview(): Promise<MobilePreviewInfo> {
+  return invoke<MobilePreviewInfo>("stop_mobile_preview");
+}
+
+export async function getMetricsSnapshot(): Promise<MetricsSnapshot> {
+  return invoke<MetricsSnapshot>("get_metrics_snapshot");
+}
+
+export async function getSlowQueryInfo(limit = 50): Promise<SlowQueryInfo> {
+  return invoke<SlowQueryInfo>("get_slow_query_info", { limit });
+}
+
+export async function setSlowQueryLog(
+  enabled: boolean,
+  thresholdSecs = 1,
+): Promise<SlowQueryInfo> {
+  return invoke<SlowQueryInfo>("set_slow_query_log", { enabled, thresholdSecs });
+}
+
+export async function getSpxStatus(phpVersion?: string | null): Promise<SpxStatus> {
+  return invoke<SpxStatus>("get_spx_status", { phpVersion: phpVersion ?? null });
+}
+
+export async function setSpxEnabled(
+  enabled: boolean,
+  phpVersion?: string | null,
+): Promise<SpxStatus> {
+  return invoke<SpxStatus>("set_spx_enabled", { enabled, phpVersion: phpVersion ?? null });
+}
+
+export async function exportConfig(
+  destPath: string,
+  includeDatabases = false,
+): Promise<ConfigExportSummary> {
+  return invoke<ConfigExportSummary>("export_config", { destPath, includeDatabases });
+}
+
+export async function inspectConfigArchive(path: string): Promise<ConfigArchiveMeta> {
+  return invoke<ConfigArchiveMeta>("inspect_config_archive", { path });
+}
+
+export async function importConfig(
+  path: string,
+  options?: ConfigImportOptions,
+): Promise<ConfigImportReport> {
+  return invoke<ConfigImportReport>("import_config", { path, options: options ?? null });
 }

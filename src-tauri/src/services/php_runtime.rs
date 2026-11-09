@@ -137,8 +137,19 @@ fn resolve_system_php(paths: &Paths, state: &AppState, version: &str) -> Result<
 }
 
 fn detect_php_version(php: &Path) -> Option<String> {
+    // Spawning `php -r` costs 20-80ms; the binary's version never changes within a
+    // process lifetime, so memoise per path (hit on every resolve_php fallback).
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some(v) = cache.lock().ok().and_then(|g| g.get(php).cloned()) {
+        return Some(v);
+    }
     let out = run_capture(php, &["-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION.'.'.PHP_RELEASE_VERSION;"], None).ok()?;
-    Some(out.trim().to_string())
+    let ver = out.trim().to_string();
+    if let Ok(mut g) = cache.lock() {
+        g.insert(php.to_path_buf(), ver.clone());
+    }
+    Some(ver)
 }
 
 pub fn fpm_listen_addr(paths: &Paths, version: &str) -> String {
@@ -200,10 +211,10 @@ pm.min_spare_servers = 1
 pm.max_spare_servers = 5
 clear_env = no
 catch_workers_output = yes
-php_admin_value[memory_limit] = -1
-php_admin_value[upload_max_filesize] = 0
-php_admin_value[post_max_size] = 0
-php_admin_value[max_execution_time] = 0
+php_value[memory_limit] = -1
+php_value[upload_max_filesize] = 0
+php_value[post_max_size] = 0
+php_value[max_execution_time] = 0
 php_admin_value[max_input_time] = -1
 "#,
         user = current_user(),
@@ -242,20 +253,125 @@ fn command_id_gn() -> Result<String> {
 
 pub fn start_php(paths: &Paths, state: &mut AppState, version: &str) -> Result<PhpRuntime> {
     let runtime = resolve_php(paths, state, version)?;
-    if let Some(pid) = state.runtime.php_pids.get(&runtime.version).copied() {
-        if is_running(pid) && php_listen_ready(&runtime) {
-            return Ok(runtime);
+    let existing = state.runtime.php_pids.get(&runtime.version).copied();
+    match ensure_php_running(paths, state, &runtime, existing) {
+        Ok(Some(pid)) => {
+            state.runtime.php_pids.insert(runtime.version.clone(), pid);
         }
-        // Stale pid or dead listener — restart.
-        let _ = stop_php(paths, state, &runtime.version);
-    }
-
-    if cfg!(windows) {
-        start_php_cgi_workers(paths, state, &runtime)?;
-    } else {
-        start_php_fpm(paths, state, &runtime)?;
+        Ok(None) => {}
+        Err(e) => {
+            if existing.is_some() {
+                state.runtime.php_pids.remove(&runtime.version);
+            }
+            return Err(e);
+        }
     }
     Ok(runtime)
+}
+
+/// Start several PHP versions concurrently (each spawn + listen wait is ~100ms+).
+/// Results keep the order of `versions`; duplicates resolving to the same runtime
+/// are started once. Safe to call when everything is already running (no-op fast).
+pub fn start_php_many(
+    paths: &Paths,
+    state: &mut AppState,
+    versions: &[String],
+) -> Vec<(String, Result<PhpRuntime>)> {
+    let mut out: Vec<(String, Result<PhpRuntime>)> = Vec::with_capacity(versions.len());
+    let mut jobs: Vec<(usize, PhpRuntime, Option<u32>)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (i, v) in versions.iter().enumerate() {
+        match resolve_php(paths, state, v) {
+            Ok(rt) => {
+                if seen.insert(rt.version.clone()) {
+                    let existing = state.runtime.php_pids.get(&rt.version).copied();
+                    jobs.push((i, rt.clone(), existing));
+                }
+                out.push((v.clone(), Ok(rt)));
+            }
+            Err(e) => out.push((v.clone(), Err(e))),
+        }
+    }
+
+    let state_ro: &AppState = state;
+    let results: Vec<(usize, Result<Option<u32>>)> = if jobs.len() <= 1 {
+        jobs.iter()
+            .map(|(i, rt, existing)| (*i, ensure_php_running(paths, state_ro, rt, *existing)))
+            .collect()
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = jobs
+                .iter()
+                .map(|(i, rt, existing)| {
+                    let (i, existing) = (*i, *existing);
+                    scope.spawn(move || (i, ensure_php_running(paths, state_ro, rt, existing)))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .zip(jobs.iter())
+                .map(|(h, (i, _, _))| {
+                    h.join().unwrap_or_else(|_| {
+                        (*i, Err(DevStackError::Message("php start thread panicked".into())))
+                    })
+                })
+                .collect()
+        })
+    };
+
+    for (i, res) in results {
+        let rt_version = jobs
+            .iter()
+            .find(|(j, _, _)| *j == i)
+            .map(|(_, rt, _)| rt.version.clone())
+            .unwrap_or_default();
+        match res {
+            Ok(Some(pid)) => {
+                state.runtime.php_pids.insert(rt_version, pid);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                state.runtime.php_pids.remove(&rt_version);
+                let msg = e.to_string();
+                for (_, r) in out.iter_mut() {
+                    if matches!(r, Ok(rt) if rt.version == rt_version) {
+                        *r = Err(DevStackError::Message(msg.clone()));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Fast path: already running + listening → `Ok(None)`. Otherwise (re)spawn and
+/// return the new pid. Does not touch `state.runtime` so callers can run it from
+/// several threads and merge pids afterwards.
+fn ensure_php_running(
+    paths: &Paths,
+    state: &AppState,
+    runtime: &PhpRuntime,
+    existing_pid: Option<u32>,
+) -> Result<Option<u32>> {
+    if let Some(pid) = existing_pid {
+        if is_running(pid) && php_listen_ready(runtime) {
+            return Ok(None);
+        }
+        // Stale pid or dead listener — restart.
+        mark_supervisor_stop(&runtime.version);
+        let _ = stop_pid(pid);
+        for kind in ["php-fpm", "php-cgi"] {
+            if let Some(p) = read_pid(&paths.pid_file(&format!("{kind}-{}", runtime.version))) {
+                let _ = stop_pid(p);
+            }
+        }
+    }
+    let pid = if cfg!(windows) {
+        start_php_cgi_workers(paths, state, runtime)?
+    } else {
+        start_php_fpm(paths, runtime)?
+    };
+    Ok(Some(pid))
 }
 
 fn php_listen_ready(runtime: &PhpRuntime) -> bool {
@@ -270,7 +386,7 @@ fn php_listen_ready(runtime: &PhpRuntime) -> bool {
         .unwrap_or(false)
 }
 
-fn start_php_fpm(paths: &Paths, state: &mut AppState, runtime: &PhpRuntime) -> Result<()> {
+fn start_php_fpm(paths: &Paths, runtime: &PhpRuntime) -> Result<u32> {
     let fpm = runtime
         .fpm_bin
         .as_ref()
@@ -284,6 +400,10 @@ fn start_php_fpm(paths: &Paths, state: &mut AppState, runtime: &PhpRuntime) -> R
     if let Some(pid) = read_pid(&pid_file) {
         let _ = stop_pid(pid);
     }
+    // A leftover socket from a killed master makes "socket exists" a false ready.
+    if let Some(sock) = runtime.listen.strip_prefix("unix:") {
+        let _ = fs::remove_file(sock);
+    }
 
     let args = ["-y", &conf.to_string_lossy(), "--nodaemonize"];
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
@@ -291,21 +411,14 @@ fn start_php_fpm(paths: &Paths, state: &mut AppState, runtime: &PhpRuntime) -> R
     let pid = child.id();
     std::mem::forget(child);
     write_pid(&pid_file, pid)?;
-    state.runtime.php_pids.insert(runtime.version.clone(), pid);
-    // Wait briefly for socket
-    for _ in 0..20 {
-        if runtime.listen.starts_with("unix:") {
-            let sock = runtime.listen.trim_start_matches("unix:");
-            if Path::new(sock).exists() {
-                break;
-            }
-        } else if TcpListener::bind(runtime.listen.trim_start_matches("127.0.0.1:").parse::<std::net::SocketAddr>().ok().unwrap_or_else(|| "127.0.0.1:9".parse().unwrap())).is_err() {
-            // port in use = listening
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    Ok(())
+    // Short backoff poll (5ms → 25ms, ≤2s): sockets usually appear in <50ms.
+    let _ = crate::services::perf::poll_backoff(
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(25),
+        std::time::Duration::from_secs(2),
+        || (php_listen_ready(runtime) || !is_running(pid)).then_some(()),
+    );
+    Ok(pid)
 }
 
 fn parse_tcp_listen(listen: &str) -> Option<std::net::SocketAddr> {
@@ -316,38 +429,41 @@ fn parse_tcp_listen(listen: &str) -> Option<std::net::SocketAddr> {
 }
 
 /// Wait until php-cgi / FPM accepts TCP (or unix socket exists).
+/// Polls 5ms → 25ms (≈20×25ms steady state) within a 2s ceiling.
 fn wait_php_listen(runtime: &PhpRuntime, pid: u32, log_err: &Path) -> Result<()> {
-    use std::net::TcpStream;
     use std::time::Duration;
 
-    for _ in 0..40 {
-        if !is_running(pid) {
-            let err = fs::read_to_string(log_err).unwrap_or_default();
-            return Err(DevStackError::Message(format!(
-                "php-cgi {} exited before becoming ready.\n--- stderr ---\n{err}",
-                runtime.version
-            )));
-        }
-        if runtime.listen.starts_with("unix:") {
-            let sock = runtime.listen.trim_start_matches("unix:");
-            if Path::new(sock).exists() {
-                return Ok(());
+    let mut died = false;
+    let ready = crate::services::perf::poll_backoff(
+        Duration::from_millis(5),
+        Duration::from_millis(25),
+        Duration::from_secs(2),
+        || {
+            if !is_running(pid) {
+                died = true;
+                return Some(());
             }
-        } else if let Some(addr) = parse_tcp_listen(&runtime.listen) {
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
-                return Ok(());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(50));
+            php_listen_ready(runtime).then_some(())
+        },
+    )
+    .is_some();
+    if ready && !died {
+        return Ok(());
     }
     let err = fs::read_to_string(log_err).unwrap_or_default();
+    if died {
+        return Err(DevStackError::Message(format!(
+            "php-cgi {} exited before becoming ready.\n--- stderr ---\n{err}",
+            runtime.version
+        )));
+    }
     Err(DevStackError::Message(format!(
         "php-cgi {} started (pid {pid}) but {} never accepted connections.\n--- stderr ---\n{err}",
         runtime.version, runtime.listen
     )))
 }
 
-fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRuntime) -> Result<()> {
+fn start_php_cgi_workers(paths: &Paths, state: &AppState, runtime: &PhpRuntime) -> Result<u32> {
     let cgi = runtime
         .cgi_bin
         .as_ref()
@@ -369,12 +485,12 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
     }
     // Free the listen port if a zombie worker still holds it.
     if let Some(addr) = parse_tcp_listen(&listen) {
-        for _ in 0..20 {
-            if TcpListener::bind(addr).is_ok() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        let _ = crate::services::perf::poll_backoff(
+            std::time::Duration::from_millis(2),
+            std::time::Duration::from_millis(25),
+            std::time::Duration::from_secs(1),
+            || TcpListener::bind(addr).is_ok().then_some(()),
+        );
     }
     let ini_s = ini.to_string_lossy().to_string();
     let args: Vec<&str> = if ini.exists() {
@@ -407,7 +523,6 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
     std::mem::forget(child);
     write_pid(&pid_file, pid)?;
     wait_php_listen(runtime, pid, &log_err)?;
-    state.runtime.php_pids.insert(runtime.version.clone(), pid);
 
     // Lightweight supervisor: if the worker dies, respawn once the port frees.
     clear_supervisor_stop(&runtime.version);
@@ -420,7 +535,7 @@ fn start_php_cgi_workers(paths: &Paths, state: &mut AppState, runtime: &PhpRunti
         log_err,
         pid_file,
     );
-    Ok(())
+    Ok(pid)
 }
 
 /// Background respawn for Windows php-cgi (single listener per version).
@@ -545,4 +660,18 @@ pub fn register_system_php(state: &mut AppState, paths: &Paths) -> Result<PhpRun
     )?;
     save_state(&paths.state_file, state)?;
     Ok(runtime)
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+
+    #[test]
+    fn start_php_many_with_no_versions_is_a_noop() {
+        let dir = std::env::temp_dir().join(format!("devstack-php-many-{}", std::process::id()));
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        let mut state = AppState::default();
+        assert!(start_php_many(&paths, &mut state, &[]).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

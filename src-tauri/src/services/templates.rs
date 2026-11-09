@@ -194,13 +194,13 @@ pub async fn duplicate_from_source(
         .domain
         .filter(|d| !d.trim().is_empty())
         .map(|d| {
-            if d.ends_with(".test") {
+            if d.contains('.') {
                 d
             } else {
-                format!("{d}.test")
+                format!("{d}.{}", state.developer.default_tld)
             }
         })
-        .unwrap_or_else(|| format!("{id}.test"));
+        .unwrap_or_else(|| format!("{id}.{}", state.developer.default_tld));
 
     let dest = expand_home(&PathBuf::from(&req.path));
     fs::create_dir_all(&dest)?;
@@ -375,6 +375,9 @@ pub async fn duplicate_from_source(
         is_template: false,
         parked: false,
         xdebug: false,
+        tld: crate::config::default_tld(),
+        aliases: Vec::new(),
+        wildcard: false,
     };
     let details = detect_site(&site);
     site.framework = Some(details.framework);

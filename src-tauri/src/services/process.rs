@@ -64,7 +64,29 @@ pub fn read_pid(path: &Path) -> Option<u32> {
 pub fn is_running(pid: u32) -> bool {
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
-    sys.process(Pid::from_u32(pid)).is_some()
+    // Children we `mem::forget` are never reaped, so an exited server lingers as a
+    // zombie. Treat zombies as stopped so stop/readiness paths don't wait on them.
+    sys.process(Pid::from_u32(pid))
+        .map(|p| {
+            !matches!(p.status(), sysinfo::ProcessStatus::Zombie) || zombie_leader_has_threads(pid)
+        })
+        .unwrap_or(false)
+}
+
+/// Linux keeps the thread-group leader as a zombie while sibling threads still run
+/// (e.g. a server whose main thread called pthread_exit) — that process is alive.
+fn zombie_leader_has_threads(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_dir(format!("/proc/{pid}/task"))
+            .map(|rd| rd.count() > 1)
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 pub fn stop_pid(pid: u32) -> Result<()> {
@@ -76,8 +98,15 @@ pub fn stop_pid(pid: u32) -> Result<()> {
         let _ = command("kill")
             .args(["-TERM", &pid.to_string()])
             .status();
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        if is_running(pid) {
+        // Poll instead of a fixed 400ms sleep — well-behaved servers exit in <50ms.
+        let exited = crate::services::perf::poll_backoff(
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(40),
+            std::time::Duration::from_millis(400),
+            || (!is_running(pid)).then_some(()),
+        )
+        .is_some();
+        if !exited {
             let _ = command("kill")
                 .args(["-KILL", &pid.to_string()])
                 .status();
@@ -208,5 +237,36 @@ mod tests {
         let cmd = command("echo");
         // Just ensure construction does not panic on any platform.
         let _ = format!("{cmd:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_unreaped_child_is_not_running_and_stop_is_fast() {
+        let child = command("true").spawn().expect("spawn true");
+        let pid = child.id();
+        std::mem::forget(child);
+        let sw = crate::services::perf::Stopwatch::start();
+        let _ = crate::services::perf::poll_backoff(
+            std::time::Duration::from_millis(2),
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_secs(2),
+            || (!is_running(pid)).then_some(()),
+        );
+        assert!(!is_running(pid), "zombie must count as stopped");
+        let _ = stop_pid(pid);
+        assert!(sw.elapsed_ms() < 1500);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_pid_returns_quickly_for_sigterm_friendly_process() {
+        let child = command("sleep").arg("30").spawn().expect("spawn sleep");
+        let pid = child.id();
+        std::mem::forget(child);
+        assert!(is_running(pid));
+        let sw = crate::services::perf::Stopwatch::start();
+        stop_pid(pid).unwrap();
+        assert!(!is_running(pid));
+        assert!(sw.elapsed_ms() < 350, "stop took {}ms", sw.elapsed_ms());
     }
 }

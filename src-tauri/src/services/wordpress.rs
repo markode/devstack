@@ -190,7 +190,7 @@ async fn fetch_wp_version(client: &reqwest::Client) -> Option<String> {
     })
 }
 
-fn random_password(len: usize) -> String {
+pub fn random_password(len: usize) -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(len)
@@ -198,7 +198,7 @@ fn random_password(len: usize) -> String {
         .collect()
 }
 
-fn safe_db_ident(input: &str) -> String {
+pub fn safe_db_ident(input: &str) -> String {
     let mut s: String = input
         .chars()
         .map(|c| {
@@ -266,11 +266,11 @@ pub async fn create_wordpress_site(
     let domain = req
         .domain
         .filter(|d| !d.trim().is_empty())
-        .unwrap_or_else(|| format!("{id}.test"));
-    let domain = if domain.ends_with(".test") {
+        .unwrap_or_else(|| format!("{id}.{}", state.developer.default_tld));
+    let domain = if domain.contains('.') {
         domain
     } else {
-        format!("{domain}.test")
+        format!("{domain}.{}", state.developer.default_tld)
     };
 
     let site_path = req
@@ -339,6 +339,9 @@ pub async fn create_wordpress_site(
         is_template: false,
         parked: false,
         xdebug: false,
+        tld: crate::config::default_tld(),
+        aliases: Vec::new(),
+        wildcard: false,
     };
     let public_url = crate::services::ports::canonical_site_url(&provisional, state);
     let db_host = crate::services::ports::mysql_db_host(
@@ -435,6 +438,9 @@ pub async fn create_wordpress_site(
         is_template: false,
         parked: false,
         xdebug: false,
+        tld: crate::config::default_tld(),
+        aliases: Vec::new(),
+        wildcard: false,
     };
     let details = detect_site(&site);
     site.framework = Some(details.framework);

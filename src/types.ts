@@ -11,6 +11,8 @@ export type SectionId =
   | "mail"
   | "dumps"
   | "backups"
+  | "performance"
+  | "hosting"
   | "shortcuts"
   | "about";
 
@@ -27,6 +29,8 @@ export interface LogEntry {
 export interface DeveloperSettings {
   showLogsTab: boolean;
   redactSecrets: boolean;
+  /** Default TLD for new sites (`test`). */
+  defaultTld?: string;
 }
 
 export interface PackageInfo {
@@ -134,6 +138,12 @@ export interface PortsConfig {
   mailpitUi: number;
   dns: number;
   phpmyadmin: number;
+  memcached?: number;
+  meilisearch?: number;
+  typesense?: number;
+  minioApi?: number;
+  minioConsole?: number;
+  reverb?: number;
 }
 
 export interface PortOccupant {
@@ -199,6 +209,12 @@ export interface SiteRecord {
   xdebug?: boolean;
   /** True when the site was created by a parked directory scan. */
   parked?: boolean;
+  /** Top-level domain (`test` by default). */
+  tld?: string;
+  /** Extra hostnames served by this site. */
+  aliases?: string[];
+  /** Also serve `*.{domain}`. */
+  wildcard?: boolean;
 }
 
 export interface SiteDetails {
@@ -393,4 +409,321 @@ export interface ToolsStatus {
 export interface DumpStatus {
   port?: number | null;
   helperPath: string;
+}
+
+// --- v0.3.0 ---------------------------------------------------------------------
+
+export type NewServiceId =
+  | "memcached"
+  | "meilisearch"
+  | "typesense"
+  | "minio"
+  | "reverb";
+
+export interface PhpIniKnownKey {
+  key: string;
+  kind: "size" | "int" | "bool" | "text";
+  description: string;
+}
+
+export interface PhpIniSliders {
+  /** `null` = unlimited (-1). */
+  memoryLimitMb: number | null;
+  /** `0` = unlimited. */
+  maxExecutionTime: number;
+  uploadMaxMb: number;
+  postMaxMb: number;
+}
+
+export interface SitePhpIniView {
+  siteId: string;
+  phpVersion?: string | null;
+  iniPath: string;
+  mergedIniPath: string;
+  overrides: Record<string, string>;
+  global: Record<string, string>;
+  merged: Record<string, string>;
+  sliders: PhpIniSliders;
+  knownKeys: PhpIniKnownKey[];
+  reloaded: boolean;
+  notes: string[];
+}
+
+export type SiteTemplateKind =
+  | "laravel"
+  | "symfony"
+  | "statamic"
+  | "drupal"
+  | "joomla"
+  | "woocommerce";
+
+export interface SiteTemplateInfo {
+  kind: SiteTemplateKind;
+  label: string;
+  docroot: string;
+  commands: string[];
+}
+
+export interface CreateFromTemplateRequest {
+  kind: SiteTemplateKind;
+  name: string;
+  path?: string | null;
+  phpVersion?: string | null;
+  databaseEngine?: string | null;
+  webServer?: string | null;
+}
+
+export interface TemplateStepResult {
+  name: string;
+  ok: boolean;
+  skipped: boolean;
+  message: string;
+}
+
+export interface CreateFromTemplateResult {
+  site: SiteRecord;
+  kind: string;
+  projectPath: string;
+  docroot: string;
+  url: string;
+  database?: {
+    engine: string;
+    name: string;
+    user: string;
+    password: string;
+    host: string;
+    port: number;
+  } | null;
+  steps: TemplateStepResult[];
+  softFailed: boolean;
+  notes: string[];
+}
+
+export interface HostingRemoteDb {
+  host: string;
+  name: string;
+  user: string;
+}
+
+export interface HostingProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  auth: "key" | "password";
+  keyPath?: string | null;
+  remotePath: string;
+  remoteUrl?: string | null;
+  siteId?: string | null;
+  excludes: string[];
+  remoteDb?: HostingRemoteDb | null;
+  hasPassword?: boolean;
+  hasDbPassword?: boolean;
+}
+
+export interface HostingTools {
+  ssh: boolean;
+  sftp: boolean;
+  scp: boolean;
+  rsync: boolean;
+  keychain: boolean;
+  notes: string[];
+}
+
+export type SyncDirection = "pull" | "push";
+
+export interface SyncPlanEntry {
+  path: string;
+  action: "add" | "update" | "delete";
+  size: number;
+  isDir: boolean;
+}
+
+export interface SyncPlan {
+  profileId: string;
+  direction: SyncDirection;
+  dryRun: boolean;
+  entries: SyncPlanEntry[];
+  add: number;
+  update: number;
+  delete: number;
+  bytes: number;
+  excludes: string[];
+  tool: string;
+  notes: string[];
+}
+
+export interface SyncResult {
+  profileId: string;
+  direction: SyncDirection;
+  filesTransferred: number;
+  deleted: number;
+  bytes: number;
+  databaseSynced: boolean;
+  urlRewritten?: string | null;
+  notes: string[];
+}
+
+export interface TldSettings {
+  defaultTld: string;
+  warnings: string[];
+  httpsRequired: boolean;
+}
+
+export interface SiteDomainUpdate {
+  site: SiteRecord;
+  warnings: string[];
+  hostsOk: boolean;
+  hostsMessage?: string | null;
+}
+
+export type SiteLogSource = "php" | "web-error" | "web-access" | "laravel";
+
+export interface LogSourceInfo {
+  id: SiteLogSource;
+  label: string;
+  path: string;
+  exists: boolean;
+  size: number;
+}
+
+export interface SiteLogQuery {
+  source: SiteLogSource;
+  lines?: number;
+  level?: string;
+  text?: string;
+  /** Absolute timestamp or relative like `15m`, `2h`. */
+  since?: string;
+  cursor?: number | null;
+}
+
+export interface SiteLogEntry {
+  ts?: string | null;
+  level: string;
+  message: string;
+}
+
+export interface SiteLogPage {
+  source: string;
+  path: string;
+  entries: SiteLogEntry[];
+  cursor: number;
+  size: number;
+  reset: boolean;
+}
+
+export interface QueueStatus {
+  isLaravel: boolean;
+  driver?: string | null;
+  pending?: number | null;
+  failed?: number | null;
+  failedJobs: { id: string; queue: string; failedAt: string; exception: string }[];
+  horizon: { installed: boolean; url?: string | null };
+  notes: string[];
+}
+
+export interface MobilePreviewInfo {
+  active: boolean;
+  siteId?: string | null;
+  lanIp?: string | null;
+  port?: number | null;
+  url?: string | null;
+  qrDataUrl?: string | null;
+  hostHeader?: string | null;
+  wpRewritten: boolean;
+  firewallNotice?: string | null;
+  notes: string[];
+}
+
+export interface ProcessMetric {
+  id: string;
+  label: string;
+  pid: number;
+  running: boolean;
+  cpuPercent: number;
+  memoryBytes: number;
+  processes: number;
+}
+
+export interface MetricsSnapshot {
+  timestampMs: number;
+  system: {
+    cpuPercent: number;
+    cpuCount: number;
+    totalMemoryBytes: number;
+    usedMemoryBytes: number;
+  };
+  processes: ProcessMetric[];
+  totalCpuPercent: number;
+  totalMemoryBytes: number;
+}
+
+export interface SlowQuery {
+  time?: string | null;
+  userHost?: string | null;
+  queryTime: number;
+  lockTime: number;
+  rowsSent: number;
+  rowsExamined: number;
+  sql: string;
+}
+
+export interface SlowQueryInfo {
+  engine?: string | null;
+  running: boolean;
+  enabled: boolean;
+  thresholdSecs: number;
+  path: string;
+  exists: boolean;
+  entries: SlowQuery[];
+  notes: string[];
+}
+
+export interface SpxStatus {
+  phpVersion?: string | null;
+  available: boolean;
+  enabled: boolean;
+  reportDir: string;
+  uiQuery: string;
+  notes: string[];
+}
+
+export interface ConfigArchiveMeta {
+  format: string;
+  formatVersion: number;
+  appVersion: string;
+  createdAt: string;
+  os: string;
+  siteCount: number;
+  siteIds: string[];
+  includesDatabases: boolean;
+  databases: string[];
+  siteMetaFiles: number;
+  hasHostingProfiles: boolean;
+}
+
+export interface ConfigExportSummary {
+  path: string;
+  bytes: number;
+  meta: ConfigArchiveMeta;
+  warnings: string[];
+}
+
+export interface ConfigImportOptions {
+  replaceSites?: boolean;
+  restoreSettings?: boolean;
+  restoreDatabases?: boolean;
+}
+
+export interface ConfigImportReport {
+  sitesAdded: number;
+  sitesUpdated: number;
+  settingsApplied: boolean;
+  siteMetaFiles: number;
+  databasesRestored: string[];
+  databasesSkipped: string[];
+  missingPaths: string[];
+  installedPackages: Record<string, string[]>;
+  notes: string[];
 }

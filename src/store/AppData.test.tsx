@@ -119,8 +119,18 @@ vi.mock("../client", () => ({
   duplicateSite: vi.fn(),
 }));
 
-import { AppDataProvider, useAppData } from "./AppData";
+import {
+  AppDataProvider,
+  readSitesSnapshot,
+  SITES_SNAPSHOT_KEY,
+  useAppData,
+  writeSitesSnapshot,
+} from "./AppData";
 import { SitesPage } from "../pages/SitesPage";
+
+beforeEach(() => {
+  localStorage.clear();
+});
 
 afterEach(async () => {
   // Let background probes settle before jsdom tears down (avoids setState-after-unmount).
@@ -267,5 +277,95 @@ describe("AppData loadSites", () => {
     await waitFor(() =>
       expect(screen.getByTestId("probing").textContent).toBe("false"),
     );
+  });
+});
+
+describe("AppData snapshot + boot", () => {
+  function Probe() {
+    const { sites } = useAppData();
+    return (
+      <div>
+        <div data-testid="loaded">{String(sites.loaded)}</div>
+        <div data-testid="from-snapshot">{String(sites.fromSnapshot)}</div>
+        <div data-testid="count">{sites.details.length}</div>
+        <div data-testid="http-port">{sites.stack?.httpPort ?? "none"}</div>
+      </div>
+    );
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+    listCalls = 0;
+    probeCalls = 0;
+  });
+
+  it("paints from the localStorage snapshot before the first list resolves", async () => {
+    writeSitesSnapshot([siteA, siteB], {
+      ...(await (await import("../client")).getStackStatus()),
+      httpPort: 8080,
+    });
+    listDelayMs = 120;
+    render(
+      <AppDataProvider>
+        <Probe />
+      </AppDataProvider>,
+    );
+    // Synchronous first render: snapshot is already hydrated.
+    expect(screen.getByTestId("loaded").textContent).toBe("true");
+    expect(screen.getByTestId("from-snapshot").textContent).toBe("true");
+    expect(screen.getByTestId("count").textContent).toBe("2");
+    expect(screen.getByTestId("http-port").textContent).toBe("8080");
+    await waitFor(() =>
+      expect(screen.getByTestId("from-snapshot").textContent).toBe("false"),
+    );
+    expect(screen.getByTestId("http-port").textContent).toBe("80");
+  });
+
+  it("persists a lite snapshot (no reachability payloads) after loading", async () => {
+    probeDelayMs = 10;
+    render(
+      <AppDataProvider>
+        <Probe />
+      </AppDataProvider>,
+    );
+    await waitFor(() => expect(probeCalls).toBeGreaterThan(0));
+    await waitFor(() => {
+      const snap = readSitesSnapshot();
+      expect(snap?.details.length).toBe(2);
+    });
+    const snap = readSitesSnapshot()!;
+    expect(snap.details.every((d) => d.reachability === undefined)).toBe(true);
+    expect(snap.stack?.httpPort).toBe(80);
+  });
+
+  it("ignores corrupt snapshots", () => {
+    localStorage.setItem(SITES_SNAPSHOT_KEY, "{not json");
+    expect(readSitesSnapshot()).toBeNull();
+    localStorage.setItem(SITES_SNAPSHOT_KEY, JSON.stringify({ v: 2 }));
+    expect(readSitesSnapshot()).toBeNull();
+  });
+
+  it("does not issue a duplicate list when SitesPage mounts with cache loaded", async () => {
+    render(
+      <AppDataProvider>
+        <Probe />
+      </AppDataProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("loaded").textContent).toBe("true"));
+    await waitFor(() => expect(probeCalls).toBeGreaterThan(0));
+    expect(listCalls).toBe(1);
+  });
+
+  it("SitesPage mounted together with the provider shares one load", async () => {
+    probeDelayMs = 20;
+    render(
+      <AppDataProvider>
+        <SitesPage active />
+      </AppDataProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("sites-grid")).toBeTruthy());
+    await waitFor(() => expect(probeCalls).toBeGreaterThan(0));
+    expect(listCalls).toBe(1);
+    expect(probeCalls).toBe(1);
   });
 });

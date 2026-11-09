@@ -27,6 +27,7 @@ export function SiteTile({
   onHttps,
   onPhp,
   onXdebug,
+  onMobilePreview,
 }: {
   details: SiteDetails;
   stack: StackStatus | null;
@@ -40,6 +41,8 @@ export function SiteTile({
   onHttps: (next: boolean) => void;
   onPhp: (version: string | null) => void;
   onXdebug: (next: boolean) => void;
+  /** Opens the LAN mobile-preview dialog (button hidden when omitted). */
+  onMobilePreview?: () => void;
 }) {
   const [logOpen, setLogOpen] = useState(false);
   const [logText, setLogText] = useState<string | null>(null);
@@ -190,6 +193,17 @@ export function SiteTile({
         >
           Database
         </button>
+        {onMobilePreview ? (
+          <button
+            type="button"
+            className="btn btn-install"
+            title="Preview on a phone over Wi-Fi"
+            data-testid="site-tile-mobile"
+            onClick={onMobilePreview}
+          >
+            Mobile
+          </button>
+        ) : null}
         <button
           type="button"
           className={`btn btn-install ${logOpen ? "active" : ""}`}

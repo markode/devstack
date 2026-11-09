@@ -18,10 +18,12 @@ const ITEMS: NavItem[] = [
   { id: "mail", label: "Mail", color: "#0a84ff", glyph: "M" },
   { id: "dumps", label: "Dumps", color: "#ff6b35", glyph: "D" },
   { id: "backups", label: "Backups", color: "#30a46c", glyph: "B" },
+  { id: "performance", label: "Performance", color: "#e5484d", glyph: "⚡" },
   { id: "logs", label: "Logs", color: "#34c759", glyph: "L" },
   { id: "ai", label: "AI", color: "#af52de", glyph: "A", placeholder: true },
   { id: "pro", label: "Pro", color: "#ff9500", glyph: "★", placeholder: true },
   { id: "sharing", label: "Sharing", color: "#30b0c7", glyph: "↗" },
+  { id: "hosting", label: "Hosting", color: "#6e56cf", glyph: "☁" },
   {
     id: "shortcuts",
     label: "Shortcuts",

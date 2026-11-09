@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{find_installed, latest_installed, AppState, Paths, SiteRecord};
 use crate::error::{DevStackError, Result};
 use crate::services::php_runtime::{
-    nginx_fastcgi_pass, resolve_php, start_php, PhpRuntime,
+    nginx_fastcgi_pass, resolve_php, start_php_many, PhpRuntime,
 };
 use crate::services::process::{find_bin, is_running, read_pid, spawn_logged, stop_pid, write_pid};
 use crate::services::tls::ensure_site_cert;
@@ -88,6 +88,7 @@ pub fn render_stack(
         http_port,
         https_port,
     )?;
+    crate::services::mobile_preview::write_nginx_conf_if_active(paths, state, &sites_dir);
     // Mailpit vhost only when the process is actually running — never as a
     // default_server / catch-all for other Host headers.
     let mailpit_up = state
@@ -203,8 +204,9 @@ fn write_site_conf(
     fastcgi_pass {fastcgi};
     fastcgi_read_timeout 3600s;
     fastcgi_send_timeout 3600s;
-  }}
+{php_extra}  }}
 "#,
+            php_extra = crate::services::vhost_ext::nginx_php_extra(paths, site),
             fastcgi = fastcgi_pass_value(&fastcgi),
             fcgi = crate::paths_util::quoted_conf_path(
                 &paths.nginx_conf_dir().join("fastcgi_params"),
@@ -221,10 +223,12 @@ fn write_site_conf(
   listen {http_port};
   listen [::]:{http_port};
   server_name {domain};
+{logs}
   return 301 {dest}$request_uri;
 }}
 "#,
-            domain = site.domain,
+            domain = crate::services::vhost_ext::nginx_server_names(site),
+            logs = crate::services::vhost_ext::nginx_log_lines(paths, site),
             dest = dest,
         )
     } else {
@@ -233,6 +237,7 @@ fn write_site_conf(
   listen {http_port};
   listen [::]:{http_port};
   server_name {domain};
+{logs}
   root {root};
   index index.php index.html;
   client_max_body_size 0;
@@ -241,7 +246,8 @@ fn write_site_conf(
   }}
 {php_block}}}
 "#,
-            domain = site.domain,
+            domain = crate::services::vhost_ext::nginx_server_names(site),
+            logs = crate::services::vhost_ext::nginx_log_lines(paths, site),
             root = crate::paths_util::quoted_conf_path(&root),
             php_block = php_block,
         )
@@ -249,7 +255,7 @@ fn write_site_conf(
     let mut server = http_block;
 
     if site.https {
-        let certs = ensure_site_cert(paths, &site.domain)?;
+        let certs = crate::services::tls::ensure_site_cert_for(paths, site)?;
         let php_ssl = if let Some(runtime) = php_for_site(site, runtimes, state) {
             let fastcgi = nginx_fastcgi_pass(runtime);
             format!(
@@ -259,8 +265,9 @@ fn write_site_conf(
     fastcgi_pass {fastcgi};
     fastcgi_read_timeout 3600s;
     fastcgi_send_timeout 3600s;
-  }}
+{php_extra}  }}
 "#,
+                php_extra = crate::services::vhost_ext::nginx_php_extra(paths, site),
                 fastcgi = fastcgi_pass_value(&fastcgi),
                 fcgi = crate::paths_util::quoted_conf_path(
                     &paths.nginx_conf_dir().join("fastcgi_params"),
@@ -275,6 +282,7 @@ server {{
   listen {https_port} ssl;
   listen [::]:{https_port} ssl;
   server_name {domain};
+{logs}
   root {root};
   index index.php index.html;
   client_max_body_size 0;
@@ -285,7 +293,8 @@ server {{
   }}
 {php_ssl}}}
 "#,
-            domain = site.domain,
+            domain = crate::services::vhost_ext::nginx_server_names(site),
+            logs = crate::services::vhost_ext::nginx_log_lines(paths, site),
             root = crate::paths_util::quoted_conf_path(&root),
             cert = crate::paths_util::quoted_conf_path(&certs.site_cert),
             key = crate::paths_util::quoted_conf_path(&certs.site_key),
@@ -385,7 +394,7 @@ pub fn expand_home(path: &Path) -> PathBuf {
     crate::paths_util::expand_home(path)
 }
 
-fn collect_php_versions(state: &AppState) -> Vec<String> {
+pub fn collect_php_versions(state: &AppState) -> Vec<String> {
     let mut versions: Vec<String> = state
         .sites
         .iter()
@@ -415,10 +424,11 @@ pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
     crate::services::ports::ensure_ports_free(&state.stack, "nginx")?;
 
     let versions = collect_php_versions(state);
+    // Parallel + no-op fast for versions already listening (stack start pre-warms them).
     let mut runtimes = Vec::new();
-    for v in &versions {
-        match start_php(paths, state, v) {
-            Ok(rt) => runtimes.push((v.clone(), rt)),
+    for (v, res) in start_php_many(paths, state, &versions) {
+        match res {
+            Ok(rt) => runtimes.push((v, rt)),
             Err(e) => eprintln!("php start {v}: {e}"),
         }
     }
@@ -445,6 +455,10 @@ pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
     std::mem::forget(child);
     write_pid(&paths.pid_file("nginx"), pid)?;
     state.runtime.nginx_pid = Some(pid);
+    if let Err(e) = wait_nginx_listen(pid, state.stack.http_port, &log_err) {
+        state.runtime.nginx_pid = None;
+        return Err(e);
+    }
     // Only mark Nginx-backed sites running — Apache sites keep their own status.
     for site in &mut state.sites {
         if !crate::services::httpd::site_uses_apache(site) {
@@ -454,11 +468,40 @@ pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
     Ok(())
 }
 
+/// Short backoff poll (5ms → 25ms, ≤3s) until nginx accepts on its HTTP port.
+/// Fails fast with the error log if the master exits during startup.
+fn wait_nginx_listen(pid: u32, http_port: u16, log_err: &Path) -> Result<()> {
+    use std::time::Duration;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], http_port));
+    let mut died = false;
+    let _ = crate::services::perf::poll_backoff(
+        Duration::from_millis(5),
+        Duration::from_millis(25),
+        Duration::from_secs(3),
+        || {
+            if !is_running(pid) {
+                died = true;
+                return Some(());
+            }
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50))
+                .is_ok()
+                .then_some(())
+        },
+    );
+    if died {
+        let err = std::fs::read_to_string(log_err).unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "Nginx exited during startup.\n--- stderr ---\n{err}"
+        )));
+    }
+    Ok(())
+}
+
 pub fn reload_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
     let versions = collect_php_versions(state);
     let mut runtimes = Vec::new();
-    for v in versions {
-        match start_php(paths, state, &v) {
+    for (v, res) in start_php_many(paths, state, &versions) {
+        match res {
             Ok(rt) => runtimes.push((v, rt)),
             Err(_) => {
                 if let Ok(rt) = resolve_php(paths, state, &v) {

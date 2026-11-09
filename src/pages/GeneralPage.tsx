@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import * as client from "../client";
+import { ConfigTransferSection } from "../components/ConfigTransferSection";
 import type {
   AppInfo,
   DatabaseFilesSettings,
@@ -506,6 +507,8 @@ export function GeneralPage({
           </button>
         </div>
       </div>
+
+      <ConfigTransferSection />
 
       <div className="section-head" style={{ marginTop: 28 }}>
         <h2>Developer</h2>
