@@ -32,6 +32,32 @@ import type {
   VersionListResponse,
   VersionsUpdatedEvent,
 } from "./types";
+import type {
+  ConfigArchiveMeta,
+  ConfigExportSummary,
+  ConfigImportOptions,
+  ConfigImportReport,
+  CreateFromTemplateRequest,
+  CreateFromTemplateResult,
+  HostingProfile,
+  HostingTools,
+  LogSourceInfo,
+  MetricsSnapshot,
+  MobilePreviewInfo,
+  PhpIniSliders,
+  QueueStatus,
+  SiteDomainUpdate,
+  SiteLogPage,
+  SiteLogQuery,
+  SitePhpIniView,
+  SiteTemplateInfo,
+  SlowQueryInfo,
+  SpxStatus,
+  SyncDirection,
+  SyncPlan,
+  SyncResult,
+  TldSettings,
+} from "./types";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 const useMock = () => !api.isTauri();
@@ -581,4 +607,194 @@ export async function cloneSite(
 ): Promise<DuplicateResult> {
   if (useMock()) return mock.mockDuplicateSite(request);
   return api.cloneSite(request);
+}
+
+// --- v0.3.0 ---------------------------------------------------------------------
+
+export async function setReverbSite(siteId: string | null): Promise<ManagedServiceStatus> {
+  if (useMock()) return mock.mockSetReverbSite(siteId);
+  return api.setReverbSite(siteId);
+}
+
+export async function getSitePhpIni(siteId: string): Promise<SitePhpIniView> {
+  if (useMock()) return mock.mockGetSitePhpIni(siteId);
+  return api.getSitePhpIni(siteId);
+}
+
+export async function setSitePhpIni(
+  siteId: string,
+  overrides: Record<string, string>,
+): Promise<SitePhpIniView> {
+  if (useMock()) return mock.mockSetSitePhpIni(siteId, overrides);
+  return api.setSitePhpIni(siteId, overrides);
+}
+
+export async function setSitePhpIniSliders(
+  siteId: string,
+  sliders: PhpIniSliders,
+): Promise<SitePhpIniView> {
+  if (useMock()) return mock.mockSetSitePhpIniSliders(siteId, sliders);
+  return api.setSitePhpIniSliders(siteId, sliders);
+}
+
+export async function listSiteTemplateKinds(): Promise<SiteTemplateInfo[]> {
+  if (useMock()) return mock.mockSiteTemplateKinds();
+  return api.listSiteTemplateKinds();
+}
+
+export async function createSiteFromTemplate(
+  request: CreateFromTemplateRequest,
+): Promise<CreateFromTemplateResult> {
+  if (useMock()) return mock.mockCreateFromTemplate(request);
+  return api.createSiteFromTemplate(request);
+}
+
+export async function hostingToolsStatus(): Promise<HostingTools> {
+  if (useMock()) return mock.mockHostingTools();
+  return api.hostingToolsStatus();
+}
+
+export async function hostingListProfiles(): Promise<HostingProfile[]> {
+  if (useMock()) return mock.mockHostingProfiles();
+  return api.hostingListProfiles();
+}
+
+export async function hostingSaveProfile(
+  profile: HostingProfile,
+  password?: string | null,
+  dbPassword?: string | null,
+): Promise<HostingProfile> {
+  if (useMock()) return mock.mockHostingSave(profile, password);
+  return api.hostingSaveProfile(profile, password, dbPassword);
+}
+
+export async function hostingDeleteProfile(profileId: string): Promise<void> {
+  if (useMock()) return mock.mockHostingDelete(profileId);
+  return api.hostingDeleteProfile(profileId);
+}
+
+export async function hostingTestConnection(profileId: string): Promise<string> {
+  if (useMock()) return `Connected (mock) to ${profileId}`;
+  return api.hostingTestConnection(profileId);
+}
+
+export async function hostingPreview(
+  profileId: string,
+  direction: SyncDirection,
+  del = false,
+): Promise<SyncPlan> {
+  if (useMock()) return mock.mockHostingPreview(profileId, direction);
+  return api.hostingPreview(profileId, direction, del);
+}
+
+export async function hostingRunSync(
+  profileId: string,
+  direction: SyncDirection,
+  opts: { delete?: boolean; includeDatabase?: boolean } = {},
+): Promise<SyncResult> {
+  if (useMock()) return mock.mockHostingRun(profileId, direction, opts.includeDatabase ?? false);
+  return api.hostingRunSync(profileId, direction, opts);
+}
+
+export async function getTldSettings(): Promise<TldSettings> {
+  if (useMock()) return mock.mockTldSettings();
+  return api.getTldSettings();
+}
+
+export async function setDefaultTld(tld: string): Promise<TldSettings> {
+  if (useMock()) return mock.mockSetDefaultTld(tld);
+  return api.setDefaultTld(tld);
+}
+
+export async function updateSiteDomain(
+  siteId: string,
+  patch: { tld?: string; aliases?: string[]; wildcard?: boolean },
+): Promise<SiteDomainUpdate> {
+  if (useMock()) return mock.mockUpdateSiteDomain(siteId, patch);
+  return api.updateSiteDomain(siteId, patch);
+}
+
+export async function listSiteLogSources(siteId: string): Promise<LogSourceInfo[]> {
+  if (useMock()) return mock.mockLogSources(siteId);
+  return api.listSiteLogSources(siteId);
+}
+
+export async function readSiteLogs(
+  siteId: string,
+  query: SiteLogQuery,
+): Promise<SiteLogPage> {
+  if (useMock()) return mock.mockReadSiteLogs(siteId, query);
+  return api.readSiteLogs(siteId, query);
+}
+
+export async function getSiteQueueStatus(siteId: string): Promise<QueueStatus> {
+  if (useMock()) return mock.mockQueueStatus(siteId);
+  return api.getSiteQueueStatus(siteId);
+}
+
+export async function getMobilePreviewStatus(): Promise<MobilePreviewInfo> {
+  if (useMock()) return mock.mockMobilePreview();
+  return api.getMobilePreviewStatus();
+}
+
+export async function startMobilePreview(siteId: string): Promise<MobilePreviewInfo> {
+  if (useMock()) return mock.mockStartMobilePreview(siteId);
+  return api.startMobilePreview(siteId);
+}
+
+export async function stopMobilePreview(): Promise<MobilePreviewInfo> {
+  if (useMock()) return mock.mockStopMobilePreview();
+  return api.stopMobilePreview();
+}
+
+export async function getMetricsSnapshot(): Promise<MetricsSnapshot> {
+  if (useMock()) return mock.mockMetricsSnapshot();
+  return api.getMetricsSnapshot();
+}
+
+export async function getSlowQueryInfo(limit = 50): Promise<SlowQueryInfo> {
+  if (useMock()) return mock.mockSlowQueryInfo();
+  return api.getSlowQueryInfo(limit);
+}
+
+export async function setSlowQueryLog(
+  enabled: boolean,
+  thresholdSecs = 1,
+): Promise<SlowQueryInfo> {
+  if (useMock()) return mock.mockSetSlowQueryLog(enabled, thresholdSecs);
+  return api.setSlowQueryLog(enabled, thresholdSecs);
+}
+
+export async function getSpxStatus(phpVersion?: string | null): Promise<SpxStatus> {
+  if (useMock()) return mock.mockSpxStatus();
+  return api.getSpxStatus(phpVersion);
+}
+
+export async function setSpxEnabled(
+  enabled: boolean,
+  phpVersion?: string | null,
+): Promise<SpxStatus> {
+  if (useMock()) return mock.mockSetSpx(enabled);
+  return api.setSpxEnabled(enabled, phpVersion);
+}
+
+export async function exportConfig(
+  destPath: string,
+  includeDatabases = false,
+): Promise<ConfigExportSummary> {
+  if (useMock()) return mock.mockExportConfig(destPath, includeDatabases);
+  return api.exportConfig(destPath, includeDatabases);
+}
+
+export async function inspectConfigArchive(path: string): Promise<ConfigArchiveMeta> {
+  if (useMock()) return mock.mockInspectConfig(path);
+  return api.inspectConfigArchive(path);
+}
+
+export async function importConfig(
+  path: string,
+  options?: ConfigImportOptions,
+): Promise<ConfigImportReport> {
+  if (useMock()) return mock.mockImportConfig(path);
+  return api.importConfig(path, options);
 }

@@ -25,6 +25,31 @@ import type {
   TemplateRecord,
   VersionListResponse,
 } from "./types";
+import type {
+  ConfigArchiveMeta,
+  ConfigExportSummary,
+  ConfigImportReport,
+  CreateFromTemplateRequest,
+  CreateFromTemplateResult,
+  HostingProfile,
+  HostingTools,
+  LogSourceInfo,
+  MetricsSnapshot,
+  MobilePreviewInfo,
+  PhpIniSliders,
+  QueueStatus,
+  SiteDomainUpdate,
+  SiteLogPage,
+  SiteLogQuery,
+  SitePhpIniView,
+  SiteTemplateInfo,
+  SlowQueryInfo,
+  SpxStatus,
+  SyncDirection,
+  SyncPlan,
+  SyncResult,
+  TldSettings,
+} from "./types";
 
 const installed = new Map<string, InstalledPackage[]>();
 
@@ -327,7 +352,71 @@ let managed: ManagedServiceStatus[] = [
     uiUrl: "https://mailpit.test",
     notes: "SMTP :1025 · UI :8025 / mailpit.test",
   },
+  {
+    id: "memcached",
+    name: "Memcached",
+    running: false,
+    installed: true,
+    version: "1.6.21",
+    ports: [11211],
+    notes: "TCP :11211 — cache / session backend",
+  },
+  {
+    id: "meilisearch",
+    name: "Meilisearch",
+    running: false,
+    installed: true,
+    version: "1.15.2",
+    ports: [7700],
+    uiUrl: "http://127.0.0.1:7700",
+    notes: "HTTP :7700 · dev mode, no master key",
+  },
+  {
+    id: "typesense",
+    name: "Typesense",
+    running: false,
+    installed: false,
+    version: null,
+    ports: [8108],
+    notes: "HTTP :8108 · API key `devstack` · macOS/Linux only",
+  },
+  {
+    id: "minio",
+    name: "MinIO",
+    running: false,
+    installed: true,
+    version: "2026-10-26T00-00-00Z",
+    ports: [9100, 9101],
+    uiUrl: "http://127.0.0.1:9101",
+    notes: "S3 API :9100 · console :9101 · login devstack / devstack123",
+  },
+  {
+    id: "reverb",
+    name: "Laravel Reverb",
+    running: false,
+    installed: true,
+    version: null,
+    ports: [8085],
+    notes: "WebSocket :8085 · runs `php artisan reverb:start` in acme-dashboard.test",
+  },
 ];
+
+mockPackages.push(
+  ...(
+    [
+      ["memcached", "Memcached", "In-memory cache (uses the memcached on PATH)."],
+      ["meilisearch", "Meilisearch", "Typo-tolerant search engine on :7700."],
+      ["typesense", "Typesense", "Fast in-memory search engine (macOS/Linux)."],
+      ["minio", "MinIO", "S3-compatible object storage with web console."],
+    ] as const
+  ).map(([id, name, description]) => ({
+    id,
+    name,
+    description,
+    category: "service",
+    installReady: true,
+  })),
+);
 
 const versionTables: Record<string, PackageVersion[]> = {
   php: ["8.5", "8.4", "8.3", "8.2", "8.1", "8.0", "7.4"].map((c, i) => ({
@@ -425,6 +514,32 @@ const versionTables: Record<string, PackageVersion[]> = {
     lts: true,
     downloadUrl: "https://example.invalid/mailpit.tgz",
   })),
+  memcached: [
+    { version: "1.6.21", channel: "1.6.21", label: "Memcached 1.6.21 (system)", lts: true },
+  ],
+  meilisearch: ["1.15.2", "1.12.8"].map((v) => ({
+    version: v,
+    channel: v.split(".").slice(0, 2).join("."),
+    label: `Meilisearch ${v}`,
+    lts: true,
+    downloadUrl: "https://example.invalid/meilisearch",
+  })),
+  typesense: ["29.0", "27.1"].map((v) => ({
+    version: v,
+    channel: v,
+    label: `Typesense ${v}`,
+    lts: true,
+    downloadUrl: "https://example.invalid/typesense.tgz",
+  })),
+  minio: [
+    {
+      version: "2026-10-26T00-00-00Z",
+      channel: "2026-10",
+      label: "MinIO 2026-10-26",
+      lts: true,
+      downloadUrl: "https://example.invalid/minio.tgz",
+    },
+  ],
 };
 
 let sites: SiteRecord[] = [
@@ -924,5 +1039,435 @@ export function mockToolsStatus(): ToolsStatus {
     node: true,
     shims: true,
     optInPath: false,
+  };
+}
+
+// --- v0.3.0 mocks ---------------------------------------------------------------
+
+export async function mockSetReverbSite(siteId: string | null): Promise<ManagedServiceStatus> {
+  const svc = managed.find((s) => s.id === "reverb")!;
+  const site = sites.find((x) => x.id === siteId);
+  svc.notes = site
+    ? `WebSocket :8085 · runs \`php artisan reverb:start\` in ${site.domain}`
+    : "Select a Laravel site with laravel/reverb installed";
+  return svc;
+}
+
+const phpIniOverrides = new Map<string, Record<string, string>>();
+const GLOBAL_INI: Record<string, string> = {
+  memory_limit: "-1",
+  max_execution_time: "0",
+  upload_max_filesize: "0",
+  post_max_size: "0",
+};
+
+function iniView(siteId: string): SitePhpIniView {
+  const overrides = phpIniOverrides.get(siteId) ?? {};
+  const merged = { ...GLOBAL_INI, ...overrides };
+  const mb = (v?: string) => {
+    if (!v || v === "-1" || v === "0") return null;
+    const n = parseInt(v, 10);
+    return /g$/i.test(v) ? n * 1024 : n;
+  };
+  return {
+    siteId,
+    phpVersion: "8.3.6",
+    iniPath: `/tmp/DevStack/sites/${siteId}/php.ini`,
+    mergedIniPath: `/tmp/DevStack/sites/${siteId}/php-merged.ini`,
+    overrides,
+    global: GLOBAL_INI,
+    merged,
+    sliders: {
+      memoryLimitMb: mb(merged.memory_limit),
+      maxExecutionTime: parseInt(merged.max_execution_time, 10) || 0,
+      uploadMaxMb: mb(merged.upload_max_filesize) ?? 0,
+      postMaxMb: mb(merged.post_max_size) ?? 0,
+    },
+    knownKeys: [
+      { key: "memory_limit", kind: "size", description: "Max memory per request (-1 = unlimited)" },
+      { key: "max_execution_time", kind: "int", description: "Seconds a script may run (0 = unlimited)" },
+      { key: "upload_max_filesize", kind: "size", description: "Largest single upload" },
+      { key: "post_max_size", kind: "size", description: "Largest POST body" },
+      { key: "display_errors", kind: "bool", description: "Show errors in output" },
+      { key: "date.timezone", kind: "text", description: "Default timezone" },
+    ],
+    reloaded: true,
+    notes: [],
+  };
+}
+
+export async function mockGetSitePhpIni(siteId: string): Promise<SitePhpIniView> {
+  return iniView(siteId);
+}
+
+export async function mockSetSitePhpIni(
+  siteId: string,
+  overrides: Record<string, string>,
+): Promise<SitePhpIniView> {
+  await delay(40);
+  phpIniOverrides.set(siteId, { ...overrides });
+  return iniView(siteId);
+}
+
+export async function mockSetSitePhpIniSliders(
+  siteId: string,
+  s: PhpIniSliders,
+): Promise<SitePhpIniView> {
+  const next = {
+    ...(phpIniOverrides.get(siteId) ?? {}),
+    memory_limit: s.memoryLimitMb == null ? "-1" : `${s.memoryLimitMb}M`,
+    max_execution_time: String(s.maxExecutionTime),
+    upload_max_filesize: s.uploadMaxMb ? `${s.uploadMaxMb}M` : "0",
+    post_max_size: s.postMaxMb ? `${s.postMaxMb}M` : "0",
+  };
+  return mockSetSitePhpIni(siteId, next);
+}
+
+export async function mockSiteTemplateKinds(): Promise<SiteTemplateInfo[]> {
+  return [
+    ["laravel", "Laravel", "public", ["composer create-project laravel/laravel <dir>"]],
+    ["symfony", "Symfony", "public", ["composer create-project symfony/skeleton <dir>"]],
+    ["statamic", "Statamic", "public", ["composer create-project statamic/statamic <dir>"]],
+    ["drupal", "Drupal", "web", ["composer create-project drupal/recommended-project <dir>"]],
+    ["joomla", "Joomla", "", ["download Joomla full package and unzip"]],
+    ["woocommerce", "WooCommerce", "", ["wp core install", "wp plugin install woocommerce --activate"]],
+  ].map(([kind, label, docroot, commands]) => ({
+    kind: kind as SiteTemplateInfo["kind"],
+    label: label as string,
+    docroot: docroot as string,
+    commands: commands as string[],
+  }));
+}
+
+export async function mockCreateFromTemplate(
+  req: CreateFromTemplateRequest,
+): Promise<CreateFromTemplateResult> {
+  await delay(120);
+  const id = req.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "site";
+  const site: SiteRecord = {
+    id,
+    name: req.name,
+    path: `~/Sites/${id}/public`,
+    domain: `${id}.test`,
+    phpVersion: req.phpVersion ?? "8.3",
+    https: true,
+    webServer: req.kind === "woocommerce" ? "apache" : "nginx",
+    framework: req.kind === "woocommerce" ? "wordpress" : req.kind,
+    databaseEngine: "mariadb",
+    databaseName: `${req.kind}_${id.replace(/-/g, "_")}`,
+    status: "stopped",
+  };
+  sites = [...sites.filter((s) => s.id !== id), site];
+  return {
+    site,
+    kind: req.kind,
+    projectPath: `~/Sites/${id}`,
+    docroot: site.path,
+    url: `https://${site.domain}`,
+    database: {
+      engine: "mariadb",
+      name: site.databaseName!,
+      user: `u_${id.replace(/-/g, "_")}`,
+      password: "mock-password",
+      host: "127.0.0.1",
+      port: 3306,
+    },
+    steps: [
+      { name: "database", ok: true, skipped: false, message: "created database" },
+      { name: "project", ok: true, skipped: false, message: "composer create-project finished" },
+      { name: "env", ok: true, skipped: false, message: "database credentials written to .env" },
+    ],
+    softFailed: false,
+    notes: [],
+  };
+}
+
+let hostingProfiles: HostingProfile[] = [];
+
+export async function mockHostingTools(): Promise<HostingTools> {
+  return { ssh: true, sftp: true, scp: true, rsync: true, keychain: true, notes: [] };
+}
+
+export async function mockHostingProfiles(): Promise<HostingProfile[]> {
+  return hostingProfiles;
+}
+
+export async function mockHostingSave(
+  profile: HostingProfile,
+  password?: string | null,
+): Promise<HostingProfile> {
+  const id = profile.id || `${profile.name}-${profile.host}`.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const saved = { ...profile, id, port: profile.port || 22, hasPassword: !!password };
+  hostingProfiles = [...hostingProfiles.filter((p) => p.id !== id), saved];
+  return saved;
+}
+
+export async function mockHostingDelete(id: string): Promise<void> {
+  hostingProfiles = hostingProfiles.filter((p) => p.id !== id);
+}
+
+export async function mockHostingPreview(
+  profileId: string,
+  direction: SyncDirection,
+): Promise<SyncPlan> {
+  const entries = [
+    { path: "index.php", action: "update" as const, size: 420, isDir: false },
+    { path: "wp-content/uploads/hero.jpg", action: "add" as const, size: 183_000, isDir: false },
+    { path: "old-backup.zip", action: "delete" as const, size: 0, isDir: false },
+  ];
+  return {
+    profileId,
+    direction,
+    dryRun: true,
+    entries,
+    add: 1,
+    update: 1,
+    delete: 1,
+    bytes: 183_420,
+    excludes: [".git/", "*.log"],
+    tool: "rsync",
+    notes: [],
+  };
+}
+
+export async function mockHostingRun(
+  profileId: string,
+  direction: SyncDirection,
+  includeDatabase: boolean,
+): Promise<SyncResult> {
+  await delay(80);
+  return {
+    profileId,
+    direction,
+    filesTransferred: 2,
+    deleted: 0,
+    bytes: 183_420,
+    databaseSynced: includeDatabase,
+    urlRewritten: includeDatabase ? "blog.test: https://example.com → https://blog.test" : null,
+    notes: [],
+  };
+}
+
+let defaultTld = "test";
+
+function tldWarnings(tld: string): string[] {
+  const w: string[] = [];
+  if (tld === "dev" || tld === "app") w.push(`.${tld} is HSTS-preloaded: HTTPS is forced.`);
+  if (tld === "local") w.push(".local is reserved for mDNS and can be slow.");
+  return w;
+}
+
+export async function mockTldSettings(): Promise<TldSettings> {
+  return { defaultTld, warnings: tldWarnings(defaultTld), httpsRequired: ["dev", "app"].includes(defaultTld) };
+}
+
+export async function mockSetDefaultTld(tld: string): Promise<TldSettings> {
+  defaultTld = tld.replace(/^\./, "").toLowerCase();
+  return mockTldSettings();
+}
+
+export async function mockUpdateSiteDomain(
+  siteId: string,
+  patch: { tld?: string; aliases?: string[]; wildcard?: boolean },
+): Promise<SiteDomainUpdate> {
+  const cur = sites.find((s) => s.id === siteId);
+  if (!cur) throw new Error(`site not found: ${siteId}`);
+  const tld = patch.tld?.replace(/^\./, "").toLowerCase();
+  const next: SiteRecord = {
+    ...cur,
+    tld: tld ?? cur.tld ?? "test",
+    domain: tld ? `${cur.domain.split(".").slice(0, -1).join(".")}.${tld}` : cur.domain,
+    aliases: patch.aliases ?? cur.aliases ?? [],
+    wildcard: patch.wildcard ?? cur.wildcard ?? false,
+    https: tld === "dev" ? true : cur.https,
+  };
+  sites = sites.map((s) => (s.id === siteId ? next : s));
+  return { site: next, warnings: tld ? tldWarnings(tld) : [], hostsOk: true, hostsMessage: null };
+}
+
+export async function mockLogSources(siteId: string): Promise<LogSourceInfo[]> {
+  const laravel = sites.find((s) => s.id === siteId)?.framework === "laravel";
+  const base: LogSourceInfo[] = [
+    { id: "php", label: "PHP errors", path: "/tmp/php.log", exists: true, size: 512 },
+    { id: "web-error", label: "Web server errors", path: "/tmp/e.log", exists: true, size: 256 },
+    { id: "web-access", label: "Access log", path: "/tmp/a.log", exists: true, size: 4096 },
+  ];
+  if (laravel) {
+    base.push({ id: "laravel", label: "Laravel (storage/logs)", path: "/tmp/laravel.log", exists: true, size: 2048 });
+  }
+  return base;
+}
+
+export async function mockReadSiteLogs(
+  _siteId: string,
+  q: SiteLogQuery,
+): Promise<SiteLogPage> {
+  const all = [
+    { ts: "2026-11-09 12:00:00", level: "info", message: "Application booted" },
+    { ts: "2026-11-09 12:00:04", level: "warning", message: "Slow query (1.4s) on posts" },
+    { ts: "2026-11-09 12:00:09", level: "error", message: "Undefined variable $user in /app/Http/Kernel.php" },
+  ];
+  const order = ["debug", "info", "notice", "warning", "error", "critical"];
+  const min = q.level && q.level !== "all" ? order.indexOf(q.level) : 0;
+  const text = (q.text ?? "").toLowerCase();
+  const entries = all.filter(
+    (e) => order.indexOf(e.level) >= min && (!text || e.message.toLowerCase().includes(text)),
+  );
+  return {
+    source: q.source,
+    path: "/tmp/mock.log",
+    entries: q.cursor ? [] : entries,
+    cursor: 1024,
+    size: 1024,
+    reset: false,
+  };
+}
+
+export async function mockQueueStatus(siteId: string): Promise<QueueStatus> {
+  const laravel = sites.find((s) => s.id === siteId)?.framework === "laravel";
+  return {
+    isLaravel: laravel,
+    driver: laravel ? "database" : null,
+    pending: laravel ? 3 : null,
+    failed: laravel ? 1 : null,
+    failedJobs: laravel
+      ? [{ id: "1", queue: "default", failedAt: "2026-11-09 11:00:00", exception: "RuntimeException: boom" }]
+      : [],
+    horizon: { installed: laravel, url: laravel ? "https://acme-dashboard.test/horizon" : null },
+    notes: laravel ? [] : ["Queue panel is available for Laravel sites."],
+  };
+}
+
+let previewState: MobilePreviewInfo = { active: false, wpRewritten: false, notes: [] };
+
+export async function mockMobilePreview(): Promise<MobilePreviewInfo> {
+  return previewState;
+}
+
+export async function mockStartMobilePreview(siteId: string): Promise<MobilePreviewInfo> {
+  const site = sites.find((s) => s.id === siteId);
+  previewState = {
+    active: true,
+    siteId,
+    lanIp: "192.168.1.20",
+    port: 8300,
+    url: "http://192.168.1.20:8300",
+    qrDataUrl:
+      "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCI+PHJlY3Qgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIi8+PC9zdmc+",
+    hostHeader: site?.domain ?? null,
+    wpRewritten: site?.framework === "wordpress",
+    firewallNotice: "If a firewall is active allow the port, e.g. `sudo ufw allow 8300/tcp`.",
+    notes: [],
+  };
+  return previewState;
+}
+
+export async function mockStopMobilePreview(): Promise<MobilePreviewInfo> {
+  previewState = { active: false, wpRewritten: false, notes: [] };
+  return previewState;
+}
+
+export async function mockMetricsSnapshot(): Promise<MetricsSnapshot> {
+  const jitter = () => Math.round(Math.random() * 40) / 10;
+  const processes = [
+    { id: "nginx", label: "Nginx", pid: 101, running: true, cpuPercent: jitter(), memoryBytes: 18_000_000, processes: 3 },
+    { id: "mariadb", label: "MariaDB", pid: 102, running: true, cpuPercent: jitter(), memoryBytes: 320_000_000, processes: 1 },
+    { id: "php-8.3.6", label: "PHP 8.3.6", pid: 103, running: true, cpuPercent: jitter(), memoryBytes: 90_000_000, processes: 3 },
+  ];
+  return {
+    timestampMs: Date.now(),
+    system: { cpuPercent: 12.5, cpuCount: 8, totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 8 * 1024 ** 3 },
+    processes,
+    totalCpuPercent: processes.reduce((n, p) => n + p.cpuPercent, 0),
+    totalMemoryBytes: processes.reduce((n, p) => n + p.memoryBytes, 0),
+  };
+}
+
+let slowEnabled = false;
+
+export async function mockSlowQueryInfo(): Promise<SlowQueryInfo> {
+  return {
+    engine: "mariadb",
+    running: true,
+    enabled: slowEnabled,
+    thresholdSecs: 1,
+    path: "/tmp/DevStack/logs/mariadb-slow.log",
+    exists: true,
+    entries: slowEnabled
+      ? [
+          {
+            time: "261109 12:00:00",
+            userHost: "wp[wp] @ localhost []",
+            queryTime: 2.5,
+            lockTime: 0,
+            rowsSent: 10,
+            rowsExamined: 52000,
+            sql: "SELECT * FROM wp_posts WHERE post_status = 'publish'",
+          },
+        ]
+      : [],
+    notes: [],
+  };
+}
+
+export async function mockSetSlowQueryLog(enabled: boolean, thresholdSecs: number): Promise<SlowQueryInfo> {
+  slowEnabled = enabled;
+  return { ...(await mockSlowQueryInfo()), thresholdSecs };
+}
+
+let spxEnabled = false;
+
+export async function mockSpxStatus(): Promise<SpxStatus> {
+  return {
+    phpVersion: "8.3.6",
+    available: false,
+    enabled: spxEnabled,
+    reportDir: "/tmp/DevStack/spx-reports",
+    uiQuery: "?SPX_KEY=dev&SPX_UI_URI=/",
+    notes: ["php-spx extension not installed for this PHP."],
+  };
+}
+
+export async function mockSetSpx(enabled: boolean): Promise<SpxStatus> {
+  spxEnabled = enabled;
+  return mockSpxStatus();
+}
+
+const mockArchiveMeta = (): ConfigArchiveMeta => ({
+  format: "devstack-config",
+  formatVersion: 1,
+  appVersion: "0.3.0",
+  createdAt: new Date(0).toISOString(),
+  os: "mock",
+  siteCount: sites.length,
+  siteIds: sites.map((s) => s.id),
+  includesDatabases: false,
+  databases: [],
+  siteMetaFiles: 0,
+  hasHostingProfiles: false,
+});
+
+export async function mockExportConfig(
+  destPath: string,
+  _includeDatabases: boolean,
+): Promise<ConfigExportSummary> {
+  return { path: destPath, bytes: 2048, meta: mockArchiveMeta(), warnings: [] };
+}
+
+export async function mockInspectConfig(_path: string): Promise<ConfigArchiveMeta> {
+  return mockArchiveMeta();
+}
+
+export async function mockImportConfig(_path: string): Promise<ConfigImportReport> {
+  return {
+    sitesAdded: 0,
+    sitesUpdated: sites.length,
+    settingsApplied: true,
+    siteMetaFiles: 0,
+    databasesRestored: [],
+    databasesSkipped: [],
+    missingPaths: [],
+    installedPackages: {},
+    notes: [],
   };
 }
