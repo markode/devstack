@@ -138,7 +138,17 @@ mod tests {
 
     #[test]
     fn budgets_are_ordered() {
-        assert!(warm_apply_stack_budget_ms() >= 4000);
-        assert!(toggle_budget_ms() >= 3000);
+        // Platform gates match the product targets in docs/performance.md.
+        if cfg!(windows) {
+            assert_eq!(warm_apply_stack_budget_ms(), WARM_APPLY_STACK_BUDGET_MS_WINDOWS);
+            assert_eq!(toggle_budget_ms(), TOGGLE_BUDGET_MS_WINDOWS);
+            assert!(warm_apply_stack_budget_ms() >= 5000);
+            assert!(toggle_budget_ms() >= 1000);
+        } else {
+            assert_eq!(warm_apply_stack_budget_ms(), WARM_APPLY_STACK_BUDGET_MS_UNIX);
+            assert_eq!(toggle_budget_ms(), TOGGLE_BUDGET_MS_UNIX);
+            assert!(warm_apply_stack_budget_ms() >= 4000);
+            assert!(toggle_budget_ms() >= 3000);
+        }
     }
 }
