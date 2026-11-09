@@ -8,7 +8,7 @@ use crate::services::database::{configure_phpmyadmin, start_database, stop_datab
 use crate::services::dns::{start_dns, stop_dns, sync_hosts_and_trust_ca};
 use crate::services::httpd::{reload_apache, start_apache, stop_apache};
 use crate::services::nginx::{reload_nginx, start_nginx, stop_nginx};
-use crate::services::php_runtime::register_system_php;
+use crate::services::php_runtime::{register_system_php, start_php_many};
 use crate::services::ports::{
     auto_separate_busy_ports, classic_web_port_notice, owned_runtime_pids_with_files,
     PortRemapNotice, PortSnapshot,
@@ -162,23 +162,9 @@ pub fn apply_stack_with_progress(
         save_state(&paths.state_file, state)?;
     }
 
-    stack_phase(progress, "dns", "Starting DNS and trusting certificates…");
-    ensure_root_ca(paths)?;
-    // Single UAC on Windows for hosts + CA trust; unix uses helper/sudo separately.
-    let _ = sync_hosts_and_trust_ca(paths, state);
-
-    match start_dns(paths, state, state.stack.dns_port) {
-        Ok(()) => {}
-        Err(e) => {
-            crate::applog::warn(
-                "dns",
-                &format!("{e} — continuing with hosts-file resolution only"),
-            );
-            state.runtime.dns_pid = None;
-        }
+    if !state.installed.contains_key("php") {
+        let _ = register_system_php(state, paths);
     }
-
-    stack_phase(progress, "database", "Starting database…");
     let engine = state.active_database.clone().or_else(|| {
         if state.installed.contains_key("mariadb") {
             Some("mariadb".into())
@@ -188,35 +174,104 @@ pub fn apply_stack_with_progress(
             None
         }
     });
-    if let Some(engine) = engine {
-        if let Err(e) = start_database(paths, state, &engine) {
+    let php_versions = crate::services::nginx::collect_php_versions(state);
+
+    // Independent phases run concurrently on state snapshots; only the fields each
+    // phase owns are merged back (dns_pid on `state`, database_* / php_pids below).
+    stack_phase(progress, "dns", "Starting DNS and trusting certificates…");
+    stack_phase(progress, "database", "Starting database…");
+    stack_phase(progress, "php", "Preparing PHP…");
+    let ca_snapshot = state.clone();
+    let db_snapshot = engine.as_ref().map(|_| state.clone());
+    let mut php_snapshot = state.clone();
+    let (ca_res, db_res, php_pids) = std::thread::scope(|scope| {
+        let ca_h = scope.spawn(|| -> Result<()> {
+            ensure_root_ca(paths)?;
+            // Single UAC on Windows for hosts + CA trust; unix uses helper/sudo separately.
+            let _ = sync_hosts_and_trust_ca(paths, &ca_snapshot);
+            Ok(())
+        });
+        let db_h = scope.spawn(|| -> Option<(Result<()>, AppState)> {
+            let engine = engine.as_deref()?;
+            let mut st = db_snapshot?;
+            let res = start_database(paths, &mut st, engine);
+            if res.is_ok() {
+                let _ = configure_phpmyadmin(paths, &st);
+            }
+            Some((res, st))
+        });
+        let php_h = scope.spawn(|| {
+            let _ = start_php_many(paths, &mut php_snapshot, &php_versions);
+            php_snapshot.runtime.php_pids.clone()
+        });
+
+        match start_dns(paths, state, state.stack.dns_port) {
+            Ok(()) => {}
+            Err(e) => {
+                crate::applog::warn(
+                    "dns",
+                    &format!("{e} — continuing with hosts-file resolution only"),
+                );
+                state.runtime.dns_pid = None;
+            }
+        }
+        (
+            ca_h.join(),
+            db_h.join(),
+            php_h.join().ok(),
+        )
+    });
+    if let Some(pids) = php_pids {
+        state.runtime.php_pids = pids;
+    }
+    let mut db_result: Result<()> = Ok(());
+    if let Ok(Some((res, st))) = db_res {
+        state.runtime.database_pid = st.runtime.database_pid;
+        state.runtime.database_engine = st.runtime.database_engine;
+        state.active_database = st.active_database;
+        db_result = res;
+    }
+    if let Err(e) = db_result {
+        state.runtime.last_start_error = Some(e.to_string());
+        save_state(&paths.state_file, state)?;
+        return Err(e);
+    }
+    match ca_res {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
             state.runtime.last_start_error = Some(e.to_string());
             save_state(&paths.state_file, state)?;
             return Err(e);
         }
-        let _ = configure_phpmyadmin(paths, state);
+        Err(_) => {
+            return Err(crate::error::DevStackError::Message(
+                "certificate setup thread panicked".into(),
+            ))
+        }
     }
 
-    // WP siteurl/home rewrite needs a live DB — run after start_database.
-    if remap.changed {
-        rewrite_all_wp_urls_for_port_remap(paths, state, before)?;
-    }
-    // Catch install/toggle mismatches even when ports did not remap this start.
-    let _ = crate::services::wp_url::repair_mismatched_wp_urls(paths, state);
-
-    stack_phase(progress, "php", "Preparing PHP…");
-    if !state.installed.contains_key("php") {
-        let _ = register_system_php(state, paths);
-    }
-
-    // Both front-ends can run together on different ports (see docs/apache.md).
-    // Start Nginx then Apache sequentially but without blocking the UI event
-    // loop longer than necessary — callers already hold the stack mutex.
-    // Never auto-open a browser from Start stack — the Sites UI owns that.
-    stack_phase(progress, "nginx", "Starting Nginx…");
-    let nginx_err = start_nginx(paths, state).err();
-    stack_phase(progress, "apache", "Starting Apache…");
-    let apache_err = start_apache(paths, state).err();
+    // WP siteurl/home rewrite needs a live DB (now up) but not the web servers, so
+    // overlap it with Nginx/Apache startup using a read-only snapshot.
+    let wp_snapshot = state.clone();
+    let remap_changed = remap.changed;
+    let (nginx_err, apache_err) = std::thread::scope(|scope| {
+        let wp_h = scope.spawn(|| {
+            if remap_changed {
+                let _ = rewrite_all_wp_urls_for_port_remap(paths, &wp_snapshot, before);
+            }
+            // Catch install/toggle mismatches even when ports did not remap this start.
+            let _ = crate::services::wp_url::repair_mismatched_wp_urls(paths, &wp_snapshot);
+        });
+        // Both front-ends can run together on different ports (see docs/apache.md).
+        // PHP is already up (start_php_many above) so these skip straight to spawn.
+        // Never auto-open a browser from Start stack — the Sites UI owns that.
+        stack_phase(progress, "nginx", "Starting Nginx…");
+        let nginx_err = start_nginx(paths, state).err();
+        stack_phase(progress, "apache", "Starting Apache…");
+        let apache_err = start_apache(paths, state).err();
+        let _ = wp_h.join();
+        (nginx_err, apache_err)
+    });
     refresh_site_process_status(state);
     if let Some(ref e) = nginx_err.as_ref().or(apache_err.as_ref()) {
         state.runtime.last_start_error = Some(e.to_string());
@@ -294,7 +349,7 @@ pub fn apply_site_environment_change(
 
     if site.https {
         // Cached after first mint — rcgen in-process, no openssl/UAC.
-        crate::services::tls::ensure_site_cert(paths, &site.domain)?;
+        crate::services::tls::ensure_site_cert_for(paths, &site)?;
     }
 
     // Hosts only when the domain is missing; never re-prompt CA trust on toggles.

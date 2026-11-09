@@ -12,11 +12,10 @@ use std::path::{Path, PathBuf};
 use crate::config::{find_installed, latest_installed, AppState, Paths, SiteRecord};
 use crate::error::{DevStackError, Result};
 use crate::services::nginx::expand_home;
-use crate::services::php_runtime::{nginx_fastcgi_pass, resolve_php, start_php, PhpRuntime};
+use crate::services::php_runtime::{nginx_fastcgi_pass, resolve_php, start_php_many, PhpRuntime};
 use crate::services::process::{
     find_bin, is_running, read_pid, spawn_logged_attached, stop_pid, write_pid,
 };
-use crate::services::tls::ensure_site_cert;
 
 pub fn site_uses_apache(site: &SiteRecord) -> bool {
     matches!(
@@ -343,12 +342,13 @@ fn write_vhost(
         format!(
             r#"<VirtualHost 127.0.0.1:{http_port}>
   ServerName {domain}
-  Redirect permanent / {dest}/
+{aliases}  Redirect permanent / {dest}/
   ErrorLog "{err}"
   CustomLog "{access}" common
 </VirtualHost>
 "#,
             domain = site.domain,
+            aliases = crate::services::vhost_ext::apache_server_alias(site),
             dest = dest.trim_end_matches('/'),
             err = crate::paths_util::conf_path(
                 &paths.logs.join(format!("apache/{}-error.log", site.id)),
@@ -361,7 +361,7 @@ fn write_vhost(
         format!(
             r#"<VirtualHost 127.0.0.1:{http_port}>
   ServerName {domain}
-  DocumentRoot "{root}"
+{aliases}  DocumentRoot "{root}"
   <Directory "{root}">
     Options FollowSymLinks
     AllowOverride All
@@ -375,6 +375,7 @@ fn write_vhost(
 </VirtualHost>
 "#,
             domain = site.domain,
+            aliases = crate::services::vhost_ext::apache_server_alias(site),
             root = root,
             php = php,
             err = crate::paths_util::conf_path(
@@ -387,12 +388,12 @@ fn write_vhost(
     };
 
     if site.https {
-        let certs = ensure_site_cert(paths, &site.domain)?;
+        let certs = crate::services::tls::ensure_site_cert_for(paths, site)?;
         conf.push_str(&format!(
             r#"
 <VirtualHost 127.0.0.1:{https_port}>
   ServerName {domain}
-  DocumentRoot "{root}"
+{aliases}  DocumentRoot "{root}"
   SSLEngine on
   SSLCertificateFile "{cert}"
   SSLCertificateKeyFile "{key}"
@@ -409,6 +410,7 @@ fn write_vhost(
 </VirtualHost>
 "#,
             domain = site.domain,
+            aliases = crate::services::vhost_ext::apache_server_alias(site),
             root = root,
             cert = crate::paths_util::conf_path(&certs.site_cert),
             key = crate::paths_util::conf_path(&certs.site_key),
@@ -474,16 +476,7 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
     if let Some(old) = read_pid(&paths.pid_file("apache")) {
         let _ = stop_pid(old);
         state.runtime.apache_pid = None;
-        for _ in 0..20 {
-            let http_free =
-                std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
-            let https_free =
-                std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_https_port)).is_ok();
-            if http_free && https_free {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        wait_apache_ports_free(state.stack.apache_http_port, state.stack.apache_https_port);
     }
     crate::services::ports::ensure_ports_free(&state.stack, "apache")?;
 
@@ -495,8 +488,9 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
 
     let mut runtimes = Vec::new();
     if opts.start_php_runtimes {
-        for ver in collect_php_versions(state) {
-            match start_php(paths, state, &ver) {
+        let versions = collect_php_versions(state);
+        for (ver, res) in start_php_many(paths, state, &versions) {
+            match res {
                 Ok(rt) => runtimes.push((ver, rt)),
                 Err(e) => {
                     eprintln!("apache: skip php {ver}: {e}");
@@ -560,30 +554,30 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
     // while httpd is already listening, which false-negatived readiness.
     // Keep the poll budget tight so site setting toggles stay under ~2s.
     let https_port = state.stack.apache_https_port;
-    let mut ready = false;
-    for _ in 0..40 {
-        if !is_running(pid) {
-            let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
-            let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
-            return Err(DevStackError::Message(format!(
-                "Apache exited immediately after start.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
-            )));
-        }
-        if std::net::TcpStream::connect(("127.0.0.1", https_port)).is_ok() {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    if !ready {
-        // Warm-up retry: Windows mpm_winnt can take an extra beat after accept().
-        for _ in 0..20 {
-            if std::net::TcpStream::connect(("127.0.0.1", https_port)).is_ok() {
-                ready = true;
-                break;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], https_port));
+    let mut died = false;
+    // 5ms → 25ms backoff; 3s ceiling covers Windows mpm_winnt's extra warm-up beat.
+    let ready = crate::services::perf::poll_backoff(
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(25),
+        std::time::Duration::from_secs(3),
+        || {
+            if !is_running(pid) {
+                died = true;
+                return Some(());
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100))
+                .is_ok()
+                .then_some(())
+        },
+    )
+    .is_some();
+    if died {
+        let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
+        let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "Apache exited immediately after start.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
+        )));
     }
     if !ready {
         let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
@@ -592,6 +586,7 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
             "Apache started (pid {pid}) but port {https_port} never became ready.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
         )));
     }
+    record_apache_fingerprint(paths, pid);
 
     state.runtime.apache_pid = Some(pid);
     for site in state.sites.iter_mut().filter(|s| site_uses_apache(s)) {
@@ -599,6 +594,79 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
     }
     // Clear stale error/warning once the listener is confirmed ready.
     Ok(())
+}
+
+/// Poll (2ms → 15ms, ≤1s) until both Apache listen ports can be bound again.
+fn wait_apache_ports_free(http_port: u16, https_port: u16) {
+    let _ = crate::services::perf::poll_backoff(
+        std::time::Duration::from_millis(2),
+        std::time::Duration::from_millis(15),
+        std::time::Duration::from_secs(1),
+        || {
+            let http_free = std::net::TcpListener::bind(("127.0.0.1", http_port)).is_ok();
+            let https_free = std::net::TcpListener::bind(("127.0.0.1", https_port)).is_ok();
+            (http_free && https_free).then_some(())
+        },
+    );
+}
+
+fn apache_fingerprints() -> &'static std::sync::Mutex<std::collections::HashMap<u32, u64>> {
+    static FP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u32, u64>>> =
+        std::sync::OnceLock::new();
+    FP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Hash of httpd.conf + every vhost conf + (len, mtime) of each referenced cert/key.
+/// Apache only reads certs at start, so a changed cert file must change the hash.
+fn apache_config_fingerprint(paths: &Paths) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut files = vec![paths.apache_conf_dir().join("httpd.conf")];
+    if let Ok(rd) = fs::read_dir(paths.apache_sites_dir()) {
+        let mut sites: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        sites.sort();
+        files.extend(sites);
+    }
+    for f in files {
+        let body = fs::read_to_string(&f).unwrap_or_default();
+        f.hash(&mut hasher);
+        body.hash(&mut hasher);
+        for line in body.lines() {
+            let t = line.trim();
+            if let Some(rest) = t
+                .strip_prefix("SSLCertificateFile")
+                .or_else(|| t.strip_prefix("SSLCertificateKeyFile"))
+            {
+                let p = rest.trim().trim_matches('"');
+                if let Ok(meta) = fs::metadata(p) {
+                    meta.len().hash(&mut hasher);
+                    if let Ok(m) = meta.modified() {
+                        m.hash(&mut hasher);
+                    }
+                }
+            }
+        }
+    }
+    hasher.finish()
+}
+
+fn record_apache_fingerprint(paths: &Paths, pid: u32) {
+    let fp = apache_config_fingerprint(paths);
+    if let Ok(mut g) = apache_fingerprints().lock() {
+        g.clear();
+        g.insert(pid, fp);
+    }
+}
+
+/// True when `pid` was started with exactly the config currently on disk and
+/// is still accepting connections.
+fn apache_fingerprint_matches(paths: &Paths, pid: u32) -> bool {
+    let current = apache_config_fingerprint(paths);
+    apache_fingerprints()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&pid).copied())
+        == Some(current)
 }
 
 pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
@@ -613,27 +681,20 @@ pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
     let bin = apache_bin(&root)?;
     if let Some(pid) = state.runtime.apache_pid.filter(|p| is_running(*p)) {
         // Windows Lounge builds started with -D FOREGROUND are not a Windows service;
-        // `-k graceful` looks for "Apache2.4" and no-ops. Restart the process instead.
+        // `-k graceful` looks for "Apache2.4" and no-ops, so a real config change
+        // needs stop+start. We only pay that when the rendered config (httpd.conf,
+        // every vhost, and the cert files they reference) differs from what the
+        // running process was started with; otherwise the reload is a no-op.
         if cfg!(windows) {
+            if apache_fingerprint_matches(paths, pid) {
+                return Ok(());
+            }
             let _ = stop_pid(pid);
             if let Some(file_pid) = read_pid(&paths.pid_file("apache")) {
                 let _ = stop_pid(file_pid);
             }
             state.runtime.apache_pid = None;
-            // Brief poll — mpm_winnt children usually release ports within ~200ms.
-            for _ in 0..20 {
-                let http_free =
-                    std::net::TcpListener::bind(("127.0.0.1", state.stack.apache_http_port)).is_ok();
-                let https_free = std::net::TcpListener::bind((
-                    "127.0.0.1",
-                    state.stack.apache_https_port,
-                ))
-                .is_ok();
-                if http_free && https_free {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(15));
-            }
+            wait_apache_ports_free(state.stack.apache_http_port, state.stack.apache_https_port);
             // Skip configtest + PHP re-start — conf just rendered, PHP-CGI already up.
             return start_apache_inner(paths, state, StartApacheOpts {
                 run_configtest: false,

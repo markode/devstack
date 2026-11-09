@@ -91,11 +91,8 @@ pub fn sync_parked_sites(_paths: &Paths, state: &mut AppState) -> Result<usize> 
         }
         let slug = slug_for_folder(&name);
         let id = unique_id(&taken_ids, &slug);
-        let domain = if id == slug {
-            domain_for_folder(&name)
-        } else {
-            format!("{id}.test")
-        };
+        let tld = state.developer.default_tld.clone();
+        let domain = format!("{id}.{tld}");
         if taken_domains.contains(&domain) {
             continue;
         }
@@ -117,6 +114,9 @@ pub fn sync_parked_sites(_paths: &Paths, state: &mut AppState) -> Result<usize> 
             is_template: false,
             parked: true,
             xdebug: false,
+            tld,
+            aliases: Vec::new(),
+            wildcard: false,
         };
         let details = detect_site(&site);
         site.framework = Some(details.framework);
@@ -236,6 +236,9 @@ mod tests {
             is_template: false,
             parked: false,
             xdebug: false,
+            tld: crate::config::default_tld(),
+            aliases: Vec::new(),
+            wildcard: false,
         });
 
         let added = sync_parked_sites(&paths, &mut state).unwrap();

@@ -64,7 +64,11 @@ pub fn read_pid(path: &Path) -> Option<u32> {
 pub fn is_running(pid: u32) -> bool {
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
-    sys.process(Pid::from_u32(pid)).is_some()
+    // Children we `mem::forget` are never reaped, so an exited server lingers as a
+    // zombie. Treat zombies as stopped so stop/readiness paths don't wait on them.
+    sys.process(Pid::from_u32(pid))
+        .map(|p| !matches!(p.status(), sysinfo::ProcessStatus::Zombie))
+        .unwrap_or(false)
 }
 
 pub fn stop_pid(pid: u32) -> Result<()> {
@@ -76,8 +80,15 @@ pub fn stop_pid(pid: u32) -> Result<()> {
         let _ = command("kill")
             .args(["-TERM", &pid.to_string()])
             .status();
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        if is_running(pid) {
+        // Poll instead of a fixed 400ms sleep — well-behaved servers exit in <50ms.
+        let exited = crate::services::perf::poll_backoff(
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(40),
+            std::time::Duration::from_millis(400),
+            || (!is_running(pid)).then_some(()),
+        )
+        .is_some();
+        if !exited {
             let _ = command("kill")
                 .args(["-KILL", &pid.to_string()])
                 .status();

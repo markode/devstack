@@ -120,7 +120,7 @@ pub fn merge_hosts_contents(existing: &str, domains: &[String]) -> String {
 }
 
 pub fn site_domains(sites: &[SiteRecord]) -> Vec<String> {
-    let mut d: Vec<_> = sites.iter().map(|s| s.domain.clone()).collect();
+    let mut d: Vec<_> = sites.iter().flat_map(|s| s.hostnames()).collect();
     d.push("phpmyadmin.test".into());
     d.push("mailpit.test".into());
     d.sort();
@@ -927,6 +927,41 @@ mod tests {
     }
 
     #[test]
+    fn hosts_block_includes_site_aliases() {
+        let mut site = SiteRecord {
+            id: "shop".into(),
+            name: "shop".into(),
+            path: PathBuf::from("/tmp/shop"),
+            domain: "shop.test".into(),
+            php_version: None,
+            node_version: None,
+            https: true,
+            web_server: None,
+            framework: None,
+            database_engine: None,
+            database_name: None,
+            database_user: None,
+            database_password: None,
+            status: "stopped".into(),
+            is_template: false,
+            parked: false,
+            xdebug: false,
+            tld: "test".into(),
+            aliases: vec!["store.test".into(), "Shop.local".into()],
+            wildcard: true,
+        };
+        let domains = site_domains(&[site.clone()]);
+        let block = build_hosts_block(&domains);
+        assert!(block.contains("127.0.0.1 shop.test"));
+        assert!(block.contains("127.0.0.1 store.test"));
+        assert!(block.contains("::1 shop.local"));
+        assert!(!block.contains('*'), "hosts files cannot hold wildcards");
+        assert!(hosts_block_complete(&block, &domains));
+        site.aliases.clear();
+        assert!(!site_domains(&[site]).contains(&"store.test".to_string()));
+    }
+
+    #[test]
     fn site_domains_includes_helpers() {
         let sites = vec![SiteRecord {
             id: "a".into(),
@@ -946,6 +981,9 @@ mod tests {
             is_template: false,
             parked: false,
             xdebug: false,
+            tld: crate::config::default_tld(),
+            aliases: Vec::new(),
+            wildcard: false,
         }];
         let d = site_domains(&sites);
         assert!(d.contains(&"a.test".into()));

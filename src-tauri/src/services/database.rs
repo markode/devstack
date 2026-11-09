@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::Duration;
 
 use crate::config::{find_installed, latest_installed, AppState, Paths};
@@ -250,6 +249,10 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
     install_db_if_needed(&root, &datadir, &conf)?;
 
     let mysqld = server_bin(&root)?;
+    if !cfg!(windows) {
+        // Stale socket from a killed server would satisfy the readiness probe early.
+        let _ = fs::remove_file(socket_path(paths, engine));
+    }
     let log_out = paths.logs.join(format!("{engine}.out"));
     let log_err = paths.logs.join(format!("{engine}.err"));
     let defaults = format!("--defaults-file={}", conf.display());
@@ -273,45 +276,66 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
     state.runtime.database_engine = Some(engine.into());
     state.active_database = Some(engine.into());
 
-    // Wait for accept (InnoDB init can take >10s). Windows uses TCP; Unix prefers socket.
+    // Wait for accept. Cold InnoDB init can take >10s so the ceiling stays 45s, but
+    // the poll starts at 5ms and backs off to 50ms so warm restarts return fast.
+    // A cheap TCP/socket probe gates the (slower) client `SELECT 1` confirmation.
     let client = client_bin(&root).ok();
     let connect = mysql_root_args(paths, state, engine);
-    for _ in 0..90 {
-        if !is_running(pid) {
-            let err = fs::read_to_string(&log_err).unwrap_or_default();
-            let out = fs::read_to_string(&log_out).unwrap_or_default();
-            return Err(DevStackError::Message(format!(
-                "{engine} exited during startup.\nstderr:\n{err}\nstdout:\n{out}"
-            )));
-        }
-        if let Some(cli) = &client {
-            let mut args = connect.clone();
-            args.push("-e".into());
-            args.push("SELECT 1".into());
-            let ok = crate::services::process::command(cli)
-                .args(&args)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if ok {
-                return Ok(());
+    let sock = socket_path(paths, engine);
+    let mut died = false;
+    let ready = crate::services::perf::poll_backoff(
+        Duration::from_millis(5),
+        Duration::from_millis(50),
+        Duration::from_secs(45),
+        || {
+            if !is_running(pid) {
+                died = true;
+                return Some(());
             }
-        } else if !cfg!(windows) {
-            let sock = paths.databases.join(format!("{engine}.sock"));
-            if sock.exists() {
-                thread::sleep(Duration::from_millis(300));
-                return Ok(());
+            if !db_accepting(&sock, port) {
+                return None;
             }
-        } else if !crate::services::ports::port_is_free(port) {
-            thread::sleep(Duration::from_millis(500));
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(500));
+            match &client {
+                Some(cli) => {
+                    let mut args = connect.clone();
+                    args.push("-e".into());
+                    args.push("SELECT 1".into());
+                    crate::services::process::command(cli)
+                        .args(&args)
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                        .then_some(())
+                }
+                None => Some(()),
+            }
+        },
+    )
+    .is_some();
+    if died {
+        let err = fs::read_to_string(&log_err).unwrap_or_default();
+        let out = fs::read_to_string(&log_out).unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "{engine} exited during startup.\nstderr:\n{err}\nstdout:\n{out}"
+        )));
+    }
+    if ready {
+        return Ok(());
     }
     let err = fs::read_to_string(&log_err).unwrap_or_default();
     Err(DevStackError::Message(format!(
         "{engine} started but never became ready (no accept on port {port}).\nstderr:\n{err}"
     )))
+}
+
+/// Cheap readiness probe: unix socket file present or TCP port accepting.
+/// mysqld/mariadbd only create both once they are ready for connections.
+fn db_accepting(sock: &Path, port: u16) -> bool {
+    if !cfg!(windows) && sock.exists() {
+        return true;
+    }
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
 }
 
 pub fn stop_database(paths: &Paths, state: &mut AppState) -> Result<()> {
@@ -331,12 +355,12 @@ pub fn stop_database(paths: &Paths, state: &mut AppState) -> Result<()> {
     }
     if let Some(pid) = state.runtime.database_pid.take() {
         // Give mysqld a moment after mysqladmin; force only if still alive.
-        for _ in 0..20 {
-            if !is_running(pid) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
+        let _ = crate::services::perf::poll_backoff(
+            Duration::from_millis(5),
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+            || (!is_running(pid)).then_some(()),
+        );
         if is_running(pid) {
             let _ = stop_pid(pid);
         }

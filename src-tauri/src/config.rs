@@ -93,6 +93,8 @@ pub struct DeveloperSettings {
     pub show_logs_tab: bool,
     /// When true, scrub passwords/tokens from log lines (default OFF for development).
     pub redact_secrets: bool,
+    /// Default TLD for new sites (`test`). `.dev` forces HTTPS, `.local` uses mDNS.
+    pub default_tld: String,
 }
 
 impl Default for DeveloperSettings {
@@ -100,6 +102,7 @@ impl Default for DeveloperSettings {
         Self {
             show_logs_tab: true,
             redact_secrets: false,
+            default_tld: default_tld(),
         }
     }
 }
@@ -164,6 +167,18 @@ pub struct StackPreferences {
     /// Local `*.test` DNS daemon UDP port.
     #[serde(default = "default_dns_port")]
     pub dns_port: u16,
+    /// Memcached TCP port.
+    pub memcached_port: u16,
+    /// Meilisearch HTTP port.
+    pub meilisearch_port: u16,
+    /// Typesense HTTP port.
+    pub typesense_port: u16,
+    /// MinIO S3 API / console ports.
+    pub minio_port: u16,
+    pub minio_console_port: u16,
+    /// Laravel Reverb websocket port + the site it serves.
+    pub reverb_port: u16,
+    pub reverb_site_id: Option<String>,
     /// When true, prefer non-default ports so DevStack can sit beside WAMP/MAMP.
     pub coexistence_mode: bool,
 }
@@ -203,6 +218,13 @@ impl Default for StackPreferences {
             mailpit_smtp_port: 1025,
             mailpit_ui_port: 8025,
             dns_port: 5353,
+            memcached_port: 11211,
+            meilisearch_port: 7700,
+            typesense_port: 8108,
+            minio_port: 9100,
+            minio_console_port: 9101,
+            reverb_port: 8085,
+            reverb_site_id: None,
             coexistence_mode: false,
         }
     }
@@ -222,6 +244,14 @@ pub struct RuntimeState {
     pub postgresql_pid: Option<u32>,
     pub redis_pid: Option<u32>,
     pub mailpit_pid: Option<u32>,
+    pub memcached_pid: Option<u32>,
+    pub meilisearch_pid: Option<u32>,
+    pub typesense_pid: Option<u32>,
+    pub minio_pid: Option<u32>,
+    pub reverb_pid: Option<u32>,
+    /// Active LAN mobile-preview binding (nginx server block on a pool port).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile_preview: Option<MobilePreviewState>,
     /// Ephemeral banner after auto port remap (not required across restarts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_notice: Vec<String>,
@@ -241,6 +271,18 @@ pub struct RuntimeState {
     pub share_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_site_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobilePreviewState {
+    pub site_id: String,
+    pub lan_ip: String,
+    pub port: u16,
+    pub url: String,
+    /// WordPress siteurl before the preview rewrite (restored on stop).
+    #[serde(default)]
+    pub original_wp_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,17 +336,66 @@ pub struct SiteRecord {
     /// Xdebug requested for this site's PHP version.
     #[serde(default)]
     pub xdebug: bool,
+    /// Top-level domain for this site (`test` by default).
+    #[serde(default = "default_tld")]
+    pub tld: String,
+    /// Extra hostnames served by this site (e.g. `shop.test`).
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Also serve `*.{domain}` (cert SAN + vhost wildcard; DNS daemon resolves it).
+    #[serde(default)]
+    pub wildcard: bool,
+}
+
+pub fn default_tld() -> String {
+    "test".into()
 }
 
 impl SiteRecord {
     pub fn ensure_domain(&mut self) {
         if self.domain.is_empty() {
             let slug = slugify(&self.name);
-            self.domain = format!("{slug}.test");
+            let tld = if self.tld.trim().is_empty() {
+                default_tld()
+            } else {
+                self.tld.trim().trim_start_matches('.').to_ascii_lowercase()
+            };
+            self.domain = format!("{slug}.{tld}");
+        }
+        if self.tld.trim().is_empty() {
+            self.tld = default_tld();
         }
         if self.status.is_empty() {
             self.status = "stopped".into();
         }
+    }
+}
+
+impl SiteRecord {
+    /// Primary domain + aliases (concrete names, no wildcards).
+    pub fn hostnames(&self) -> Vec<String> {
+        let mut out = vec![self.domain.clone()];
+        for a in &self.aliases {
+            let a = a.trim().to_ascii_lowercase();
+            if !a.is_empty() && !out.contains(&a) {
+                out.push(a);
+            }
+        }
+        out
+    }
+
+    /// Names for nginx `server_name` / TLS SANs (includes `*.host` when `wildcard`).
+    pub fn server_names(&self) -> Vec<String> {
+        let mut out = self.hostnames();
+        if self.wildcard {
+            for h in self.hostnames() {
+                let w = format!("*.{h}");
+                if !out.contains(&w) {
+                    out.push(w);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -537,6 +628,9 @@ header('Content-Type: text/html; charset=utf-8');
         is_template: false,
         parked: false,
         xdebug: false,
+        tld: default_tld(),
+        aliases: Vec::new(),
+        wildcard: false,
     };
     site.ensure_domain();
     state.sites.push(site);

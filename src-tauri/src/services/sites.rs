@@ -579,7 +579,7 @@ pub fn create_site(
         id: id.clone(),
         name: name.to_string(),
         path,
-        domain: format!("{id}.test"),
+        domain: format!("{id}.{}", state.developer.default_tld),
         php_version,
         node_version: None,
         https: true,
@@ -593,6 +593,9 @@ pub fn create_site(
         is_template: false,
         parked: false,
         xdebug: false,
+        tld: state.developer.default_tld.clone(),
+        aliases: Vec::new(),
+        wildcard: false,
     };
     let details = detect_site(&site);
     site.framework = Some(details.framework);

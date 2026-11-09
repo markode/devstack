@@ -312,6 +312,9 @@ mod tests {
             is_template: false,
             parked: false,
             xdebug: false,
+            tld: crate::config::default_tld(),
+            aliases: Vec::new(),
+            wildcard: false,
         };
         let args = tunnel_args(&site, &state);
         assert!(args.contains(&"http://127.0.0.1:8080".to_string()));

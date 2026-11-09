@@ -29,12 +29,45 @@ pub fn ensure_root_ca(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
 }
 
 pub fn ensure_site_cert(paths: &Paths, domain: &str) -> Result<CertPaths> {
+    ensure_site_cert_with_sans(paths, domain, &[])
+}
+
+/// Certificate covering the site's domain, aliases and (optionally) `*.host` wildcards.
+pub fn ensure_site_cert_for(paths: &Paths, site: &crate::config::SiteRecord) -> Result<CertPaths> {
+    let extra: Vec<String> = site
+        .server_names()
+        .into_iter()
+        .filter(|n| *n != site.domain)
+        .collect();
+    ensure_site_cert_with_sans(paths, &site.domain, &extra)
+}
+
+/// Stable fingerprint of the extra SAN list (sorted, de-duplicated, lowercase).
+pub fn sans_fingerprint(extra: &[String]) -> String {
+    let mut v: Vec<String> = extra
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    v.sort();
+    v.dedup();
+    v.join(",")
+}
+
+pub fn ensure_site_cert_with_sans(
+    paths: &Paths,
+    domain: &str,
+    extra_sans: &[String],
+) -> Result<CertPaths> {
     let (ca_cert, ca_key) = ensure_root_ca(paths)?;
     let site_dir = paths.certs.join("sites").join(domain);
     fs::create_dir_all(&site_dir)?;
     let site_cert = site_dir.join("fullchain.pem");
     let site_key = site_dir.join("privkey.pem");
-    if site_cert.exists() && site_key.exists() {
+    let sans_marker = site_dir.join("sans.txt");
+    let want = sans_fingerprint(extra_sans);
+    let have = fs::read_to_string(&sans_marker).unwrap_or_default();
+    if site_cert.exists() && site_key.exists() && have.trim() == want {
         return Ok(CertPaths {
             ca_cert,
             ca_key,
@@ -42,7 +75,8 @@ pub fn ensure_site_cert(paths: &Paths, domain: &str) -> Result<CertPaths> {
             site_key,
         });
     }
-    generate_site_rcgen(&ca_cert, &ca_key, &site_cert, &site_key, domain)?;
+    generate_site_rcgen(&ca_cert, &ca_key, &site_cert, &site_key, domain, extra_sans)?;
+    let _ = fs::write(&sans_marker, &want);
     Ok(CertPaths {
         ca_cert,
         ca_key,
@@ -121,6 +155,7 @@ fn generate_site_rcgen(
     site_cert: &Path,
     site_key: &Path,
     domain: &str,
+    extra_sans: &[String],
 ) -> Result<()> {
     use rcgen::{CertificateParams, DnType, KeyPair, SanType};
 
@@ -152,6 +187,16 @@ fn generate_site_rcgen(
                 .map_err(|e: rcgen::Error| DevStackError::Message(e.to_string()))?,
         ),
     ];
+    for extra in sans_fingerprint(extra_sans).split(',').filter(|s| !s.is_empty()) {
+        if extra == domain || extra == "localhost" {
+            continue;
+        }
+        params.subject_alt_names.push(SanType::DnsName(
+            extra
+                .try_into()
+                .map_err(|e: rcgen::Error| DevStackError::Message(e.to_string()))?,
+        ));
+    }
     let key = KeyPair::generate().map_err(|e| DevStackError::Message(e.to_string()))?;
     let cert = params
         .signed_by(&key, &issuer, &ca_key_pair)
@@ -188,5 +233,32 @@ mod tests {
         mark_ca_trusted(&paths).unwrap();
         assert!(is_ca_trust_cached(&paths));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cert_regenerates_when_aliases_change() {
+        let dir = std::env::temp_dir().join(format!("devstack-tls-alias-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        let a = ensure_site_cert_with_sans(&paths, "app.test", &[]).unwrap();
+        let first = fs::read_to_string(&a.site_cert).unwrap();
+        let same = ensure_site_cert_with_sans(&paths, "app.test", &[]).unwrap();
+        assert_eq!(first, fs::read_to_string(&same.site_cert).unwrap());
+        let extra = vec!["shop.test".to_string(), "*.app.test".to_string()];
+        let b = ensure_site_cert_with_sans(&paths, "app.test", &extra).unwrap();
+        assert_ne!(first, fs::read_to_string(&b.site_cert).unwrap());
+        assert_eq!(
+            fs::read_to_string(dir.join("certs/sites/app.test/sans.txt")).unwrap(),
+            "*.app.test,shop.test"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sans_fingerprint_is_order_insensitive() {
+        assert_eq!(
+            sans_fingerprint(&["b.test".into(), "A.test".into(), "b.test".into()]),
+            "a.test,b.test"
+        );
     }
 }

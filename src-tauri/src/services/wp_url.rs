@@ -342,6 +342,9 @@ mod tests {
             is_template: false,
             parked: false,
             xdebug: false,
+            tld: crate::config::default_tld(),
+            aliases: Vec::new(),
+            wildcard: false,
         };
         assert_eq!(
             canonical_site_url(&site, &state),
