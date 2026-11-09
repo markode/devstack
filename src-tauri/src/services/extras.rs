@@ -239,6 +239,9 @@ pub fn start_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Ma
         _ => false,
     };
     if !our_pid_alive {
+        if extras_v030::is_new_service(id) {
+            extras_v030::auto_remap_if_busy(state, id);
+        }
         crate::services::ports::ensure_ports_free(&state.stack, id)?;
     }
     match id {
