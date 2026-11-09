@@ -1,48 +1,81 @@
-# DevStack v0.3.0 — test report (skeleton)
+# DevStack v0.3.0 — test report
 
+Date: 2026-11-09  
 Branch: `cursor/release-0-3-0-b7b6`  
-Principles kept: isolation-first busy-port fallback (never touch foreign listeners; never auto-grab 80/443); **no stack autostart** (new services only start from the UI / `start_managed_service`).
+Principles kept: isolation-first busy-port fallback (never touch foreign listeners; never auto-grab 80/443); **no stack autostart**.
 
 ## Features covered
 
 | # | Feature | Backend | UI | Automated coverage |
 |---|---------|---------|----|--------------------|
-| 1 | One-click services (Redis listed, Memcached, Meilisearch, Typesense, MinIO, Reverb) | `packages/service_bins.rs`, `services/extras_v030.rs`, `extras.rs`, `ports.rs` | `ServicesPage` (new blocks, MinIO API+console ports, Reverb site picker) | Unit: default ports, candidate ports, `service_ports` == `extras` ports, busy-port remap, spawn plans; E2E `run_v030_features_smoke` starts/stops Meilisearch |
-| 2 | Per-site php.ini | `site_php_ini.rs` (`sites/{id}/php.ini` + `php-merged.ini`, vhost `PHP_VALUE`, `.user.ini` on php-cgi) | `SitePhpIniPanel` (sliders + advanced keys) | Unit: validation, merge, sliders, set/get; E2E live probe through nginx → php-fpm |
-| 3 | Site templates | `site_templates.rs` (laravel, symfony, statamic, drupal, joomla, woocommerce) | `TemplatePickerModal`, Sites toolbar + empty state | Unit: kind→commands, scaffold, offline create (`DEVSTACK_SKIP_TEMPLATE_NETWORK=1`); E2E scaffold + DB creation |
-| 4 | Hosting sync | `hosting_sync.rs` (OpenSSH + rsync, `keyring`) | `HostingPage` | Unit: exclude matching, dry-run plan serialization, rsync args, keychain-only secrets |
-| 5 | Custom TLDs + aliases | `tld.rs`, `vhost_ext.rs`, `tls.rs` (SAN fingerprint), `dns.rs` | `SiteDomainPanel`, General → default TLD | Unit: hosts block includes aliases, cert SAN regen, vhost server names; E2E hosts/cert/vhost |
-| 6 | Per-site logs + Laravel queue | `site_logs.rs` | `SiteLogsPanel` (+ `SiteQueuePanel`) | Unit: parsers, filters, cursor poll/rotation, queue/Horizon |
-| 7 | Mobile preview | `mobile_preview.rs` (nginx LAN server block, QR) | `MobilePreviewModal`, tile + detail action | Unit: URL builder, conf, QR, port pool; E2E live bind (soft-skip without LAN) |
-| 8 | Perf dashboard | `metrics.rs` (sysinfo, slow log, SPX) | `PerformancePage` | Unit: snapshot, slow-log parser, SPX block; E2E snapshot non-empty |
-| 9 | Config export/import | `config_transfer.rs` | General page buttons | Unit: archive roundtrip + meta + traversal guard; E2E roundtrip into scratch profile |
+| 1 | One-click services (Redis, Memcached, Meilisearch, Typesense, MinIO, Reverb) | `packages/service_bins.rs`, `extras_v030.rs`, `ports.rs` | `ServicesPage` | Unit ports/remap; E2E Meilisearch start/stop |
+| 2 | Per-site php.ini + sliders | `site_php_ini.rs` | `SitePhpIniPanel` | Unit merge/validate; E2E live probe |
+| 3 | Site templates (Laravel/Symfony/Statamic/Drupal/Joomla/Woo) | `site_templates.rs` | `TemplatePickerModal` | Unit scaffold; E2E offline scaffold + DB |
+| 4 | Hosting sync SFTP/SSH | `hosting_sync.rs` + keyring | `HostingPage` | Unit excludes/plan/rsync args |
+| 5 | Custom TLDs + aliases/wildcard | `tld.rs`, `vhost_ext.rs`, `tls.rs` | `SiteDomainPanel` | Unit hosts/SAN; E2E hosts/cert |
+| 6 | Per-site logs + Laravel queue | `site_logs.rs` | `SiteLogsPanel` | Unit parsers/filters/cursor |
+| 7 | Mobile preview LAN + QR | `mobile_preview.rs` | `MobilePreviewModal` | Unit URL/QR; E2E bind |
+| 8 | Perf dashboard (CPU/RAM, slow log, SPX) | `metrics.rs` | `PerformancePage` | Unit snapshot/slow-log/SPX |
+| 9 | Config export/import | `config_transfer.rs` | General page | Unit + E2E archive roundtrip |
+| P | Performance (top priority) | parallel stack, backoff polls, deferred bootstrap, AppData snapshot | instant tabs from cache | `devstack_smoke --perf` / `--e2e` gate |
 
-## Local results
-
-> Filled by the release run. Placeholders below.
+## Local results (agent VM, Linux x86_64, 2026-11-09)
 
 ```
-cargo test --lib          → _pending_
-npm test (vitest)         → _pending_
-devstack_smoke --v030     → _pending_
+cargo test --lib
+→ 148 passed; 0 failed
+
+npm test (vitest)
+→ 15 files / 60 tests passed
+
+npx tsc --noEmit
+→ clean
+
+devstack_smoke --perf  (DEVSTACK_DATA_DIR=/tmp/perfwork/data, release binary)
+→ SMOKE PASS: perf bench within budget
 ```
 
-### Timings (perf agent fills)
+### Performance — before / after (same Linux agent VM, managed MariaDB + Nginx)
 
-| Metric | Budget | Measured |
-|--------|--------|----------|
-| Warm `apply_stack` | see `docs/performance.md` | _pending_ |
-| HTTPS toggle | see `docs/performance.md` | _pending_ |
-| Per-site php.ini apply (PHP restart + nginx reload) | — | _pending_ |
-| Metrics snapshot (`get_metrics_snapshot`) | ~250 ms (two CPU samples) | _pending_ |
-| Meilisearch start → ready | — | _pending_ |
+Methodology: warm-up start+stop, then best of two warm `apply_stack` runs. Before = commit `1627563` + bench harness; after = `2373ca5` lineage. See `docs/performance.md`.
 
-## Known limitations / notes
+| Metric | Target | CI budget (unix / Win) | Before | After (measured) |
+|--------|--------|------------------------|--------|------------------|
+| Warm `apply_stack` | < 3 s | 4000 / 8000 ms | ~664–679 ms | **260 ms** (warm_runs=[260, 354]) |
+| Cold `apply_stack` (post warm-up stop) | — | — | ~710–1170 ms | **710 ms** |
+| `stop_stack` | — | — | ~5880 ms | **1029 ms** |
+| HTTPS toggle | < 1 s | 3000 / 8000 ms | 18–55 ms | **16 ms** |
+| Web-server toggle (nginx↔apache) | < 1 s | 3000 / 8000 ms | ~425 ms | **54 ms** |
 
-- **MinIO**: upstream stopped publishing binaries (`dl.min.io` returns 410), so the package installs the community fork's release (`pgsty/minio`; binary may be named `silo`). Defaults API `:9100`, console `:9101` (9000 collides with the Windows php-cgi base port).
-- **Memcached**: no official binaries — the package adopts `memcached` found on `PATH` (`brew`/`apt`/`choco`), with an actionable error otherwise.
-- **Typesense**: macOS/Linux only (`dl.typesense.org`).
-- **Reverb**: no binary; `php artisan reverb:start --host=127.0.0.1 --port=<reverbPort>` is run in the selected Laravel site (`laravel/reverb` required). Default port `8085`.
-- **Hosting sync**: shells out to OpenSSH/rsync (no `ssh2`/libssh2 native build). Passwords live in the OS keychain (`keyring`) and reach OpenSSH via `SSH_ASKPASS`; without rsync the preview is local-only and transfers use `scp` (no excludes).
-- **Per-site php.ini** on Windows php-cgi is applied through `.user.ini` (PERDIR keys only, cached up to 5 min).
-- **Wildcard sub-domains** rely on the hosts file (no wildcards) plus the local DNS daemon; on macOS the resolver only covers `.test`.
+Machine-readable line from this run:
+
+```
+PERF_BENCH apply_stack_warm_ms=260 https_toggle_ms=16 apache_toggle_ms=54 cold_apply_stack_ms=710 stop_stack_ms=1029 warm_runs=[260, 354]
+```
+
+### Perf optimizations shipped
+
+- Bootstrap: `regenerate_all_php_ini` / hosts sync deferred off the window-create path
+- Stack start: DNS/CA then DB ∥ PHP versions in parallel; nginx/apache after; skip re-starting live PHP
+- Readiness: short backoff polls (5→50 ms) instead of fixed 500 ms sleeps
+- Stop: parallel service shutdown; short poll instead of 400 ms fixed sleeps
+- Site toggles: skip WP URL repair when unchanged; reload-only front-end
+- Frontend: `localStorage` sites/stack snapshot for instant paint; boot without probe then background refresh; `ensureSites()` avoids duplicate mount load
+- CI: `run_perf_bench` fails on regression above budgets
+
+## CI
+
+| Check | Result |
+|-------|--------|
+| Windows HTTPS smoke (`devstack_smoke --e2e`, incl. v0.3.0 + perf bench) | _filled after CI_ |
+| macOS smoke | _filled after CI_ |
+
+## Known limitations
+
+- **MinIO**: community fork (`pgsty/minio`); ports 9100/9101 (9000 collides with php-cgi base)
+- **Memcached**: adopts PATH binary (no official static builds)
+- **Typesense**: macOS/Linux only
+- **Reverb**: runs `php artisan reverb:start` in a Laravel site with `laravel/reverb`
+- **Hosting sync**: OpenSSH + rsync (no libssh2); secrets in OS keychain via `keyring`
+- **SPX**: requires `php-spx` extension when present; otherwise status explains install
+- **Wildcard DNS**: hosts file can't hold wildcards — local DNS daemon + cert SANs
