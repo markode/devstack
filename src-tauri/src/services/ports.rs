@@ -287,7 +287,10 @@ pub fn engine_db_port(stack: &StackPreferences, engine: &str) -> u16 {
 
 /// True when nothing is accepting connections on 127.0.0.1:port AND we can bind it.
 pub fn port_is_free(port: u16) -> bool {
-    if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+    // Hard timeout: Windows Hyper-V excluded port ranges can make an unbounded
+    // connect() stall for tens of seconds per candidate during remap scans.
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(50)).is_ok() {
         return false;
     }
     TcpListener::bind(("127.0.0.1", port)).is_ok()

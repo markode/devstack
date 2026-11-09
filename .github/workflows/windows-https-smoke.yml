@@ -68,6 +68,24 @@ jobs:
           npx playwright install chromium
           npm run test:e2e
 
+      - name: Exclude workspace + temp from Windows Defender (spawn cold-scan)
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # Without this, every php-cgi / nginx / httpd / smoke-bin respawn pays a
+          # ~45s Defender cold scan and warm apply_stack blows the 5s budget.
+          foreach ($p in @(
+            $env:RUNNER_TEMP,
+            $env:GITHUB_WORKSPACE,
+            (Join-Path $env:GITHUB_WORKSPACE 'src-tauri\target')
+          )) {
+            if ($p -and (Test-Path -LiteralPath $p)) {
+              Write-Host "Defender exclusion: $p"
+              Add-MpPreference -ExclusionPath $p -ErrorAction SilentlyContinue
+            }
+          }
+
       - name: Enable OpenSSH Server for hosting SFTP E2E
         timeout-minutes: 10
         shell: pwsh

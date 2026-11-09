@@ -2448,8 +2448,8 @@ async fn run_perf_bench(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Err
 
     // Warm-up: full start so certs/php.ini/DB datadir are primed. Cold figure is
     // a full stop→start (includes MariaDB). Measured warm runs use stop_web_stack
-    // so the DB stays up — that is the product "warm apply" path on Windows
-    // (re-paying InnoDB spawn is a cold start, ~50s on Defender-backed CI disks).
+    // so DB/DNS/PHP stay up — product warm path is front-end restart only
+    // (re-paying InnoDB or Defender php-cgi scans is a cold start on CI disks).
     let cold_ms = {
         let mut state = ctx.state.lock().await;
         let _ = stop_stack(&ctx.paths, &mut state);
