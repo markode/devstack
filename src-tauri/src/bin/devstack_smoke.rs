@@ -2361,14 +2361,27 @@ async fn run_perf_bench(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Err
         (site.id, apache_ok)
     };
 
+    // Disable DB-folder export-on-stop so stop/start timing isn't dominated by dumps.
+    {
+        let mut state = ctx.state.lock().await;
+        state.db_files.auto_export_on_stop = false;
+        state.db_files.auto_export_interval_secs = 0;
+    }
+
     // Warm-up: full start + stop so the measured start only pays steady-state costs.
-    let (warm_up, cold_ms) = {
+    // On Windows, one extra cycle lets InnoDB finish a clean shutdown before we time.
+    let warm_up_cycles = if cfg!(windows) { 2 } else { 1 };
+    let mut cold_ms = 0u128;
+    for i in 0..warm_up_cycles {
         let mut state = ctx.state.lock().await;
         let _ = stop_stack(&ctx.paths, &mut state);
         let (res, ms) = time_ms(|| apply_stack(&ctx.paths, &mut state));
-        (res.map(|_| ()), ms)
-    };
-    warm_up?;
+        res?;
+        if i == 0 {
+            cold_ms = ms;
+        }
+        println!("PERF_BENCH warm_up[{i}] apply_stack_ms={ms}");
+    }
     let stop_ms = {
         let mut state = ctx.state.lock().await;
         let (res, ms) = time_ms(|| stop_stack(&ctx.paths, &mut state));

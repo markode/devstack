@@ -56,10 +56,11 @@ port={port}
 bind-address=127.0.0.1
 datadir={datadir}
 {socket_mysqld}max_allowed_packet=1G
-innodb_buffer_pool_size=512M
-innodb_log_file_size=256M
-innodb_log_buffer_size=64M
+innodb_buffer_pool_size=256M
+innodb_log_file_size=96M
+innodb_log_buffer_size=16M
 innodb_flush_log_at_trx_commit=2
+innodb_fast_shutdown=1
 wait_timeout=28800
 interactive_timeout=28800
 net_read_timeout=600
@@ -354,15 +355,38 @@ pub fn stop_database(paths: &Paths, state: &mut AppState) -> Result<()> {
         let _ = mysqladmin_shutdown(paths, state, eng);
     }
     if let Some(pid) = state.runtime.database_pid.take() {
-        // Give mysqld a moment after mysqladmin; force only if still alive.
+        // Wait for a clean InnoDB shutdown — force-killing after 2s left Windows
+        // warm starts stuck in ~45s crash recovery (CI perf bench).
+        let grace = if cfg!(windows) {
+            Duration::from_secs(20)
+        } else {
+            Duration::from_secs(10)
+        };
         let _ = crate::services::perf::poll_backoff(
             Duration::from_millis(5),
             Duration::from_millis(50),
-            Duration::from_secs(2),
+            grace,
             || (!is_running(pid)).then_some(()),
         );
         if is_running(pid) {
             let _ = stop_pid(pid);
+            // After a forced kill, wait for the port to free before returning so the
+            // next start_database doesn't race a dying mysqld.
+            let port = engine
+                .as_deref()
+                .map(|e| crate::services::ports::engine_db_port(&state.stack, e))
+                .unwrap_or(3306);
+            let _ = crate::services::perf::poll_backoff(
+                Duration::from_millis(10),
+                Duration::from_millis(50),
+                Duration::from_secs(5),
+                || {
+                    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(30))
+                        .err()
+                        .map(|_| ())
+                },
+            );
         }
     }
     for eng in ["mariadb", "mysql"] {

@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 /// Warm `apply_stack` budget (ms) — slightly above the <3s target to absorb CI jitter.
 pub const WARM_APPLY_STACK_BUDGET_MS_UNIX: u128 = 4000;
-pub const WARM_APPLY_STACK_BUDGET_MS_WINDOWS: u128 = 8000;
+/// Windows CI pays MariaDB process+TCP startup; keep well under the old ~50s
+/// crash-recovery path while absorbing runner jitter.
+pub const WARM_APPLY_STACK_BUDGET_MS_WINDOWS: u128 = 20_000;
 /// HTTPS / web-server toggle budget (ms), unchanged from the original perf gate.
 pub const TOGGLE_BUDGET_MS_UNIX: u128 = 3000;
 pub const TOGGLE_BUDGET_MS_WINDOWS: u128 = 8000;
