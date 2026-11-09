@@ -3,11 +3,14 @@ export function SitesEmptyState({
   onAddFolder,
   onCreateWordPress,
   onImport,
+  onTemplates,
 }: {
   busy?: boolean;
   onAddFolder: () => void;
   onCreateWordPress: () => void;
   onImport: () => void;
+  /** Adds a "Start from a template" step (Laravel, Symfony, …) when provided. */
+  onTemplates?: () => void;
 }) {
   const steps = [
     {
@@ -26,6 +29,18 @@ export function SitesEmptyState({
       onClick: onCreateWordPress,
       primary: false,
     },
+    ...(onTemplates
+      ? [
+          {
+            key: "template",
+            title: "Start from a template",
+            body: "Laravel, Symfony, Statamic, Drupal, Joomla or WooCommerce — scaffolded with Composer / WP-CLI and a ready database.",
+            action: "Choose template",
+            onClick: onTemplates,
+            primary: false,
+          },
+        ]
+      : []),
     {
       key: "import",
       title: "Import a site",

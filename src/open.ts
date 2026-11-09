@@ -1,7 +1,7 @@
 /** Cross-platform open helpers. Prefer Rust open_path_cmd (no opener scope). */
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./api";
 
@@ -117,4 +117,40 @@ export function normalizeFsPath(path: string): string {
     return trimmed.replace(/\//g, "\\");
   }
   return trimmed;
+}
+
+/** Save-as dialog for a DevStack config archive. Returns null if cancelled. */
+export async function pickConfigSavePath(defaultName = "devstack-config.zip"): Promise<string | null> {
+  if (!isTauri()) {
+    throw new Error("Save dialog is only available in the desktop app");
+  }
+  try {
+    const selected = await saveDialog({
+      title: "Export DevStack configuration",
+      defaultPath: defaultName,
+      filters: [{ name: "DevStack config", extensions: ["zip"] }],
+    });
+    return selected ?? null;
+  } catch (e) {
+    throw new Error(`Save dialog failed: ${errMessage(e)}`);
+  }
+}
+
+/** Open dialog for a DevStack config archive. Returns null if cancelled. */
+export async function pickConfigArchive(): Promise<string | null> {
+  if (!isTauri()) {
+    throw new Error("File picker is only available in the desktop app");
+  }
+  try {
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      title: "Import DevStack configuration",
+      filters: [{ name: "DevStack config", extensions: ["zip"] }],
+    });
+    if (selected == null) return null;
+    return typeof selected === "string" ? selected : selected[0] ?? null;
+  } catch (e) {
+    throw new Error(`File picker failed: ${errMessage(e)}`);
+  }
 }
