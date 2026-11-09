@@ -1,6 +1,7 @@
 //! Runtime services: Nginx, PHP-FPM/CGI, databases, DNS, TLS, site detection.
 
 pub mod backup;
+pub mod config_transfer;
 pub mod database;
 pub mod db_files;
 pub mod dns;
@@ -9,6 +10,8 @@ pub mod extras;
 pub mod extras_v030;
 pub mod hosting_sync;
 pub mod httpd;
+pub mod mobile_preview;
+pub mod metrics;
 pub mod nginx;
 pub mod parked;
 pub mod perf;
@@ -27,6 +30,7 @@ pub mod tools;
 pub mod wordpress;
 pub mod wp_url;
 pub mod vhost_ext;
+pub mod site_logs;
 pub mod site_php_ini;
 pub mod site_templates;
 pub mod tld;

@@ -298,6 +298,8 @@ pub struct InstalledRecord {
 #[serde(default)]
 pub struct PhpExtensionSettings {
     pub xdebug: bool,
+    /// SPX profiler requested (needs the php-spx extension installed).
+    pub spx: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

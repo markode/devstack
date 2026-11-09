@@ -88,6 +88,7 @@ pub fn render_stack(
         http_port,
         https_port,
     )?;
+    crate::services::mobile_preview::write_nginx_conf_if_active(paths, state, &sites_dir);
     // Mailpit vhost only when the process is actually running — never as a
     // default_server / catch-all for other Host headers.
     let mailpit_up = state
