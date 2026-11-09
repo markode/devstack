@@ -236,6 +236,29 @@ fn wait_ready(id: &str, state: &AppState, pid: u32) -> Result<()> {
     Err(DevStackError::Message(format!("timed out waiting for port {port}")))
 }
 
+/// Busy-port fallback: when a foreign process holds one of the service's ports, move to the
+/// next free candidate (never touching the other process) and leave a notice for the UI.
+pub fn auto_remap_if_busy(state: &mut AppState, id: &str) -> Option<String> {
+    let check = crate::services::ports::check_service_ports(&state.stack, id);
+    if check.ok || check.suggested.is_empty() {
+        return None;
+    }
+    let msg = format!(
+        "{}: {} — using {}",
+        display_name(id),
+        check.message.clone().unwrap_or_else(|| "port busy".into()),
+        check
+            .suggested
+            .iter()
+            .map(|(f, p)| format!("{f}→:{p}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    crate::services::ports::apply_suggested_ports(&mut state.stack, &check.suggested).ok()?;
+    state.runtime.port_notice.push(msg.clone());
+    Some(msg)
+}
+
 pub fn start(paths: &Paths, state: &mut AppState, id: &str) -> Result<()> {
     if let Some(pid) = pid_of(state, id) {
         if is_running(pid) {
@@ -340,6 +363,21 @@ mod tests {
             assert_eq!(from_ports, ports_of(&st, id), "{id}");
             assert_eq!(crate::services::extras::default_ports(id), ports_of(&st, id), "{id}");
         }
+    }
+
+    #[test]
+    fn busy_port_auto_remaps_without_touching_holder() {
+        let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let busy = holder.local_addr().unwrap().port();
+        let mut st = AppState::default();
+        st.stack.meilisearch_port = busy;
+        let msg = auto_remap_if_busy(&mut st, "meilisearch").expect("remap");
+        assert!(msg.contains("Meilisearch"));
+        assert_ne!(st.stack.meilisearch_port, busy);
+        assert!(crate::services::ports::port_is_free(st.stack.meilisearch_port));
+        assert!(st.runtime.port_notice.iter().any(|m| m.contains("Meilisearch")));
+        assert!(auto_remap_if_busy(&mut st, "meilisearch").is_none());
+        assert!(holder.local_addr().is_ok());
     }
 
     #[test]

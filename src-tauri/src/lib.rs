@@ -1,5 +1,6 @@
 pub mod applog;
 pub mod commands;
+pub mod commands_v030;
 pub mod config;
 pub mod downloads;
 pub mod error;
@@ -108,6 +109,7 @@ pub fn run() {
                     }
                 }
                 let _ = crate::php::regenerate_all_php_ini(&launch_ctx.paths, &state);
+                crate::services::metrics::reapply_spx(&launch_ctx.paths, &state);
                 match crate::services::dns::ensure_hosts_if_needed(&launch_ctx.paths, &state) {
                     Ok(_) => {}
                     Err(e) => eprintln!("devstack hosts auto-sync: {e}"),
@@ -317,6 +319,36 @@ pub fn run() {
             get_xdebug_launch_hints,
             open_site_terminal,
             clone_site,
+            commands_v030::set_reverb_site,
+            commands_v030::get_site_php_ini,
+            commands_v030::set_site_php_ini,
+            commands_v030::set_site_php_ini_sliders,
+            commands_v030::list_site_template_kinds,
+            commands_v030::create_site_from_template,
+            commands_v030::hosting_tools_status,
+            commands_v030::hosting_list_profiles,
+            commands_v030::hosting_save_profile,
+            commands_v030::hosting_delete_profile,
+            commands_v030::hosting_test_connection,
+            commands_v030::hosting_preview,
+            commands_v030::hosting_run_sync,
+            commands_v030::get_tld_settings,
+            commands_v030::set_default_tld,
+            commands_v030::update_site_domain,
+            commands_v030::list_site_log_sources,
+            commands_v030::read_site_logs,
+            commands_v030::get_site_queue_status,
+            commands_v030::get_mobile_preview_status,
+            commands_v030::start_mobile_preview,
+            commands_v030::stop_mobile_preview,
+            commands_v030::get_metrics_snapshot,
+            commands_v030::get_slow_query_info,
+            commands_v030::set_slow_query_log,
+            commands_v030::get_spx_status,
+            commands_v030::set_spx_enabled,
+            commands_v030::export_config,
+            commands_v030::inspect_config_archive,
+            commands_v030::import_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");

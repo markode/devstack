@@ -519,6 +519,8 @@ pub async fn run_stop_stack(app: &AppHandle, ctx: &Arc<AppCtx>) -> Result<StackS
     crate::applog::command_call("stop_dev_stack", "{}");
     let _guard = StackOpGuard::try_acquire()?;
     let mut state = ctx.state.lock().await;
+    // Restore WordPress URLs while the DB is still up; never block the stop on it.
+    let _ = crate::services::mobile_preview::stop(&ctx.paths, &mut state);
     let res = stop_stack(&ctx.paths, &mut state);
     match &res {
         Ok(_) => crate::applog::command_ok("stop_dev_stack", "stopped"),
@@ -572,7 +574,7 @@ pub async fn register_system_php_cmd(ctx: State<'_, Arc<AppCtx>>) -> Result<Stri
     Ok(rt.version)
 }
 
-fn job_progress_emitter(app: AppHandle) -> JobProgressFn {
+pub(crate) fn job_progress_emitter(app: AppHandle) -> JobProgressFn {
     Arc::new(move |ev: JobProgress| {
         let _ = app.emit("job-progress", ev);
     })
