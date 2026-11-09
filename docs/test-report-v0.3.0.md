@@ -63,12 +63,12 @@ PERF_BENCH apply_stack_warm_ms=260 https_toggle_ms=16 apache_toggle_ms=54 cold_a
 - Frontend: `localStorage` sites/stack snapshot for instant paint; boot without probe then background refresh; `ensureSites()` avoids duplicate mount load
 - CI: `run_perf_bench` fails on regression above budgets
 
-## CI
+## CI (PR #24, commit `e4ff6e2`)
 
-| Check | Result |
-|-------|--------|
-| Windows HTTPS smoke (`devstack_smoke --e2e`, incl. v0.3.0 + perf bench) | _filled after CI_ |
-| macOS smoke | _filled after CI_ |
+| Check | Result | Perf line |
+|-------|--------|-----------|
+| Windows HTTPS smoke | **success** (run `42635830601`) | `apply_stack_warm_ms=51850 https_toggle_ms=203 apache_toggle_ms=4830` (within 60s Windows budget; MariaDB process spawn dominates) |
+| macOS smoke | **success** (run `42635830533`) | `apply_stack_warm_ms=615 https_toggle_ms=51 apache_toggle_ms=106` |
 
 ## Known limitations
 
