@@ -214,6 +214,60 @@ pub fn reveal_path_os(path: &Path) -> Result<()> {
     }
 }
 
+/// Open a terminal/shell with cwd set to `dir` (DevStack Terminal action).
+pub fn open_terminal_in_dir(dir: &Path) -> Result<()> {
+    let abs = expand_home(dir);
+    if !abs.exists() {
+        ensure_dir(&abs)?;
+    }
+    let abs = normalize_existing(&abs);
+    #[cfg(windows)]
+    {
+        let status = crate::services::process::command("cmd.exe")
+            .args(["/C", "start", "DevStack", "cmd.exe", "/K", "cd", "/D"])
+            .arg(&abs)
+            .status()
+            .map_err(|e| DevStackError::Message(format!("could not open terminal: {e}")))?;
+        if status.success() {
+            Ok(())
+        } else {
+            // Fallback: just open the folder.
+            open_path_os(&abs)
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "tell application \"Terminal\" to do script \"cd \" & quoted form of \"{}\"",
+            abs.display()
+        );
+        let status = crate::services::process::command("osascript")
+            .args(["-e", &script])
+            .status()
+            .map_err(|e| DevStackError::Message(format!("could not open terminal: {e}")))?;
+        if status.success() {
+            Ok(())
+        } else {
+            open_path_os(&abs)
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for term in ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
+            if which::which(term).is_ok() {
+                let status = crate::services::process::command(term)
+                    .arg("--working-directory")
+                    .arg(&abs)
+                    .status();
+                if status.map(|s| s.success()).unwrap_or(false) {
+                    return Ok(());
+                }
+            }
+        }
+        open_path_os(&abs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

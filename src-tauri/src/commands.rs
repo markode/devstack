@@ -1597,3 +1597,35 @@ pub async fn set_site_xdebug(
     let mut state = ctx.state.lock().await;
     crate::services::xdebug_site::set_site_xdebug(&ctx.paths, &mut state, &site_id, enabled)
 }
+
+#[tauri::command]
+pub async fn get_xdebug_launch_hints(
+    ctx: State<'_, Arc<AppCtx>>,
+    site_id: String,
+) -> Result<crate::services::xdebug_site::SiteXdebugView> {
+    let state = ctx.state.lock().await;
+    crate::services::xdebug_site::site_xdebug_view(&ctx.paths, &state, &site_id)
+}
+
+#[tauri::command]
+pub async fn open_site_terminal(ctx: State<'_, Arc<AppCtx>>, site_id: String) -> Result<()> {
+    let state = ctx.state.lock().await;
+    let site = state
+        .sites
+        .iter()
+        .find(|s| s.id == site_id)
+        .ok_or_else(|| crate::error::DevStackError::Message(format!("site not found: {site_id}")))?;
+    let path = site.path.clone();
+    drop(state);
+    crate::paths_util::open_terminal_in_dir(&path)
+}
+
+/// Alias of `duplicate_site` for the Clone UX.
+#[tauri::command]
+pub async fn clone_site(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppCtx>>,
+    request: DuplicateRequest,
+) -> Result<DuplicateResult> {
+    duplicate_site(app, ctx, request).await
+}

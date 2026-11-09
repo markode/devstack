@@ -29,11 +29,11 @@ use commands::{
     start_dev_stack, start_managed_service, stop_dev_stack, stop_managed_service,
     uninstall_package, update_db_files_settings, update_developer_settings, update_package,
     update_ports_config, update_site_environment,
-    backup_site_full, clear_php_dumps, delete_site_backup_cmd, get_backup_settings,
-    get_dump_status, get_share_status, get_sites_settings, get_tools_status, install_dev_tools,
-    list_php_dumps, list_site_backups_cmd, restore_site_backup_cmd, run_due_site_backups_cmd,
-    set_site_xdebug, start_site_share, stop_site_share, sync_parked_sites_cmd,
-    update_backup_settings, update_sites_settings,
+    backup_site_full, clear_php_dumps, clone_site, delete_site_backup_cmd, get_backup_settings,
+    get_dump_status, get_share_status, get_sites_settings, get_tools_status, get_xdebug_launch_hints,
+    install_dev_tools, list_php_dumps, list_site_backups_cmd, open_site_terminal,
+    restore_site_backup_cmd, run_due_site_backups_cmd, set_site_xdebug, start_site_share,
+    stop_site_share, sync_parked_sites_cmd, update_backup_settings, update_sites_settings,
 };
 use config::default_data_root;
 use services::db_files::{
@@ -314,6 +314,9 @@ pub fn run() {
             delete_site_backup_cmd,
             run_due_site_backups_cmd,
             set_site_xdebug,
+            get_xdebug_launch_hints,
+            open_site_terminal,
+            clone_site,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevStack");

@@ -114,6 +114,36 @@ pub fn phpstorm_hint(site: &SiteRecord) -> PhpStormHint {
     }
 }
 
+pub fn site_xdebug_view(paths: &Paths, state: &AppState, site_id: &str) -> Result<SiteXdebugView> {
+    let site = state
+        .sites
+        .iter()
+        .find(|s| s.id == site_id)
+        .cloned()
+        .ok_or_else(|| DevStackError::Message(format!("site not found: {site_id}")))?;
+    let version = php_version_for(&site, state)?;
+    let enabled = state
+        .php_extensions
+        .get(&version)
+        .map(|e| e.xdebug)
+        .unwrap_or(site.xdebug);
+    let root = expand_home(&site.path);
+    let launch = root
+        .join(".vscode")
+        .join("launch.json")
+        .exists()
+        .then(|| root.join(".vscode").join("launch.json"));
+    let _ = paths;
+    Ok(SiteXdebugView {
+        site_id: site.id.clone(),
+        php_version: version,
+        enabled,
+        port: XDEBUG_PORT,
+        launch_json: launch,
+        phpstorm: phpstorm_hint(&site),
+    })
+}
+
 pub fn set_site_xdebug(
     paths: &Paths,
     state: &mut AppState,
