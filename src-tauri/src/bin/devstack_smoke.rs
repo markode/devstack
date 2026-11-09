@@ -167,7 +167,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("=== Windows feature matrix → {} ===", report.display());
         // Ensure stack packages from e2e are present before matrix timing.
         ensure_stack(&ctx, skip_mariadb).await?;
-        if let Err(e) = devstack_lib::windows_matrix::run(&ctx, &report) {
+        // Run on a plain OS thread (not a Tokio worker): matrix uses sync
+        // `blocking_lock` + nested `block_on` for tray/templates. Calling that
+        // in-place on #[tokio::main] panics with "Cannot block the current
+        // thread from within a runtime".
+        let matrix_result = std::thread::scope(|scope| {
+            scope
+                .spawn(|| devstack_lib::windows_matrix::run(&ctx, &report))
+                .join()
+                .unwrap_or_else(|_| Err("windows matrix thread panicked".into()))
+        });
+        if let Err(e) = matrix_result {
             return Err(e.into());
         }
     }

@@ -110,7 +110,13 @@ impl Recorder {
 }
 
 fn lock(ctx: &AppCtx) -> tokio::sync::MutexGuard<'_, AppState> {
-    ctx.state.blocking_lock()
+    // `blocking_lock` panics on a Tokio worker thread ("Cannot block the current
+    // thread from within a runtime"). The smoke binary calls the matrix from
+    // `#[tokio::main]`; `block_in_place` parks the worker so the sync lock is safe.
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => tokio::task::block_in_place(|| ctx.state.blocking_lock()),
+        Err(_) => ctx.state.blocking_lock(),
+    }
 }
 
 /// Run the Windows feature matrix. Writes JSON (+ markdown sibling) to `report_path`.
