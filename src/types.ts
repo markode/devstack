@@ -8,6 +8,9 @@ export type SectionId =
   | "ai"
   | "pro"
   | "sharing"
+  | "mail"
+  | "dumps"
+  | "backups"
   | "shortcuts"
   | "about";
 
@@ -192,6 +195,10 @@ export interface SiteRecord {
   databasePassword?: string | null;
   status?: string;
   isTemplate?: boolean;
+  /** Xdebug enabled for this site's PHP-FPM pool. */
+  xdebug?: boolean;
+  /** True when the site was created by a parked directory scan. */
+  parked?: boolean;
 }
 
 export interface SiteDetails {
@@ -286,4 +293,104 @@ export interface PhpExtensionView {
   version: string;
   xdebug: boolean;
   iniPath?: string | null;
+}
+
+export interface SitesSettings {
+  parkedDirs: string[];
+  watchEnabled: boolean;
+  optInPath: boolean;
+}
+
+export interface SitesSettingsPatch {
+  parkedDirs?: string[];
+  watchEnabled?: boolean;
+  optInPath?: boolean;
+}
+
+export interface ParkedSyncResult {
+  added: number;
+  sites: SiteRecord[];
+}
+
+export interface ShareStatus {
+  active: boolean;
+  siteId?: string | null;
+  url?: string | null;
+  pid?: number | null;
+}
+
+export interface PhpDump {
+  id: number;
+  /** Unix epoch milliseconds. */
+  ts: number;
+  /** Site id or domain that emitted the dump. */
+  site?: string | null;
+  /** JSON payload captured by dump(). */
+  payload: unknown;
+  file?: string | null;
+  line?: number | null;
+}
+
+export interface SiteBackup {
+  id: string;
+  siteId: string;
+  siteName: string;
+  domain: string;
+  createdAt: string;
+  dir: string;
+  filesArchive: string;
+  dbArchive?: string | null;
+  dbName?: string | null;
+  dbEngine?: string | null;
+  sizeBytes: number;
+  warnings: string[];
+}
+
+export interface BackupSettings {
+  folder?: string | null;
+  /** Auto-backup every N seconds (0 = off). */
+  intervalSecs: number;
+  /** Keep the newest N backups per site. */
+  retain: number;
+}
+
+export interface BackupSettingsPatch {
+  /** Empty string resets to the default folder. */
+  folder?: string | null;
+  intervalSecs?: number;
+  retain?: number;
+}
+
+export interface PhpStormHint {
+  serverName: string;
+  host: string;
+  port: number;
+  localPath: string;
+  remotePath: string;
+  ideKey: string;
+}
+
+/** Result of `set_site_xdebug` / `get_xdebug_launch_hints`. */
+export interface XdebugLaunchHints {
+  siteId: string;
+  phpVersion: string;
+  enabled: boolean;
+  port: number;
+  /** Path of the `.vscode/launch.json` the backend wrote, if any. */
+  launchJson?: string | null;
+  phpstorm: PhpStormHint;
+}
+
+export interface ToolsStatus {
+  binDir: string;
+  composer: boolean;
+  wpCli: boolean;
+  node: boolean;
+  shims: boolean;
+  optInPath: boolean;
+}
+
+export interface DumpStatus {
+  port?: number | null;
+  helperPath: string;
 }
