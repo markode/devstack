@@ -45,6 +45,8 @@ ar = "0.9"
 notify = { version = "6", features = ["macos_fsevent"] }
 tauri-plugin-dialog = "2.8.4"
 dunce = "1"
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [profile.release]
 codegen-units = 1

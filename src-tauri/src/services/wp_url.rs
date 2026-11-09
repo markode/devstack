@@ -190,14 +190,28 @@ pub fn repair_site_url(
     state: &AppState,
     site: &SiteRecord,
 ) -> Result<String> {
+    let canonical = canonical_site_url(site, state);
+    repair_site_url_to(paths, state, site, &canonical, None, None)
+}
+
+/// Like [`repair_site_url`] but rewrites to an explicit `target` URL.
+/// `from_override` forces the URL to replace (e.g. a remote host URL after a pull);
+/// `db_override` targets another database (e.g. a scratch copy before a push).
+pub fn repair_site_url_to(
+    paths: &Paths,
+    state: &AppState,
+    site: &SiteRecord,
+    target: &str,
+    from_override: Option<&str>,
+    db_override: Option<&str>,
+) -> Result<String> {
     if !site_is_wordpress(site) {
         return Err(DevStackError::Message(
             "Repair site URL is only available for WordPress sites".into(),
         ));
     }
-    let db = site
-        .database_name
-        .as_deref()
+    let db = db_override
+        .or(site.database_name.as_deref())
         .ok_or_else(|| DevStackError::Message("site has no database".into()))?;
     let engine = site
         .database_engine
@@ -210,8 +224,11 @@ pub fn repair_site_url(
         ));
     }
 
-    let canonical = canonical_site_url(site, state);
-    let old = read_wp_option(paths, state, &engine, db, "siteurl").unwrap_or_default();
+    let canonical = target.to_string();
+    let old = match from_override {
+        Some(f) => f.to_string(),
+        None => read_wp_option(paths, state, &engine, db, "siteurl").unwrap_or_default(),
+    };
     let from = if old.is_empty() || old == canonical {
         // Still force siteurl/home even when already matching (no table scan).
         String::new()

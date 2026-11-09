@@ -7,6 +7,7 @@ pub mod dns;
 pub mod dump;
 pub mod extras;
 pub mod extras_v030;
+pub mod hosting_sync;
 pub mod httpd;
 pub mod nginx;
 pub mod parked;
