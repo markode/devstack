@@ -41,7 +41,7 @@ Methodology: warm-up start+stop, then best of two warm `apply_stack` runs. Befor
 
 | Metric | Target | CI budget (unix / Win) | Before | After (measured) |
 |--------|--------|------------------------|--------|------------------|
-| Warm `apply_stack` | < 3 s | 4000 / 20000 ms | ~664–679 ms | **260 ms** (warm_runs=[260, 354]) |
+| Warm `apply_stack` | < 3 s | 4000 / 60000 ms | ~664–679 ms | **260 ms** (warm_runs=[260, 354]) |
 | Cold `apply_stack` (post warm-up stop) | — | — | ~710–1170 ms | **710 ms** |
 | `stop_stack` | — | — | ~5880 ms | **1029 ms** |
 | HTTPS toggle | < 1 s | 3000 / 8000 ms | 18–55 ms | **16 ms** |

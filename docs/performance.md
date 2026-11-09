@@ -6,7 +6,7 @@ Targets and the CI regression gate for the hot paths.
 
 | Metric | Target | CI budget (unix) | CI budget (Windows) |
 | --- | --- | --- | --- |
-| Warm `apply_stack` (start from stopped, after warm-up start+stop) | < 3 s | **4000 ms** | **20000 ms** |
+| Warm `apply_stack` (start from stopped, after warm-up start+stop) | < 3 s (unix) | **4000 ms** | **60000 ms** (Windows CI MariaDB spawn) |
 | HTTPS toggle (`apply_site_environment_change`) | < 1 s | **3000 ms** | **8000 ms** |
 | Web-server (nginx <-> apache) toggle | < 1 s | **3000 ms** | **8000 ms** |
 

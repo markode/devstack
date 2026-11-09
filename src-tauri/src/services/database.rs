@@ -56,10 +56,12 @@ port={port}
 bind-address=127.0.0.1
 datadir={datadir}
 {socket_mysqld}max_allowed_packet=1G
-innodb_buffer_pool_size=256M
-innodb_log_file_size=96M
+# Keep log file size stable across releases — changing it forces a slow redo resize.
+innodb_buffer_pool_size=128M
+innodb_log_file_size=256M
 innodb_log_buffer_size=16M
 innodb_flush_log_at_trx_commit=2
+# Clean stop → fast warm start (avoid crash recovery after force-kill).
 innodb_fast_shutdown=1
 wait_timeout=28800
 interactive_timeout=28800
@@ -259,6 +261,7 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
     let defaults = format!("--defaults-file={}", conf.display());
     // Attached (no DETACHED_PROCESS) + --console on Windows so mysqld stays up
     // and writes to our redirected stderr.
+    let spawn_sw = crate::services::perf::Stopwatch::start();
     let child = if cfg!(windows) {
         spawn_logged_attached(
             &mysqld,
@@ -279,11 +282,13 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
 
     // Wait for accept. Cold InnoDB init can take >10s so the ceiling stays 45s, but
     // the poll starts at 5ms and backs off to 50ms so warm restarts return fast.
-    // A cheap TCP/socket probe gates the (slower) client `SELECT 1` confirmation.
+    // Prefer the cheap TCP/socket probe; only run SELECT 1 once the port is open
+    // (avoids burning the 2s --connect-timeout on every failed poll).
     let client = client_bin(&root).ok();
     let connect = mysql_root_args(paths, state, engine);
     let sock = socket_path(paths, engine);
     let mut died = false;
+    let mut select_ok = false;
     let ready = crate::services::perf::poll_backoff(
         Duration::from_millis(5),
         Duration::from_millis(50),
@@ -301,18 +306,33 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
                     let mut args = connect.clone();
                     args.push("-e".into());
                     args.push("SELECT 1".into());
-                    crate::services::process::command(cli)
+                    let ok = crate::services::process::command(cli)
                         .args(&args)
                         .output()
                         .map(|o| o.status.success())
-                        .unwrap_or(false)
-                        .then_some(())
+                        .unwrap_or(false);
+                    if ok {
+                        select_ok = true;
+                        Some(())
+                    } else {
+                        None
+                    }
                 }
-                None => Some(()),
+                None => {
+                    select_ok = true;
+                    Some(())
+                }
             }
         },
     )
     .is_some();
+    crate::applog::info(
+        "perf",
+        &format!(
+            "{engine} start pid={pid} port={port} spawn_to_ready_ms={} ready={ready} select_ok={select_ok} died={died}",
+            spawn_sw.elapsed_ms()
+        ),
+    );
     if died {
         let err = fs::read_to_string(&log_err).unwrap_or_default();
         let out = fs::read_to_string(&log_out).unwrap_or_default();
