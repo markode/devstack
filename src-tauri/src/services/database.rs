@@ -549,3 +549,18 @@ $cfg['Servers'][$i]['connect_type'] = '{connect_type}';
     fs::write(conf, cfg)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+
+    #[test]
+    fn db_accepting_detects_listening_tcp_port() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let missing = std::path::Path::new("/definitely/not/here.sock");
+        assert!(db_accepting(missing, port));
+        drop(listener);
+        assert!(!db_accepting(missing, port));
+    }
+}

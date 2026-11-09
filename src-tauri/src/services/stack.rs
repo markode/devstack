@@ -139,6 +139,7 @@ pub fn apply_stack_with_progress(
     state: &mut AppState,
     progress: &JobProgressFn,
 ) -> Result<StackStatus> {
+    let total_sw = crate::services::perf::Stopwatch::start();
     stack_phase(progress, "ports", "Checking ports…");
     refresh_site_metadata(state);
 
@@ -181,6 +182,7 @@ pub fn apply_stack_with_progress(
     stack_phase(progress, "dns", "Starting DNS and trusting certificates…");
     stack_phase(progress, "database", "Starting database…");
     stack_phase(progress, "php", "Preparing PHP…");
+    let services_sw = crate::services::perf::Stopwatch::start();
     let ca_snapshot = state.clone();
     let db_snapshot = engine.as_ref().map(|_| state.clone());
     let mut php_snapshot = state.clone();
@@ -250,6 +252,8 @@ pub fn apply_stack_with_progress(
         }
     }
 
+    let services_ms = services_sw.elapsed_ms();
+
     // WP siteurl/home rewrite needs a live DB (now up) but not the web servers, so
     // overlap it with Nginx/Apache startup using a read-only snapshot.
     let wp_snapshot = state.clone();
@@ -283,6 +287,13 @@ pub fn apply_stack_with_progress(
         return Err(e);
     }
     stack_phase(progress, "done", "Stack ready");
+    crate::applog::info(
+        "perf",
+        &format!(
+            "stack ready in {}ms (db+php+dns+certs {services_ms}ms)",
+            total_sw.elapsed_ms()
+        ),
+    );
     Ok(stack_status(state))
 }
 
@@ -300,13 +311,23 @@ pub fn start_stack_with_progress(
 
 pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     let _ = crate::services::share::stop_share(paths, state);
-    let _ = stop_nginx(paths, state);
-    let _ = stop_apache(paths, state);
-    let _ = stop_database(paths, state);
-    let _ = stop_dns(paths, state);
-    for version in state.runtime.php_pids.keys().cloned().collect::<Vec<_>>() {
-        let _ = crate::services::php_runtime::stop_php(paths, state, &version);
-    }
+    // The database shutdown (export-on-stop + mysqladmin) is the long pole, so run
+    // it on a snapshot while the front-ends, DNS and PHP are stopped here.
+    let mut db_snapshot = state.clone();
+    std::thread::scope(|scope| {
+        let db_h = scope.spawn(|| {
+            let _ = stop_database(paths, &mut db_snapshot);
+        });
+        let _ = stop_nginx(paths, state);
+        let _ = stop_apache(paths, state);
+        let _ = stop_dns(paths, state);
+        for version in state.runtime.php_pids.keys().cloned().collect::<Vec<_>>() {
+            let _ = crate::services::php_runtime::stop_php(paths, state, &version);
+        }
+        let _ = db_h.join();
+    });
+    state.runtime.database_pid = db_snapshot.runtime.database_pid;
+    state.runtime.database_engine = db_snapshot.runtime.database_engine;
     // Intentional stop → grey sites; clear start errors so probes never show stale logs.
     state.runtime.stack_intentionally_stopped = true;
     state.runtime.last_start_error = None;
@@ -330,6 +351,20 @@ pub fn reload_sites(paths: &Paths, state: &mut AppState) -> Result<StackStatus> 
     Ok(stack_status(state))
 }
 
+fn refresh_one_site_metadata(state: &mut AppState, site_id: &str) {
+    if let Some(site) = state.sites.iter_mut().find(|s| s.id == site_id) {
+        site.ensure_domain();
+        let details = crate::services::sites::detect_site(site);
+        site.framework = Some(details.framework);
+        if site.database_name.is_none() {
+            site.database_name = details.database_name;
+        }
+        if site.database_user.is_none() {
+            site.database_user = details.database_user;
+        }
+    }
+}
+
 /// Apply a site environment change with minimal work:
 /// cert cache hit, hosts only if missing, reload only the affected front-end(s).
 pub fn apply_site_environment_change(
@@ -339,7 +374,9 @@ pub fn apply_site_environment_change(
     prev_web_server: Option<String>,
     prev_https: bool,
 ) -> Result<StackStatus> {
-    refresh_site_metadata(state);
+    // Only the edited site needs a metadata re-scan; the rest were refreshed when
+    // they were last saved/started (avoids N filesystem walks per toggle).
+    refresh_one_site_metadata(state, site_id);
     let site = state
         .sites
         .iter()
@@ -364,7 +401,8 @@ pub fn apply_site_environment_change(
         Some("apache") | Some("httpd")
     );
 
-    // PHP runtime for the site (needed when version changes or server switches).
+    // PHP runtime for the site. start_php is a fast no-op when this version is
+    // already running and listening, so unchanged versions cost ~1ms.
     if let Some(ver) = site.php_version.as_deref() {
         let _ = crate::services::php_runtime::start_php(paths, state, ver);
     }
@@ -401,9 +439,11 @@ fn rewrite_wp_urls_for_server_switch(
     _was_apache: bool,
     _now_apache: bool,
 ) -> Result<()> {
-    // Full canonical repair (scheme + port + serialized) via managed PHP.
-    match crate::services::wp_url::repair_site_url(paths, state, site) {
-        Ok(msg) => crate::applog::info("wordpress", &msg),
+    // Full canonical repair (scheme + port + serialized) via managed PHP, skipped
+    // for non-WordPress sites and when the stored siteurl is already canonical.
+    match crate::services::wp_url::repair_site_url_if_changed(paths, state, site) {
+        Ok(Some(msg)) => crate::applog::info("wordpress", &msg),
+        Ok(None) => {}
         Err(e) => crate::applog::warn("wordpress", &format!("server-switch URL repair: {e}")),
     }
     Ok(())
@@ -483,8 +523,9 @@ fn rewrite_wp_urls_for_https_toggle(
     site: &crate::config::SiteRecord,
     _prev_https: bool,
 ) -> Result<()> {
-    match crate::services::wp_url::repair_site_url(paths, state, site) {
-        Ok(msg) => crate::applog::info("wordpress", &msg),
+    match crate::services::wp_url::repair_site_url_if_changed(paths, state, site) {
+        Ok(Some(msg)) => crate::applog::info("wordpress", &msg),
+        Ok(None) => {}
         Err(e) => crate::applog::warn("wordpress", &format!("https-toggle URL repair: {e}")),
     }
     Ok(())

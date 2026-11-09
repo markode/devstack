@@ -9,6 +9,9 @@ pub const WARM_APPLY_STACK_BUDGET_MS_WINDOWS: u128 = 8000;
 pub const TOGGLE_BUDGET_MS_UNIX: u128 = 3000;
 pub const TOGGLE_BUDGET_MS_WINDOWS: u128 = 8000;
 
+/// Filesystem watchers must debounce at least this long to coalesce editor/IDE bursts.
+pub const MIN_WATCH_DEBOUNCE_MS: u64 = 300;
+
 pub fn warm_apply_stack_budget_ms() -> u128 {
     if cfg!(windows) {
         WARM_APPLY_STACK_BUDGET_MS_WINDOWS
@@ -122,6 +125,12 @@ mod tests {
             || None,
         );
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn db_watcher_debounce_not_below_minimum() {
+        assert!(super::super::db_files::DB_WATCH_DEBOUNCE_MS >= MIN_WATCH_DEBOUNCE_MS);
+        assert!(super::super::db_files::DB_WATCH_SETTLE_MS >= MIN_WATCH_DEBOUNCE_MS);
     }
 
     #[test]

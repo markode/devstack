@@ -44,7 +44,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let install_node = args.iter().any(|a| a == "--install-node");
     let e2e = args.iter().any(|a| a == "--e2e");
-    let stack = e2e || args.iter().any(|a| a == "--stack");
+    let perf = args.iter().any(|a| a == "--perf");
+    let stack = e2e || perf || args.iter().any(|a| a == "--stack");
     let services_flag = args.iter().any(|a| a == "--services");
     let wordpress = e2e || args.iter().any(|a| a == "--wordpress");
     // Full e2e includes Apache pretty-permalinks + DB files + extras services.
@@ -56,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || services_flag
         || (!install_node
             && !stack
+            && !perf
             && !wordpress
             && !apache
             && !db_files
@@ -63,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.iter().any(|a| a == "--help") {
         eprintln!(
-            "devstack_smoke [--e2e] [--stack] [--wordpress] [--apache] [--db-files] [--services] [--skip-mariadb] [--install-node]"
+            "devstack_smoke [--e2e] [--stack] [--perf] [--wordpress] [--apache] [--db-files] [--services] [--skip-mariadb] [--install-node]"
         );
         return Ok(());
     }
@@ -131,6 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_services_smoke(&ctx).await?;
     }
 
+    if perf && !e2e {
+        run_perf_bench(&ctx).await?;
+    }
+
     if e2e {
         run_persistence_and_sites_smoke(&ctx, skip_mariadb).await?;
         run_dual_frontend_routing_smoke(&ctx).await?;
@@ -138,6 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_status_error_smoke(&ctx).await?;
         run_stopped_status_smoke(&ctx).await?;
         run_v029_features_smoke(&ctx, skip_mariadb).await?;
+        run_perf_bench(&ctx).await?;
     }
 
     Ok(())
@@ -2304,6 +2311,138 @@ async fn run_v029_features_smoke(
     }
 
     println!("=== v0.2.9 features smoke OK ===");
+    Ok(())
+}
+
+/// CI performance regression bench: warm `apply_stack`, HTTPS toggle, web-server toggle.
+///
+/// Methodology: one warm-up start+stop (primes page cache, certs, php.ini, DB
+/// datadir), then `apply_stack` is timed from a fully stopped stack. We take the
+/// best of two warm runs so a single noisy CI scheduler hiccup cannot fail the
+/// gate while a real regression (which slows *both* runs) still does. Toggles
+/// report the slower direction (on→off / off→on) because both must meet budget.
+async fn run_perf_bench(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
+    use devstack_lib::services::perf::{
+        check_budget, time_ms, toggle_budget_ms, warm_apply_stack_budget_ms,
+    };
+    use devstack_lib::services::sites::delete_site;
+    use devstack_lib::services::stack::{apply_site_environment_change, reload_sites};
+
+    println!("=== Perf bench ===");
+
+    let (site_id, apache_ok) = {
+        let mut state = ctx.state.lock().await;
+        let php_ver = state
+            .installed
+            .get("php")
+            .and_then(|v| v.first())
+            .map(|r| r.version.clone())
+            .unwrap_or_else(|| "8.3".into());
+        let path = ctx.paths.root.join("sites/perfbench");
+        let _ = std::fs::create_dir_all(&path);
+        std::fs::write(path.join("index.php"), "<?php echo 'PERF_BENCH_OK';\n")?;
+        let site = create_site(&mut state, &ctx.paths, "perfbench", path, Some(php_ver))?;
+        let apache_ok = state.installed.contains_key("apache");
+        if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+            s.web_server = Some("nginx".into());
+            s.https = true;
+        }
+        (site.id, apache_ok)
+    };
+
+    // Warm-up: full start + stop so the measured start only pays steady-state costs.
+    let (warm_up, cold_ms) = {
+        let mut state = ctx.state.lock().await;
+        let _ = stop_stack(&ctx.paths, &mut state);
+        let (res, ms) = time_ms(|| apply_stack(&ctx.paths, &mut state));
+        (res.map(|_| ()), ms)
+    };
+    warm_up?;
+    let stop_ms = {
+        let mut state = ctx.state.lock().await;
+        let (res, ms) = time_ms(|| stop_stack(&ctx.paths, &mut state));
+        res?;
+        ms
+    };
+
+    let mut warm_runs: Vec<u128> = Vec::new();
+    for _ in 0..2 {
+        let mut state = ctx.state.lock().await;
+        let (res, ms) = time_ms(|| apply_stack(&ctx.paths, &mut state));
+        res?;
+        warm_runs.push(ms);
+        if warm_runs.len() < 2 {
+            let _ = stop_stack(&ctx.paths, &mut state);
+        }
+    }
+    let apply_stack_warm_ms = *warm_runs.iter().min().unwrap_or(&0);
+
+    // Stack is up: toggles go through the fast reload path.
+    let toggle = |site_id: String, apply: Box<dyn Fn(&mut devstack_lib::config::SiteRecord)>| async move {
+        let mut state = ctx.state.lock().await;
+        let (prev_ws, prev_https) = {
+            let site = state
+                .sites
+                .iter_mut()
+                .find(|s| s.id == site_id)
+                .ok_or("perf site missing")?;
+            let prev = (site.web_server.clone(), site.https);
+            apply(site);
+            prev
+        };
+        let (res, ms) = time_ms(|| {
+            apply_site_environment_change(&ctx.paths, &mut state, &site_id, prev_ws, prev_https)
+        });
+        res.map_err(|e| e.to_string())?;
+        Ok::<u128, Box<dyn std::error::Error>>(ms)
+    };
+
+    let mut https_ms = 0u128;
+    for https in [false, true] {
+        let ms = toggle(site_id.clone(), Box::new(move |s| s.https = https)).await?;
+        println!("PERF_BENCH https={https}: {ms}ms");
+        https_ms = https_ms.max(ms);
+    }
+
+    let mut apache_ms: Option<u128> = None;
+    if apache_ok {
+        let mut worst = 0u128;
+        for server in ["apache", "nginx"] {
+            let ms = toggle(
+                site_id.clone(),
+                Box::new(move |s| s.web_server = Some(server.into())),
+            )
+            .await?;
+            println!("PERF_BENCH web_server={server}: {ms}ms");
+            worst = worst.max(ms);
+        }
+        apache_ms = Some(worst);
+    } else {
+        println!("PERF_BENCH apache toggle skipped — apache not installed");
+    }
+
+    {
+        let mut state = ctx.state.lock().await;
+        let _ = delete_site(&ctx.paths, &mut state, &site_id);
+        let _ = reload_sites(&ctx.paths, &mut state);
+        let _ = stop_stack(&ctx.paths, &mut state);
+    }
+
+    println!(
+        "PERF_BENCH apply_stack_warm_ms={apply_stack_warm_ms} https_toggle_ms={https_ms} apache_toggle_ms={} cold_apply_stack_ms={cold_ms} stop_stack_ms={stop_ms} warm_runs={warm_runs:?}",
+        apache_ms.map(|v| v.to_string()).unwrap_or_else(|| "na".into()),
+    );
+
+    check_budget(
+        "warm apply_stack",
+        apply_stack_warm_ms,
+        warm_apply_stack_budget_ms(),
+    )?;
+    check_budget("HTTPS toggle", https_ms, toggle_budget_ms())?;
+    if let Some(ms) = apache_ms {
+        check_budget("web-server (apache) toggle", ms, toggle_budget_ms())?;
+    }
+    println!("SMOKE PASS: perf bench within budget");
     Ok(())
 }
 

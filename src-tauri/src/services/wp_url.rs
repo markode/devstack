@@ -293,6 +293,35 @@ pub fn repair_site_url_to(
     Ok(msg)
 }
 
+/// Like [`repair_site_url`] but a no-op (`Ok(None)`) for non-WordPress sites, sites
+/// without a database, and sites whose stored siteurl already equals the canonical URL.
+pub fn repair_site_url_if_changed(
+    paths: &Paths,
+    state: &AppState,
+    site: &SiteRecord,
+) -> Result<Option<String>> {
+    if !site_is_wordpress(site) {
+        return Ok(None);
+    }
+    let Some(db) = site.database_name.as_deref() else {
+        return Ok(None);
+    };
+    let engine = site
+        .database_engine
+        .clone()
+        .or_else(|| state.active_database.clone())
+        .unwrap_or_else(|| "mariadb".into());
+    if matches!(engine.as_str(), "mysql" | "mariadb") {
+        let canonical = canonical_site_url(site, state);
+        if let Ok(current) = read_wp_option(paths, state, &engine, db, "siteurl") {
+            if current == canonical {
+                return Ok(None);
+            }
+        }
+    }
+    repair_site_url(paths, state, site).map(Some)
+}
+
 /// On app start / after port remap: repair any WP site whose siteurl ≠ canonical.
 pub fn repair_mismatched_wp_urls(paths: &Paths, state: &AppState) -> Result<Vec<String>> {
     let mut msgs = Vec::new();

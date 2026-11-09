@@ -661,3 +661,17 @@ pub fn register_system_php(state: &mut AppState, paths: &Paths) -> Result<PhpRun
     save_state(&paths.state_file, state)?;
     Ok(runtime)
 }
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+
+    #[test]
+    fn start_php_many_with_no_versions_is_a_noop() {
+        let dir = std::env::temp_dir().join(format!("devstack-php-many-{}", std::process::id()));
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        let mut state = AppState::default();
+        assert!(start_php_many(&paths, &mut state, &[]).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

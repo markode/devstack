@@ -136,6 +136,9 @@ pub fn sync_parked_sites(_paths: &Paths, state: &mut AppState) -> Result<usize> 
     Ok(added)
 }
 
+/// Trailing-edge debounce for parked-folder events (never below `perf::MIN_WATCH_DEBOUNCE_MS`).
+pub const PARKED_DEBOUNCE_MS: u64 = 500;
+
 /// Watch parked directories; `on_change` fires (debounced) when a subfolder is
 /// created/removed/renamed. Dropping `running` to false stops the thread.
 pub fn spawn_parked_watcher<F>(
@@ -170,7 +173,14 @@ where
         let _watcher = watcher;
         let mut pending: Option<Instant> = None;
         while running.load(Ordering::SeqCst) {
-            match rx.recv_timeout(Duration::from_millis(500)) {
+            // Sleep exactly until the debounce window closes (or block idle for 1s).
+            let wait = match pending {
+                Some(t) => Duration::from_millis(PARKED_DEBOUNCE_MS)
+                    .saturating_sub(t.elapsed())
+                    .max(Duration::from_millis(1)),
+                None => Duration::from_secs(1),
+            };
+            match rx.recv_timeout(wait) {
                 Ok(event) => {
                     use notify::EventKind;
                     if matches!(
@@ -184,7 +194,7 @@ where
                 Err(_) => break,
             }
             if let Some(t) = pending {
-                if t.elapsed() >= Duration::from_secs(1) {
+                if t.elapsed() >= Duration::from_millis(PARKED_DEBOUNCE_MS) {
                     pending = None;
                     on_change();
                 }
@@ -197,6 +207,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parked_debounce_not_below_minimum() {
+        assert!(PARKED_DEBOUNCE_MS >= crate::services::perf::MIN_WATCH_DEBOUNCE_MS);
+    }
 
     #[test]
     fn slug_and_domain_from_folder_name() {

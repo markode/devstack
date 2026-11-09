@@ -65,8 +65,10 @@ pub fn run() {
         eprintln!("devstack dump receiver: {e}");
     }
     prefetch_version_lists(ctx.clone());
-    // Auto-sync hosts+CA on launch when the DevStack block is missing (may prompt UAC),
-    // and regenerate managed php.ini (Windows extension_dir + modules).
+    // Background launch work. The state lock is held only for the cheap state
+    // mutations (port remap, parked sync); php.ini regeneration, WP URL rewrites and
+    // the hosts/UAC check run lock-free on a snapshot so window setup and IPC
+    // commands never block behind them.
     {
         let launch_ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -76,7 +78,7 @@ pub fn run() {
             else {
                 return;
             };
-            rt.block_on(async {
+            let (snapshot, remap_before) = rt.block_on(async {
                 let mut state = launch_ctx.state.lock().await;
                 // Persist free ports beside WAMP/MAMP/IIS before the UI opens.
                 let before = crate::services::ports::PortSnapshot::from_stack(&state.stack);
@@ -93,86 +95,84 @@ pub fn run() {
                 let mut notice = remap.messages.clone();
                 notice.extend(crate::services::ports::classic_web_port_notice(&state.stack));
                 state.runtime.port_notice = notice;
-                if remap.changed {
-                    let _ = crate::config::save_state(&launch_ctx.paths.state_file, &state);
-                    // Best-effort WP URL rewrite (DB may not be up yet on cold launch).
-                    let _ = crate::services::stack::rewrite_all_wp_urls_for_port_remap(
-                        &launch_ctx.paths,
-                        &state,
-                        before,
-                    );
-                }
+                let mut dirty = remap.changed;
                 if let Ok(n) = crate::services::parked::sync_parked_sites(&launch_ctx.paths, &mut state) {
-                    if n > 0 {
-                        let _ = crate::config::save_state(&launch_ctx.paths.state_file, &state);
-                    }
+                    dirty |= n > 0;
                 }
-                let _ = crate::php::regenerate_all_php_ini(&launch_ctx.paths, &state);
-                match crate::services::dns::ensure_hosts_if_needed(&launch_ctx.paths, &state) {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("devstack hosts auto-sync: {e}"),
+                if dirty {
+                    let _ = crate::config::save_state(&launch_ctx.paths.state_file, &state);
                 }
+                (state.clone(), remap.changed.then_some(before))
             });
+            if let Some(before) = remap_before {
+                // Best-effort WP URL rewrite (DB may not be up yet on cold launch).
+                let _ = crate::services::stack::rewrite_all_wp_urls_for_port_remap(
+                    &launch_ctx.paths,
+                    &snapshot,
+                    before,
+                );
+            }
+            let _ = crate::services::db_files::databases_folder(&launch_ctx.paths, &snapshot.db_files);
+            // Regenerate managed php.ini (Windows extension_dir + modules) — once.
+            let _ = crate::php::regenerate_all_php_ini(&launch_ctx.paths, &snapshot);
+            // Auto-sync hosts+CA on launch when the DevStack block is missing (may prompt UAC).
+            if let Err(e) = crate::services::dns::ensure_hosts_if_needed(&launch_ctx.paths, &snapshot) {
+                eprintln!("devstack hosts auto-sync: {e}");
+            }
         });
     }
 
-    // Folder watcher + scheduled auto-export for Databases/
+    // Folder watcher + scheduled auto-export for Databases/ — set up off the main
+    // thread so startup never waits on the state lock.
     {
         let watch_ctx = ctx.clone();
-        let suppress = new_suppress_set();
-        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok();
-        let folder = rt.as_ref().and_then(|rt| {
-            rt.block_on(async {
-                let state = watch_ctx.state.lock().await;
-                databases_folder(&watch_ctx.paths, &state.db_files).ok()
-            })
-        });
-        if let Some(root) = folder {
-            let emit_ctx = watch_ctx.clone();
-            let _ = spawn_folder_watcher(root, suppress, running.clone(), move |mut ev| {
-                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                else {
-                    return;
-                };
-                rt.block_on(async {
-                    let mode = emit_ctx.state.lock().await.db_files.import_mode.clone();
-                    ev.import_mode = mode.clone();
-                    if mode == "auto" {
-                        let progress = noop_job_progress();
-                        let state = emit_ctx.state.lock().await;
-                        let _ = crate::services::db_files::import_database_file(
-                            &emit_ctx.paths,
-                            &state,
-                            &ev.engine,
-                            &ev.database,
-                            std::path::Path::new(&ev.path),
-                            &progress,
-                            "watch-import",
-                        );
-                    }
-                    let _ = ev;
-                });
-            });
-        }
-
-        // Interval auto-export
-        let export_ctx = ctx.clone();
         std::thread::spawn(move || {
+            let suppress = new_suppress_set();
+            let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             else {
                 return;
             };
+            let folder = rt.block_on(async {
+                let state = watch_ctx.state.lock().await;
+                databases_folder(&watch_ctx.paths, &state.db_files).ok()
+            });
+            if let Some(root) = folder {
+                let emit_ctx = watch_ctx.clone();
+                let _ = spawn_folder_watcher(root, suppress, running.clone(), move |mut ev| {
+                    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    else {
+                        return;
+                    };
+                    rt.block_on(async {
+                        let mode = emit_ctx.state.lock().await.db_files.import_mode.clone();
+                        ev.import_mode = mode.clone();
+                        if mode == "auto" {
+                            let progress = noop_job_progress();
+                            let state = emit_ctx.state.lock().await;
+                            let _ = crate::services::db_files::import_database_file(
+                                &emit_ctx.paths,
+                                &state,
+                                &ev.engine,
+                                &ev.database,
+                                std::path::Path::new(&ev.path),
+                                &progress,
+                                "watch-import",
+                            );
+                        }
+                        let _ = ev;
+                    });
+                });
+            }
+
+            // Interval auto-export (this thread becomes the export loop).
             loop {
                 let secs = rt.block_on(async {
-                    export_ctx.state.lock().await.db_files.auto_export_interval_secs
+                    watch_ctx.state.lock().await.db_files.auto_export_interval_secs
                 });
                 if secs == 0 {
                     std::thread::sleep(std::time::Duration::from_secs(30));
@@ -181,9 +181,9 @@ pub fn run() {
                 std::thread::sleep(std::time::Duration::from_secs(secs.max(30)));
                 let progress = noop_job_progress();
                 rt.block_on(async {
-                    let state = export_ctx.state.lock().await;
+                    let state = watch_ctx.state.lock().await;
                     let _ = export_all_running(
-                        &export_ctx.paths,
+                        &watch_ctx.paths,
                         &state,
                         &progress,
                         "auto-export",
@@ -327,20 +327,26 @@ pub use config::default_data_root as data_root;
 
 /// Parked-folder watcher + scheduled full-site backups.
 fn spawn_background_jobs(app: tauri::AppHandle, ctx: Arc<commands::AppCtx>) {
-    let (watch, dirs) = tauri::async_runtime::block_on(async {
-        let s = ctx.state.lock().await;
-        (s.sites_settings.watch_enabled, s.sites_settings.parked_dirs.clone())
-    });
-    if watch {
+    // Never block window setup on the state mutex: read the watcher config on a
+    // background thread, then arm the parked watcher.
+    let (watch_app, watch_ctx) = (app.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let (watch, dirs) = tauri::async_runtime::block_on(async {
+            let s = watch_ctx.state.lock().await;
+            (s.sites_settings.watch_enabled, s.sites_settings.parked_dirs.clone())
+        });
+        if !watch {
+            return;
+        }
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let (app, ctx) = (app.clone(), ctx.clone());
+        let (app, ctx) = (watch_app, watch_ctx);
         let _ = services::parked::spawn_parked_watcher(dirs, running, move || {
             let (app, ctx) = (app.clone(), ctx.clone());
             tauri::async_runtime::spawn(async move {
                 let _ = commands::sync_parked_now(Some(&app), &ctx).await;
             });
         });
-    }
+    });
 
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(60));

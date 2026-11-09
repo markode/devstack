@@ -63,6 +63,7 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  localStorage.clear();
   sites = [];
   currentStack = baseStack;
   progressHandler = null;

@@ -1129,8 +1129,8 @@ pub fn bootstrap_ctx(data_root: std::path::PathBuf) -> Result<AppCtx> {
     let mut state = load_state(&paths.state_file)?;
     crate::applog::set_redact_secrets(state.developer.redact_secrets);
     ensure_welcome_site(&paths, &mut state);
-    let _ = crate::services::db_files::databases_folder(&paths, &state.db_files);
-    let _ = crate::php::regenerate_all_php_ini(&paths, &state);
+    // Keep bootstrap fast: php.ini regeneration, Databases/ layout and hosts sync
+    // run on the background launch thread in lib.rs (never on the window path).
     save_state(&paths.state_file, &state)?;
     let ctx = AppCtx {
         paths,

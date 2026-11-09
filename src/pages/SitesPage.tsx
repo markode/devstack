@@ -41,6 +41,7 @@ export function SitesPage({
   const {
     sites: sitesCache,
     loadSites,
+    ensureSites,
     setSitesDetails,
     setStack,
     patchSitesCache,
@@ -116,7 +117,8 @@ export function SitesPage({
   };
 
   useEffect(() => {
-    void loadSites({ probe: true }).catch((e) =>
+    // AppData already boots the cache; only (re)load here when nothing real is cached.
+    void ensureSites().catch((e) =>
       setError(e instanceof Error ? e.message : String(e)),
     );
     let unlisten: (() => void) | undefined;
@@ -139,7 +141,7 @@ export function SitesPage({
     return () => {
       unlisten?.();
     };
-  }, [loadSites]);
+  }, [ensureSites]);
 
   // Soft background refresh when returning to Sites — cached tiles stay visible.
   useEffect(() => {
