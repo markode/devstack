@@ -276,8 +276,9 @@ fn helper_run_linux(paths: &Paths, args: &[&str]) -> Result<()> {
 fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
     let script = ensure_helper_script(paths)?;
     // Prefer passwordless sudo (GitHub Actions / admin shells) — same path as Linux.
-    // osascript "with administrator privileges" needs a GUI auth dialog and was
-    // also mis-quoted (AppleScript strings use ", not ').
+    // Never fall through to osascript under CI / non-interactive sessions: the
+    // "with administrator privileges" dialog blocks forever with no UI, which is
+    // exactly what hung macos-smoke for 35+ minutes after the first stack stop.
     let sudo = crate::services::process::command("sudo")
         .arg("-n")
         .arg(&script)
@@ -286,21 +287,36 @@ fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output();
-    if let Ok(out) = &sudo {
-        if out.status.success() {
-            return Ok(());
+    match &sudo {
+        Ok(out) if out.status.success() => return Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!(
+                "devstack helper: sudo -n failed for {:?} (exit {}): {stderr}",
+                args, out.status
+            );
         }
+        Err(e) => eprintln!("devstack helper: sudo -n spawn failed for {:?}: {e}", args),
     }
-    // Fall through to GUI elevation when sudo needs a password or is unavailable.
 
+    if macos_skip_osascript() {
+        let detail = match &sudo {
+            Ok(out) => format!(
+                "sudo -n exit {}; {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => format!("sudo -n spawn error: {e}"),
+        };
+        return Err(DevStackError::Message(format!(
+            "macOS privileged helper unavailable in CI/headless ({detail}). \
+             Grant passwordless sudo for the DevStack helper or pre-install hosts/resolver/CA."
+        )));
+    }
+
+    // Interactive desktop only: GUI elevation when sudo needs a password.
     let apple = macos_osascript_helper_command(&script, args);
-    let output = crate::services::process::command("osascript")
-        .args(["-e", &apple])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| DevStackError::Message(format!("osascript helper: {e}")))?;
+    let output = run_osascript_with_timeout(&apple, Duration::from_secs(30))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -308,6 +324,59 @@ fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
         Err(DevStackError::Message(format!(
             "macOS privileged helper failed: {stderr}"
         )))
+    }
+}
+
+/// CI and other non-interactive sessions must not invoke osascript — it waits
+/// forever on an admin dialog that never appears on GitHub-hosted runners.
+#[cfg(target_os = "macos")]
+fn macos_skip_osascript() -> bool {
+    if std::env::var_os("CI").is_some() || std::env::var_os("DEVSTACK_NO_OSA").is_some() {
+        return true;
+    }
+    // No TTY → headless / launchd agent; osascript auth cannot succeed.
+    use std::io::IsTerminal;
+    !std::io::stdin().is_terminal()
+}
+
+/// Run `osascript -e` with a hard wall-clock timeout so a stuck auth dialog
+/// cannot freeze apply_stack / start_dns for the entire CI job.
+#[cfg(target_os = "macos")]
+fn run_osascript_with_timeout(
+    apple: &str,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    let mut child = crate::services::process::command("osascript")
+        .args(["-e", apple])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| DevStackError::Message(format!("osascript helper: {e}")))?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| DevStackError::Message(format!("osascript helper: {e}")));
+            }
+            Ok(None) if start.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(DevStackError::Message(format!(
+                    "osascript helper timed out after {}s waiting for administrator privileges",
+                    timeout.as_secs()
+                )));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(DevStackError::Message(format!("osascript helper: {e}")));
+            }
+        }
     }
 }
 

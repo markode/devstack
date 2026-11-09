@@ -248,6 +248,23 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
         if is_running(pid) && state.runtime.database_engine.as_deref() == Some(engine) {
             return Ok(());
         }
+        // Stale PID but our listen port still answers SELECT 1 (warm apply after
+        // stop_web_stack / pid-file drift): reuse the live server instead of a
+        // 45s InnoDB respawn that blows the Windows warm budget.
+        let port = crate::services::ports::engine_db_port(&state.stack, engine);
+        let sock = socket_path(paths, engine);
+        if db_accepting(&sock, port) && database_select_ok(paths, state, engine) {
+            if let Some(live) = read_pid(&paths.pid_file(engine)).filter(|p| is_running(*p)) {
+                state.runtime.database_pid = Some(live);
+            }
+            state.runtime.database_engine = Some(engine.into());
+            state.active_database = Some(engine.into());
+            crate::applog::info(
+                "database",
+                &format!("{engine} already accepting on port {port} — reusing without restart"),
+            );
+            return Ok(());
+        }
         let _ = stop_database(paths, state);
     }
     crate::services::ports::ensure_ports_free(&state.stack, engine)?;
@@ -364,6 +381,24 @@ fn db_accepting(sock: &Path, port: u16) -> bool {
     }
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
+}
+
+/// True when `SELECT 1` succeeds against the configured root account (fast probe).
+fn database_select_ok(paths: &Paths, state: &AppState, engine: &str) -> bool {
+    let Ok(root) = engine_install_dir(state, engine) else {
+        return false;
+    };
+    let Ok(cli) = client_bin(&root) else {
+        return false;
+    };
+    let mut args = mysql_root_args(paths, state, engine);
+    args.push("-e".into());
+    args.push("SELECT 1".into());
+    crate::services::process::command(&cli)
+        .args(&args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 pub fn stop_database(paths: &Paths, state: &mut AppState) -> Result<()> {

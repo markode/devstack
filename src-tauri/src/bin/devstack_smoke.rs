@@ -299,7 +299,9 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
 
     {
         let mut state = ctx.state.lock().await;
+        println!("ensure_stack: stop_stack…");
         let _ = stop_stack(&ctx.paths, &mut state);
+        println!("ensure_stack: apply_stack…");
         apply_stack(&ctx.paths, &mut state)?;
         println!(
             "stack up — nginx={} apache={} db={:?} nginx={}/{} apache={}/{}",

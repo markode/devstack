@@ -8,6 +8,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   windows-smoke:
     runs-on: windows-latest
@@ -71,36 +74,40 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # Hard requirement: hosting.sftp_live must PASS before release.
-          & .\scripts\windows-sshd-hosting.ps1
+          & "$env:GITHUB_WORKSPACE/scripts/windows-sshd-hosting.ps1"
           if ($LASTEXITCODE -ne 0) { throw "windows-sshd-hosting.ps1 failed ($LASTEXITCODE)" }
-          if (-not $env:DEVSTACK_HOSTING_SSH_HOST -or -not $env:DEVSTACK_HOSTING_SSH_PASSWORD) {
-            throw 'DEVSTACK_HOSTING_SSH_HOST/PASSWORD not set after OpenSSH setup'
+          if (-not $env:DEVSTACK_HOSTING_SSH_HOST) {
+            throw "DEVSTACK_HOSTING_SSH_HOST not set after OpenSSH setup"
+          }
+          if (-not $env:DEVSTACK_HOSTING_SSH_PASSWORD) {
+            throw "DEVSTACK_HOSTING_SSH_PASSWORD not set after OpenSSH setup"
           }
           Write-Host "Hosting SSH env ready for $($env:DEVSTACK_HOSTING_SSH_USER)@$($env:DEVSTACK_HOSTING_SSH_HOST)"
 
-      - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip + Windows feature matrix
+      - name: E2E - install PHP + MariaDB + Nginx, sites, curl, DB round-trip + Windows feature matrix
         working-directory: src-tauri
         timeout-minutes: 50
         shell: pwsh
         env:
-          DEVSTACK_DATA_DIR: ${{ runner.temp }}\devstack-e2e
+          # Forward slashes avoid YAML/Actions treating \t in \test-report as a tab.
+          DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-e2e
           DEVSTACK_RESET_SITES: "1"
-          DEVSTACK_MATRIX_JSON: ${{ runner.temp }}\windows-matrix.json
-          DEVSTACK_MATRIX_MD: ${{ github.workspace }}\docs\test-report-v0.3.1.md
+          DEVSTACK_MATRIX_JSON: ${{ runner.temp }}/windows-matrix.json
+          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.1.md
         run: |
           $ErrorActionPreference = 'Stop'
           cargo build --bin devstack_smoke --release
-          $bin = Join-Path (Get-Location) 'target\release\devstack_smoke.exe'
+          $bin = Join-Path (Get-Location) 'target/release/devstack_smoke.exe'
           & $bin --e2e
           if ($LASTEXITCODE -ne 0) { throw "devstack_smoke --e2e failed ($LASTEXITCODE)" }
-          if (-not (Test-Path $env:DEVSTACK_MATRIX_JSON)) {
+          if (-not (Test-Path -LiteralPath $env:DEVSTACK_MATRIX_JSON)) {
             throw "Windows feature matrix JSON missing at $($env:DEVSTACK_MATRIX_JSON)"
           }
-          if (-not (Test-Path $env:DEVSTACK_MATRIX_MD)) {
+          if (-not (Test-Path -LiteralPath $env:DEVSTACK_MATRIX_MD)) {
             throw "Windows feature matrix report missing at $($env:DEVSTACK_MATRIX_MD)"
           }
           Write-Host "Matrix report written to $($env:DEVSTACK_MATRIX_MD)"
-          Get-Content $env:DEVSTACK_MATRIX_MD | Select-Object -First 40
+          Get-Content -LiteralPath $env:DEVSTACK_MATRIX_MD | Select-Object -First 40
 
       - name: Upload Windows feature matrix report
         if: always()
@@ -112,23 +119,23 @@ jobs:
             docs/test-report-v0.3.1.md
           if-no-files-found: warn
 
-      - name: Launch built exe — window responds + UI within 3s
+      - name: Launch built exe - window responds + UI within 3s
         timeout-minutes: 25
         shell: pwsh
         env:
-          DEVSTACK_DATA_DIR: ${{ runner.temp }}\devstack-launch-ui
+          DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-launch-ui
         run: |
           $ErrorActionPreference = 'Stop'
           # Real Tauri app (not smoke bin): catches AppHangB1 / "Tauri App" title / blocked setup.
           npm run build
           npx tauri build --no-bundle
-          $exe = Join-Path (Get-Location) 'src-tauri\target\release\devstack.exe'
-          if (-not (Test-Path $exe)) {
-            $exe = Get-ChildItem -Path 'src-tauri\target\release' -Filter 'devstack.exe' -Recurse -ErrorAction SilentlyContinue |
+          $exe = Join-Path (Get-Location) 'src-tauri/target/release/devstack.exe'
+          if (-not (Test-Path -LiteralPath $exe)) {
+            $exe = Get-ChildItem -Path 'src-tauri/target/release' -Filter 'devstack.exe' -Recurse -ErrorAction SilentlyContinue |
               Select-Object -First 1 -ExpandProperty FullName
           }
-          if (-not $exe -or -not (Test-Path $exe)) { throw "devstack.exe not found after tauri build" }
-          & .\scripts\windows-ui-launch.ps1 -Exe $exe -DataDir $env:DEVSTACK_DATA_DIR -TimingsJson (Join-Path $env:RUNNER_TEMP 'devstack-ui-launch.json')
+          if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { throw "devstack.exe not found after tauri build" }
+          & "$env:GITHUB_WORKSPACE/scripts/windows-ui-launch.ps1" -Exe $exe -DataDir $env:DEVSTACK_DATA_DIR -TimingsJson (Join-Path $env:RUNNER_TEMP 'devstack-ui-launch.json')
           if ($LASTEXITCODE -ne 0) { throw "windows-ui-launch.ps1 failed ($LASTEXITCODE)" }
 
       - name: Upload UI launch timings
