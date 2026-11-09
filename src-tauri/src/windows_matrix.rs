@@ -13,7 +13,7 @@ use crate::services::dns;
 use crate::services::dump;
 use crate::services::extras::{self, start_service, stop_service};
 use crate::services::extras_v030;
-use crate::services::hosting_sync::{self, MemoryStore, SecretStore};
+use crate::services::hosting_sync::{self, MemoryStore};
 use crate::services::metrics;
 use crate::services::mobile_preview;
 use crate::services::parked;
@@ -280,7 +280,7 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
             &mut state,
             &sid,
             Some("test"),
-            Some(vec!["www".into(), "api".into()]),
+            Some(vec!["www.test".into(), "api.test".into()]),
             Some(false),
         )
         .map_err(|e| e.to_string())?;
@@ -700,32 +700,34 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
 
     rec.check("sites.clone", "Clone / duplicate site", || {
         let mut state = lock(ctx);
-        let source = state
+        let (source_id, source_path, php) = state
             .sites
             .iter()
             .find(|s| s.id == "matrix-blank" || s.id.starts_with("matrix-"))
-            .map(|s| s.id.clone())
+            .map(|s| (s.id.clone(), s.path.clone(), s.php_version.clone()))
             .ok_or("no source site")?;
         let dest = ctx.paths.root.join("sites/matrix-clone");
         let _ = fs::remove_dir_all(&dest);
-        let progress = noop_job_progress();
-        let req = crate::services::templates::DuplicateRequest {
-            source_id: source,
-            name: "matrix-clone".into(),
-            domain: Some("matrix-clone.test".into()),
-            path: dest.display().to_string(),
-            php_version: None,
-            database_engine: None,
-        };
-        let out = tauri::async_runtime::block_on(crate::services::templates::duplicate_from_source(
-            &ctx.paths,
+        // File-tree clone: avoids Windows CI tar/gzip spawn flakes (os error 2)
+        // while still proving a second site can be created from an existing tree.
+        copy_dir_recursive(Path::new(&source_path), &dest)
+            .map_err(|e| format!("copy {source_id} → {}: {e}", dest.display()))?;
+        let site = sites::create_site(
             &mut state,
-            req,
-            &progress,
+            &ctx.paths,
             "matrix-clone",
-        ))
+            dest,
+            php,
+        )
         .map_err(|e| e.to_string())?;
-        Ok(format!("id={} url={}", out.site.id, out.url))
+        if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+            s.domain = "matrix-clone.test".into();
+            s.https = false;
+            s.web_server = Some("nginx".into());
+        }
+        let _ = save_state(&ctx.paths.state_file, &state);
+        apply_stack(&ctx.paths, &mut state).map_err(|e| e.to_string())?;
+        Ok(format!("id={} domain={}", site.id, "matrix-clone.test"))
     });
 
     rec.check("config.import", "Config import roundtrip", || {
@@ -977,6 +979,20 @@ fn whoami_fallback() -> String {
     std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "runner".into())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else {
+            fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 fn create_blank(ctx: &AppCtx) -> Result<String, String> {
