@@ -68,17 +68,15 @@ jobs:
       - name: Enable OpenSSH Server for hosting SFTP E2E
         timeout-minutes: 10
         shell: pwsh
-        continue-on-error: true
         run: |
           $ErrorActionPreference = 'Stop'
-          # Script writes DEVSTACK_HOSTING_SSH_* to GITHUB_ENV on success; soft-fails otherwise.
+          # Hard requirement: hosting.sftp_live must PASS before release.
           & .\scripts\windows-sshd-hosting.ps1
           if ($LASTEXITCODE -ne 0) { throw "windows-sshd-hosting.ps1 failed ($LASTEXITCODE)" }
-          if (-not $env:DEVSTACK_HOSTING_SSH_HOST) {
-            Write-Host 'Hosting SSH env not set — matrix will skip live SFTP'
-          } else {
-            Write-Host "Hosting SSH env ready for $($env:DEVSTACK_HOSTING_SSH_USER)@$($env:DEVSTACK_HOSTING_SSH_HOST)"
+          if (-not $env:DEVSTACK_HOSTING_SSH_HOST -or -not $env:DEVSTACK_HOSTING_SSH_PASSWORD) {
+            throw 'DEVSTACK_HOSTING_SSH_HOST/PASSWORD not set after OpenSSH setup'
           }
+          Write-Host "Hosting SSH env ready for $($env:DEVSTACK_HOSTING_SSH_USER)@$($env:DEVSTACK_HOSTING_SSH_HOST)"
 
       - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip + Windows feature matrix
         working-directory: src-tauri

@@ -13,7 +13,7 @@ use crate::services::dns;
 use crate::services::dump;
 use crate::services::extras::{self, start_service, stop_service};
 use crate::services::extras_v030;
-use crate::services::hosting_sync::{self, MemoryStore};
+use crate::services::hosting_sync::{self, MemoryStore, SecretStore};
 use crate::services::metrics;
 use crate::services::mobile_preview;
 use crate::services::parked;
@@ -53,7 +53,7 @@ pub struct MatrixReport {
     pub total_ms: u128,
     pub passed: usize,
     pub failed: usize,
-    pub disabled: usize,
+    pub skipped: usize,
     pub features: Vec<FeatureResult>,
 }
 
@@ -95,8 +95,9 @@ impl Recorder {
         self.record(id, name, "fail", ms, detail);
     }
 
-    fn disabled(&mut self, id: &str, name: &str, detail: impl Into<String>) {
-        self.record(id, name, "disabled", 0, detail);
+    /// Platform/UI-gated feature with a clear message (not a soft-fail of a required check).
+    fn skipped(&mut self, id: &str, name: &str, detail: impl Into<String>) {
+        self.record(id, name, "skipped", 0, detail);
     }
 
     fn check(&mut self, id: &str, name: &str, f: impl FnOnce() -> Result<String, String>) {
@@ -195,10 +196,10 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
                 || ctx.paths.root.join("packages/apache").exists()
         };
         if !apache_installed {
-            rec.disabled(
+            rec.skipped(
                 "toggle.web_server",
                 "Nginx ↔ Apache toggle",
-                "apache not installed in this CI data dir",
+                "SKIPPED: apache not installed in this CI data dir",
             );
         } else {
             rec.check("toggle.web_server", "Nginx ↔ Apache toggle", || {
@@ -324,7 +325,11 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
                 || (extras_v030::is_new_service(id) && extras_v030::is_installed(&state, id))
         };
         if !installed {
-            rec.disabled(&fid, &fname, format!("{id} not installed in this CI data dir"));
+            rec.skipped(
+                &fid,
+                &fname,
+                format!("SKIPPED: {id} not installed in this CI data dir"),
+            );
             continue;
         }
         rec.check(&fid, &fname, || {
@@ -570,18 +575,29 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
         }
     });
 
-    // Live hosting SFTP against local OpenSSH when CI sets DEVSTACK_HOSTING_SSH_*.
-    if let Ok(host) = std::env::var("DEVSTACK_HOSTING_SSH_HOST") {
+    // Live hosting SFTP against local OpenSSH (required on Windows CI).
+    if std::env::var("DEVSTACK_HOSTING_SSH_HOST").is_ok() {
         rec.check("hosting.sftp_live", "Hosting SFTP dry-run + push/pull", || {
+            let host = std::env::var("DEVSTACK_HOSTING_SSH_HOST").unwrap();
             let port: u16 = std::env::var("DEVSTACK_HOSTING_SSH_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(22);
             let user = std::env::var("DEVSTACK_HOSTING_SSH_USER")
                 .unwrap_or_else(|_| whoami_fallback());
-            let key = std::env::var("DEVSTACK_HOSTING_SSH_KEY").map_err(|_| "DEVSTACK_HOSTING_SSH_KEY missing")?;
+            let password = std::env::var("DEVSTACK_HOSTING_SSH_PASSWORD").ok();
+            let key = std::env::var("DEVSTACK_HOSTING_SSH_KEY").ok();
+            if password.is_none() && key.is_none() {
+                return Err("need DEVSTACK_HOSTING_SSH_PASSWORD or _KEY".into());
+            }
             let remote = std::env::var("DEVSTACK_HOSTING_SSH_REMOTE")
                 .unwrap_or_else(|_| format!("/tmp/devstack-hosting-{}", std::process::id()));
+            let auth = if password.is_some() {
+                "password"
+            } else {
+                "key"
+            };
+            let store = MemoryStore::default();
             let site_id = {
                 let state = lock(ctx);
                 let sid = state
@@ -595,23 +611,27 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
                     host: host.clone(),
                     port,
                     user: user.clone(),
-                    auth: "key".into(),
-                    key_path: Some(key),
+                    auth: auth.into(),
+                    key_path: key.clone(),
                     remote_path: remote.clone(),
                     remote_url: None,
                     site_id: Some(sid.clone()),
                     excludes: vec![".git/".into()],
                     remote_db: None,
-                    has_password: false,
+                    has_password: password.is_some(),
                     has_db_password: false,
                 };
-                let store = MemoryStore::default();
-                hosting_sync::save_profile(&ctx.paths, &store, profile, None, None)
-                    .map_err(|e| e.to_string())?;
+                hosting_sync::save_profile(
+                    &ctx.paths,
+                    &store,
+                    profile,
+                    password.clone(),
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
                 sid
             };
             let state = lock(ctx);
-            let store = MemoryStore::default();
             let plan = hosting_sync::preview(
                 &ctx.paths,
                 &state,
@@ -650,18 +670,25 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
             )
             .map_err(|e| e.to_string())?;
             Ok(format!(
-                "site={site_id} dry={} push_files={} pull_files={} tool={}",
+                "site={site_id} auth={auth} dry={} push_files={} pull_files={} tool={}",
                 plan.entries.len(),
                 push.files_transferred,
                 pull.files_transferred,
                 plan.tool
             ))
         });
-    } else {
-        rec.disabled(
+    } else if cfg!(windows) {
+        rec.fail(
             "hosting.sftp_live",
             "Hosting SFTP dry-run + push/pull",
-            "DEVSTACK_HOSTING_SSH_* not set (CI enables OpenSSH and re-runs)",
+            0,
+            "FAIL: DEVSTACK_HOSTING_SSH_* not set — Windows hosting must PASS before release",
+        );
+    } else {
+        rec.skipped(
+            "hosting.sftp_live",
+            "Hosting SFTP dry-run + push/pull",
+            "SKIPPED: DEVSTACK_HOSTING_SSH_* not set (Windows-only required gate)",
         );
     }
 
@@ -754,13 +781,30 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
                 0,
                 format!("reused id={}", wp.id),
             ),
-            None => rec.disabled(
+            None => rec.skipped(
                 "wordpress.create_or_reuse",
                 "WordPress site create",
-                "no WordPress site in data dir after e2e (covered by --wordpress when network allows)",
+                "SKIPPED: no WordPress site in data dir after e2e (run --wordpress / --e2e with network)",
             ),
         }
     }
+
+    // Redis must be present after e2e services smoke — record an explicit matrix result.
+    rec.check("svc.redis_required", "Redis install + start (required)", || {
+        let state = lock(ctx);
+        if !state.installed.contains_key("redis") {
+            return Err("redis not installed — required PASS before release".into());
+        }
+        Ok(format!(
+            "installed={}",
+            state
+                .installed
+                .get("redis")
+                .and_then(|v| v.first())
+                .map(|r| r.version.as_str())
+                .unwrap_or("?")
+        ))
+    });
 
     rec.check("upgrade.state_v029", "Load 0.2.9-shaped state", || {
         let dir = ctx.paths.root.join("upgrade-sim");
@@ -805,7 +849,7 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
 
     let passed = rec.features.iter().filter(|f| f.status == "pass").count();
     let failed = rec.features.iter().filter(|f| f.status == "fail").count();
-    let disabled = rec.features.iter().filter(|f| f.status == "disabled").count();
+    let skipped = rec.features.iter().filter(|f| f.status == "skipped").count();
     let report = MatrixReport {
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
@@ -814,7 +858,7 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
         total_ms: wall.elapsed().as_millis(),
         passed,
         failed,
-        disabled,
+        skipped,
         features: rec.features,
     };
 
@@ -828,9 +872,25 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
     .map_err(|e| e.to_string())?;
     write_markdown(report_path, &report)?;
     println!(
-        "MATRIX DONE pass={passed} fail={failed} disabled={disabled} total_ms={}",
+        "MATRIX DONE pass={passed} fail={failed} skipped={skipped} total_ms={}",
         report.total_ms
     );
+    // Required gates must never be skipped or failed.
+    let required: &[&str] = if cfg!(windows) {
+        &["hosting.sftp_live", "svc.redis_required"]
+    } else {
+        &["svc.redis_required"]
+    };
+    for req in required {
+        if let Some(f) = report.features.iter().find(|f| f.id == *req) {
+            if f.status != "pass" {
+                return Err(format!(
+                    "required gate `{req}` is {} — {}",
+                    f.status, f.detail
+                ));
+            }
+        }
+    }
     if failed > 0 {
         return Err(format!(
             "{failed} feature(s) failed — see {}",
@@ -860,14 +920,17 @@ fn write_markdown(json_path: &Path, report: &MatrixReport) -> Result<(), String>
         report.started_at, report.os, report.arch, report.version, report.total_ms
     ));
     md.push_str(&format!(
-        "**Results:** {} passed · {} failed · {} disabled\n\n",
-        report.passed, report.failed, report.disabled
+        "**Results:** {} passed · {} failed · {} skipped\n\n",
+        report.passed, report.failed, report.skipped
     ));
+    md.push_str(
+        "Skipped rows are **not** passes — each includes an explicit `SKIPPED:` reason. Required gates (`hosting.sftp_live`, `svc.redis_required`) must be `pass` before release.\n\n",
+    );
     md.push_str("## Hang root cause (v0.3.0 → 0.3.1)\n\n");
     md.push_str(
         "v0.3.0 AppHangB1 on Win11: `tray::setup` nested `async_runtime::block_on` inside Tauri `.setup()` while the launch thread held the state mutex (deadlock). `tauri.windows.conf.json` also dropped `title`, so the hung window showed `Tauri App`. Fixed with non-blocking tray, forced `DevStack` title, phase logs, and a 2s stall watchdog.\n\n",
     );
-    md.push_str("## Features disabled on Windows (clear UI)\n\n");
+    md.push_str("## Features with clear Windows UI (not soft-fails)\n\n");
     md.push_str("| Feature | UI message |\n| --- | --- |\n");
     md.push_str("| Typesense | Not available on Windows — Typesense does not publish Windows binaries. |\n");
     md.push_str("| SPX profiler | No official php_spx.dll — UI offers Xdebug profiling instead. |\n");
@@ -883,6 +946,18 @@ fn write_markdown(json_path: &Path, report: &MatrixReport) -> Result<(), String>
             f.ms,
             f.detail.replace('|', "\\|")
         ));
+    }
+    let skipped_rows: Vec<_> = report
+        .features
+        .iter()
+        .filter(|f| f.status == "skipped")
+        .collect();
+    if !skipped_rows.is_empty() {
+        md.push_str("\n## Skipped (explicit — not passes)\n\n");
+        for f in skipped_rows {
+            md.push_str(&format!("- **{}** (`{}`): {}\n", f.name, f.id, f.detail));
+        }
+        md.push('\n');
     }
     if let Some(parent) = md_path.parent() {
         let _ = fs::create_dir_all(parent);

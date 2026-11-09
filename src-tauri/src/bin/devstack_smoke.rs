@@ -1098,40 +1098,44 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
     println!("=== Milestone 4 services smoke (Postgres / Mongo / Redis / Mailpit) ===");
 
     // Prefer Redis 7.4.x on Unix (source build); Windows uses tporadowski 5.x zips.
-    // download.redis.io occasionally DNS-fails on macOS runners — soft-skip after retries.
-    let mut redis_ok = false;
-    match pick_version(ctx, "redis", |v| {
+    // Provider retries download.redis.io then GitHub source mirror — Redis must PASS.
+    let redis_ver = pick_version(ctx, "redis", |v| {
         v.starts_with("7.4.") || v.starts_with("7.") || v.starts_with("5.0.")
     })
-    .await
-    {
-        Ok(redis_ver) => {
-            println!("Installing Redis {redis_ver}…");
-            for attempt in 1..=3u32 {
-                match install_pkg(ctx, "redis", &redis_ver).await {
-                    Ok(()) => {
-                        redis_ok = true;
-                        break;
-                    }
-                    Err(e) => {
-                        println!("[redis] install {redis_ver} attempt {attempt}/3 failed ({e})");
-                        tokio::time::sleep(Duration::from_secs(2u64 * attempt as u64)).await;
-                    }
-                }
+    .await?;
+    println!("Installing Redis {redis_ver}…");
+    let mut redis_ok = false;
+    let mut last_err = None;
+    for attempt in 1..=4u32 {
+        match install_pkg(ctx, "redis", &redis_ver).await {
+            Ok(()) => {
+                redis_ok = true;
+                break;
             }
-            if !redis_ok {
-                if let Ok(alt) = pick_version(ctx, "redis", |_| true).await {
-                    match install_pkg(ctx, "redis", &alt).await {
-                        Ok(()) => redis_ok = true,
-                        Err(e) => println!("[redis] latest listed install soft-skip ({e})"),
-                    }
-                }
+            Err(e) => {
+                println!("[redis] install {redis_ver} attempt {attempt}/4 failed ({e})");
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_secs(3u64 * attempt as u64)).await;
             }
         }
-        Err(e) => println!("[redis] version list soft-skip ({e})"),
     }
     if !redis_ok {
-        println!("[redis] continuing without Redis (download flaked)");
+        if let Ok(alt) = pick_version(ctx, "redis", |_| true).await {
+            println!("[redis] retrying latest listed {alt}…");
+            match install_pkg(ctx, "redis", &alt).await {
+                Ok(()) => redis_ok = true,
+                Err(e) => last_err = Some(e),
+            }
+        }
+    }
+    if !redis_ok {
+        return Err(format!(
+            "Redis install failed after retries: {}",
+            last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        )
+        .into());
     }
 
     let mailpit_ver = pick_version(ctx, "mailpit", |_| true).await?;
@@ -1166,27 +1170,20 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
 
     {
         let mut state = ctx.state.lock().await;
-        let mut ids = vec!["postgresql", "mongodb", "mailpit"];
-        if redis_ok {
-            ids.insert(0, "redis");
-        }
-        for id in ids {
+        for id in ["redis", "postgresql", "mongodb", "mailpit"] {
             println!("Starting {id}…");
             start_service(&ctx.paths, &mut state, id)?;
         }
     }
 
     // Probe ports
-    let mut ports = vec![
-        ("postgresql", 5432u16),
+    for (name, port) in [
+        ("redis", 6379u16),
+        ("postgresql", 5432),
         ("mongodb", 27017),
         ("mailpit-ui", 8025),
         ("mailpit-smtp", 1025),
-    ];
-    if redis_ok {
-        ports.insert(0, ("redis", 6379));
-    }
-    for (name, port) in ports {
+    ] {
         let ok = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
         println!("port {port} ({name}): {}", if ok { "open" } else { "CLOSED" });
         if !ok {
@@ -1195,7 +1192,7 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
     }
 
     // Redis PING
-    if redis_ok {
+    {
         let state = ctx.state.lock().await;
         let root = state
             .installed
@@ -1274,20 +1271,12 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
 
     {
         let mut state = ctx.state.lock().await;
-        let mut ids = vec!["mailpit", "mongodb", "postgresql"];
-        if redis_ok {
-            ids.push("redis");
-        }
-        for id in ids {
+        for id in ["mailpit", "mongodb", "postgresql", "redis"] {
             let _ = stop_service(&ctx.paths, &mut state, id);
         }
     }
 
-    if redis_ok {
-        println!("SMOKE PASS: Postgres + MongoDB + Redis + Mailpit");
-    } else {
-        println!("SMOKE PASS: Postgres + MongoDB + Mailpit (Redis soft-skipped)");
-    }
+    println!("SMOKE PASS: Postgres + MongoDB + Redis + Mailpit");
     Ok(())
 }
 
