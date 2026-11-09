@@ -1,4 +1,4 @@
-# Performance (v0.3.0)
+# Performance (v0.3.1)
 
 Targets and the CI regression gate for the hot paths.
 
@@ -6,9 +6,9 @@ Targets and the CI regression gate for the hot paths.
 
 | Metric | Target | CI budget (unix) | CI budget (Windows) |
 | --- | --- | --- | --- |
-| Warm `apply_stack` (start from stopped, after warm-up start+stop) | < 3 s (unix) | **4000 ms** | **60000 ms** (Windows CI MariaDB spawn) |
-| HTTPS toggle (`apply_site_environment_change`) | < 1 s | **3000 ms** | **8000 ms** |
-| Web-server (nginx <-> apache) toggle | < 1 s | **3000 ms** | **8000 ms** |
+| Warm `apply_stack` (DB kept up via `stop_web_stack`) | < 3 s (unix) / < 5 s (Windows) | **4000 ms** | **5000 ms** |
+| HTTPS toggle (`apply_site_environment_change`) | < 1 s | **3000 ms** | **1000 ms** |
+| Web-server (nginx <-> apache) toggle | < 1 s | **3000 ms** | **1000 ms** |
 
 Constants live in `src-tauri/src/services/perf.rs` (`WARM_APPLY_STACK_BUDGET_MS_*`,
 `TOGGLE_BUDGET_MS_*`). Budgets are intentionally above the targets so CI jitter does
@@ -26,14 +26,14 @@ PERF_BENCH apply_stack_warm_ms=… https_toggle_ms=… apache_toggle_ms=… cold
 Methodology:
 
 1. Create a throwaway `perfbench` site (nginx, HTTPS).
-2. Warm-up: `stop_stack` then `apply_stack` (primes page cache, certs, php.ini, DB
-   datadir) then `stop_stack`. The warm-up `apply_stack` is reported as
-   `cold_apply_stack_ms`.
-3. Measure `apply_stack` from the fully stopped stack **twice**; the reported
-   `apply_stack_warm_ms` is the best of the two (a regression slows both runs, a
-   scheduler hiccup only one).
+2. Cold warm-up: full `stop_stack` then `apply_stack` (primes page cache, certs,
+   php.ini, DB datadir). Reported as `cold_apply_stack_ms`.
+3. `stop_web_stack` leaves MariaDB running; measure `apply_stack` **twice**. The
+   reported `apply_stack_warm_ms` is the best of the two (Windows must not re-pay
+   InnoDB spawn for a "warm" start).
 4. With the stack up, time the HTTPS toggle (off then on) and the web-server toggle
-   (apache then nginx); the slower direction is reported.
+   (apache then nginx); the slower direction is reported. Both front-ends dual-bind
+   every site so Windows toggles stay under 1s without FOREGROUND stop+start.
 5. Remove the site, reload, stop the stack, then enforce the budgets above.
 
 Before/after for a change: build the old commit with the bench file copied in

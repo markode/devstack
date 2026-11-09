@@ -8,6 +8,7 @@ pub mod packages;
 pub mod paths_util;
 pub mod php;
 pub mod services;
+pub mod startup;
 pub mod tray;
 
 use std::sync::Arc;
@@ -60,11 +61,26 @@ pub fn run() {
         return;
     }
 
+    startup::spawn_watchdog();
+    startup::phase("bootstrap", "creating AppCtx");
     let ctx = bootstrap_ctx(default_data_root()).expect("failed to init DevStack data dir");
     let ctx = Arc::new(ctx);
+    startup::phase("bootstrap", "AppCtx ready");
+
+    // Orphan reclaim + dump receiver + version prefetch must never run on the
+    // UI/setup thread. Kill only processes whose cmdline references our data dir.
+    {
+        let orphan_paths = ctx.paths.clone();
+        std::thread::spawn(move || {
+            startup::reclaim_orphans(&orphan_paths);
+            startup::heartbeat();
+        });
+    }
+
     if let Err(e) = services::dump::start_dump_server(&ctx.paths) {
         eprintln!("devstack dump receiver: {e}");
     }
+    startup::phase("dump", "receiver started (or skipped)");
     prefetch_version_lists(ctx.clone());
     // Background launch work. The state lock is held only for the cheap state
     // mutations (port remap, parked sync); php.ini regeneration, WP URL rewrites and
@@ -73,15 +89,17 @@ pub fn run() {
     {
         let launch_ctx = ctx.clone();
         std::thread::spawn(move || {
+            startup::phase("launch", "background launch thread begin");
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             else {
                 return;
             };
+            // Port remap can take a moment (TCP table); parked sync scans dirs —
+            // both must stay off the main/setup thread and not starve tray refresh.
             let (snapshot, remap_before) = rt.block_on(async {
                 let mut state = launch_ctx.state.lock().await;
-                // Persist free ports beside WAMP/MAMP/IIS before the UI opens.
                 let before = crate::services::ports::PortSnapshot::from_stack(&state.stack);
                 let owned = crate::services::ports::owned_runtime_pids_with_files(
                     &launch_ctx.paths,
@@ -97,6 +115,8 @@ pub fn run() {
                 notice.extend(crate::services::ports::classic_web_port_notice(&state.stack));
                 state.runtime.port_notice = notice;
                 let mut dirty = remap.changed;
+                // Drop the lock before filesystem walks would be ideal, but
+                // sync_parked_sites only reads immediate children (not recursive).
                 if let Ok(n) = crate::services::parked::sync_parked_sites(&launch_ctx.paths, &mut state) {
                     dirty |= n > 0;
                 }
@@ -105,8 +125,9 @@ pub fn run() {
                 }
                 (state.clone(), remap.changed.then_some(before))
             });
+            startup::phase("launch", "port remap + parked sync done");
+            startup::heartbeat();
             if let Some(before) = remap_before {
-                // Best-effort WP URL rewrite (DB may not be up yet on cold launch).
                 let _ = crate::services::stack::rewrite_all_wp_urls_for_port_remap(
                     &launch_ctx.paths,
                     &snapshot,
@@ -114,13 +135,13 @@ pub fn run() {
                 );
             }
             let _ = crate::services::db_files::databases_folder(&launch_ctx.paths, &snapshot.db_files);
-            // Regenerate managed php.ini (Windows extension_dir + modules) — once.
             let _ = crate::php::regenerate_all_php_ini(&launch_ctx.paths, &snapshot);
             crate::services::metrics::reapply_spx(&launch_ctx.paths, &snapshot);
-            // Auto-sync hosts+CA on launch when the DevStack block is missing (may prompt UAC).
             if let Err(e) = crate::services::dns::ensure_hosts_if_needed(&launch_ctx.paths, &snapshot) {
                 eprintln!("devstack hosts auto-sync: {e}");
             }
+            startup::phase("launch", "background launch thread complete");
+            startup::heartbeat();
         });
     }
 
@@ -200,7 +221,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(ctx)
         .setup(|app| {
+            startup::phase("setup", "enter");
             let handle = app.handle().clone();
+            {
+                use tauri::Manager;
+                if let Some(win) = app.get_webview_window("main") {
+                    // Platform windows.conf can replace the window array and drop
+                    // product title — force DevStack so Win11 never shows "Tauri App".
+                    let _ = win.set_title("DevStack");
+                    startup::phase("setup", "window title set");
+                }
+            }
             {
                 let dump_handle = handle.clone();
                 crate::services::dump::attach_emitter(move |entry| {
@@ -211,25 +242,48 @@ pub fn run() {
             {
                 use tauri::Manager;
                 let ctx: Arc<commands::AppCtx> = app.state::<Arc<commands::AppCtx>>().inner().clone();
+                // Tray must not block_on the state mutex (nested runtime → AppHangB1).
+                startup::phase("setup", "tray begin");
                 if let Err(e) = tray::setup(&handle, &ctx) {
                     crate::applog::warn("tray", format!("tray unavailable: {e}"));
                 }
+                startup::phase("setup", "tray placeholder ready");
+                // Fill the real tray menu off the setup path.
+                {
+                    let (tray_app, tray_ctx) = (handle.clone(), ctx.clone());
+                    tauri::async_runtime::spawn(async move {
+                        startup::phase("tray", "async refresh begin");
+                        tray::refresh(&tray_app, &tray_ctx).await;
+                        startup::phase("tray", "async refresh done");
+                        startup::heartbeat();
+                    });
+                }
                 spawn_background_jobs(handle.clone(), ctx);
+                startup::phase("setup", "background jobs spawned");
             }
             crate::applog::attach_emitter(move |entry| {
                 use tauri::Emitter;
                 let _ = handle.emit("app-log", entry);
             });
-            // Windows: undecorated chrome needs an explicit shadow so Win11 keeps
-            // rounded corners + DWM border (resize / Snap still work via system).
+            // Windows: undecorated chrome + DWM shadow. Defer off setup so a
+            // stuck WebView2/DWM call cannot hang the main thread before paint.
             #[cfg(target_os = "windows")]
             {
                 use tauri::Manager;
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.set_decorations(false);
-                    let _ = win.set_shadow(true);
-                }
+                let win_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    startup::phase("chrome", "set_decorations/set_shadow begin");
+                    if let Some(win) = win_handle.get_webview_window("main") {
+                        let _ = win.set_decorations(false);
+                        let _ = win.set_shadow(true);
+                        let _ = win.set_title("DevStack");
+                    }
+                    startup::phase("chrome", "set_decorations/set_shadow done");
+                    startup::heartbeat();
+                });
             }
+            startup::arm_ui_heartbeat(app.handle().clone());
+            startup::mark_setup_complete();
             crate::applog::info("app", "Tauri setup complete");
             Ok(())
         })

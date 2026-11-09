@@ -36,5 +36,7 @@ pub mod site_templates;
 pub mod tld;
 pub mod xdebug_site;
 
-pub use stack::{apply_stack, stack_status, start_stack, stop_stack, StackStatus};
+pub use stack::{
+    apply_stack, stack_status, start_stack, stop_stack, stop_web_stack, StackStatus,
+};
 pub use sites::{detect_site, open_phpmyadmin_url, SiteDetails};

@@ -66,10 +66,9 @@ pub fn render_stack(
     // mailpit/phpMyAdmin proxy blocks.
     write_default_catch_all(&sites_dir, http_port, https_port)?;
 
+    // Write every site into nginx — Apache-preferred sites are dual-bound so a
+    // web-server toggle is a metadata/URL change, not a stop+start on Windows.
     for site in &state.sites {
-        if crate::services::httpd::site_uses_apache(site) {
-            continue;
-        }
         write_site_conf(
             paths,
             state,

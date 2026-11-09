@@ -519,6 +519,12 @@ impl Paths {
 }
 
 pub fn default_data_root() -> PathBuf {
+    if let Ok(dir) = std::env::var("DEVSTACK_DATA_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("DevStack")

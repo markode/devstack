@@ -1436,7 +1436,7 @@ export async function mockSetSpx(enabled: boolean): Promise<SpxStatus> {
 const mockArchiveMeta = (): ConfigArchiveMeta => ({
   format: "devstack-config",
   formatVersion: 1,
-  appVersion: "0.3.0",
+  appVersion: "0.3.1",
   createdAt: new Date(0).toISOString(),
   os: "mock",
   siteCount: sites.length,

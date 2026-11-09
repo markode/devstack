@@ -169,9 +169,14 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
     }
 }
 
-pub fn setup(app: &AppHandle, ctx: &Arc<AppCtx>) -> tauri::Result<()> {
-    let state = tauri::async_runtime::block_on(async { ctx.state.lock().await.clone() });
-    let menu = build_menu(app, &state)?;
+/// Install the tray with a lightweight placeholder menu.
+///
+/// Never call `block_on` here — Tauri's `.setup()` already runs on the async
+/// runtime, and nesting `block_on` deadlocks the main thread (Windows AppHangB1).
+/// Populate the real menu asynchronously via [`refresh`].
+pub fn setup(app: &AppHandle, _ctx: &Arc<AppCtx>) -> tauri::Result<()> {
+    // Empty default state: Sites/PHP submenus show "none" until refresh fills them.
+    let menu = build_menu(app, &AppState::default())?;
     let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
