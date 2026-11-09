@@ -246,6 +246,7 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
 pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Result<()> {
     if let Some(pid) = state.runtime.database_pid {
         if is_running(pid) && state.runtime.database_engine.as_deref() == Some(engine) {
+            println!("[database] {engine} pid={pid} still running — skip restart");
             return Ok(());
         }
         // Stale PID but our listen port still answers SELECT 1 (warm apply after
@@ -259,6 +260,7 @@ pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Resu
             }
             state.runtime.database_engine = Some(engine.into());
             state.active_database = Some(engine.into());
+            println!("[database] {engine} already accepting on port {port} — reusing without restart");
             crate::applog::info(
                 "database",
                 &format!("{engine} already accepting on port {port} — reusing without restart"),

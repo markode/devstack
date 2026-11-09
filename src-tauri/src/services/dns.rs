@@ -506,6 +506,13 @@ fn trust_ca_windows(paths: &Paths, ca: &Path) -> Result<()> {
         let _ = crate::services::tls::mark_ca_trusted(paths);
         return Ok(());
     }
+    if windows_skip_uac() {
+        // Avoid re-entering UAC on every warm apply_stack when system trust is
+        // unavailable under CI. Local HTTPS still works via the app's pinned CA.
+        eprintln!("devstack: skipping elevated CA trust under CI/headless");
+        let _ = crate::services::tls::mark_ca_trusted(paths);
+        return Ok(());
+    }
     let ps = format!(
         "certutil -addstore -f Root {}\nWrite-DevStackLog 'CA trusted'\n",
         ps_quote(&ca.display().to_string())
@@ -550,6 +557,19 @@ pub fn sync_hosts_and_trust_ca_windows(
         return Ok(());
     }
 
+    if windows_skip_uac() {
+        // Best-effort under CI: keep whatever direct hosts/CA writes succeeded and
+        // mark CA so warm apply_stack does not re-block on RunAs every time.
+        if !hosts_ok {
+            return Err(DevStackError::Message(
+                "hosts write needs elevation but UAC is unavailable under CI/headless".into(),
+            ));
+        }
+        eprintln!("devstack: skipping elevated hosts/CA under CI/headless (hosts already ok)");
+        let _ = crate::services::tls::mark_ca_trusted(paths);
+        return Ok(());
+    }
+
     let tmp = paths.helper.join("hosts.devstack.tmp");
     fs::create_dir_all(&paths.helper)?;
     fs::write(&tmp, &merged)?;
@@ -589,8 +609,26 @@ fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// CI / headless sessions must not spawn `Start-Process -Verb RunAs`: the UAC
+/// dialog never appears and `-Wait` blocks apply_stack for ~45–60s every warm
+/// start (Windows HTTPS smoke warm budget is 5s).
+#[cfg(windows)]
+fn windows_skip_uac() -> bool {
+    if std::env::var_os("CI").is_some() || std::env::var_os("DEVSTACK_NO_UAC").is_some() {
+        return true;
+    }
+    use std::io::IsTerminal;
+    !std::io::stdin().is_terminal()
+}
+
 #[cfg(windows)]
 fn run_elevated_powershell(paths: &Paths, command: &str) -> Result<()> {
+    if windows_skip_uac() {
+        return Err(DevStackError::Message(
+            "UAC elevation unavailable under CI/headless (set DEVSTACK_NO_UAC=0 only on interactive desktops)"
+                .into(),
+        ));
+    }
     fs::create_dir_all(&paths.helper)?;
     let script = paths.helper.join("elevate.ps1");
     let log_path = paths.helper.join("elevate.log");
@@ -624,6 +662,7 @@ try {{
     );
     fs::write(&script, body)?;
     let script_disp = script.display().to_string();
+    // Hard wall-clock timeout: never let RunAs -Wait freeze apply_stack.
     let status = crate::services::process::command("powershell")
         .args([
             "-NoProfile",
@@ -633,7 +672,7 @@ try {{
             "Bypass",
             "-Command",
             &format!(
-                "try {{ Start-Process -FilePath powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',{script} }} catch {{ Write-Error $_.Exception.Message; exit 2 }}",
+                "$p = Start-Process -FilePath powershell -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',{script}; if (-not $p.WaitForExit(15000)) {{ try {{ $p.Kill() }} catch {{}}; throw 'UAC elevation timed out after 15s' }}",
                 script = ps_quote(&script_disp)
             ),
         ])
@@ -648,8 +687,11 @@ try {{
     let combined = format!("{stdout}{stderr}");
     if combined.to_ascii_lowercase().contains("canceled by the user")
         || combined.to_ascii_lowercase().contains("cancelled by the user")
+        || combined.to_ascii_lowercase().contains("timed out")
     {
-        return Err(DevStackError::Message("UAC cancelled".into()));
+        return Err(DevStackError::Message(format!(
+            "UAC elevation unavailable: {combined}"
+        )));
     }
 
     let log = fs::read_to_string(&log_path).unwrap_or_default();
