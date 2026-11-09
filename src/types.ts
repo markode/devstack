@@ -303,6 +303,8 @@ export interface ManagedServiceStatus {
   logPath?: string | null;
   uiUrl?: string | null;
   notes?: string | null;
+  /** False when the platform cannot run this service (e.g. Typesense on Windows). */
+  available?: boolean;
 }
 
 export interface PhpExtensionView {

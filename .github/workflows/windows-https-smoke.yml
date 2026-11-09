@@ -65,19 +65,39 @@ jobs:
           npx playwright install chromium
           npm run test:e2e
 
-      - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip
+      - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip + Windows feature matrix
         working-directory: src-tauri
-        timeout-minutes: 40
+        timeout-minutes: 50
         shell: pwsh
         env:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}\devstack-e2e
           DEVSTACK_RESET_SITES: "1"
+          DEVSTACK_MATRIX_JSON: ${{ runner.temp }}\windows-matrix.json
+          DEVSTACK_MATRIX_MD: ${{ github.workspace }}\docs\test-report-v0.3.1.md
         run: |
           $ErrorActionPreference = 'Stop'
           cargo build --bin devstack_smoke --release
           $bin = Join-Path (Get-Location) 'target\release\devstack_smoke.exe'
           & $bin --e2e
           if ($LASTEXITCODE -ne 0) { throw "devstack_smoke --e2e failed ($LASTEXITCODE)" }
+          if (-not (Test-Path $env:DEVSTACK_MATRIX_JSON)) {
+            throw "Windows feature matrix JSON missing at $($env:DEVSTACK_MATRIX_JSON)"
+          }
+          if (-not (Test-Path $env:DEVSTACK_MATRIX_MD)) {
+            throw "Windows feature matrix report missing at $($env:DEVSTACK_MATRIX_MD)"
+          }
+          Write-Host "Matrix report written to $($env:DEVSTACK_MATRIX_MD)"
+          Get-Content $env:DEVSTACK_MATRIX_MD | Select-Object -First 40
+
+      - name: Upload Windows feature matrix report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-feature-matrix-v0.3.1
+          path: |
+            ${{ runner.temp }}/windows-matrix.json
+            docs/test-report-v0.3.1.md
+          if-no-files-found: warn
 
       - name: Launch built exe — window responds + UI within 3s
         timeout-minutes: 25
@@ -97,17 +117,22 @@ jobs:
           if (-not $exe -or -not (Test-Path $exe)) { throw "devstack.exe not found after tauri build" }
           Write-Host "Launching $exe"
           New-Item -ItemType Directory -Force -Path $env:DEVSTACK_DATA_DIR | Out-Null
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
           $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Normal
           $deadline = (Get-Date).AddSeconds(3)
           $okTitle = $false
           $okResponding = $false
+          $titleMs = $null
           try {
             while ((Get-Date) -lt $deadline) {
               Start-Sleep -Milliseconds 100
               $p = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
               if (-not $p) { throw "devstack.exe exited during startup (code $($proc.ExitCode))" }
               if ($p.Responding) { $okResponding = $true }
-              if ($p.MainWindowTitle -match 'DevStack') { $okTitle = $true }
+              if ($p.MainWindowTitle -match 'DevStack') {
+                $okTitle = $true
+                if (-not $titleMs) { $titleMs = $sw.ElapsedMilliseconds }
+              }
               if ($okResponding -and $okTitle) { break }
             }
             $p = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
@@ -120,19 +145,59 @@ jobs:
             }
             # Setup phase log must show completion (watchdog / non-blocking setup).
             $logFile = Join-Path $env:DEVSTACK_DATA_DIR 'logs\devstack.log'
-            $deadlineLog = (Get-Date).AddSeconds(2)
+            $deadlineLog = (Get-Date).AddSeconds(5)
             $sawSetup = $false
+            $sawTray = $false
             while ((Get-Date) -lt $deadlineLog) {
-              if ((Test-Path $logFile) -and (Select-String -Path $logFile -Pattern 'setup_complete|Tauri setup complete' -Quiet -ErrorAction SilentlyContinue)) {
-                $sawSetup = $true
-                break
+              if (Test-Path $logFile) {
+                if (Select-String -Path $logFile -Pattern 'setup_complete|Tauri setup complete' -Quiet -ErrorAction SilentlyContinue) {
+                  $sawSetup = $true
+                }
+                if (Select-String -Path $logFile -Pattern 'tray|system tray|Tray' -Quiet -ErrorAction SilentlyContinue) {
+                  $sawTray = $true
+                }
               }
+              if ($sawSetup) { break }
               Start-Sleep -Milliseconds 100
             }
             if (-not $sawSetup) {
               Write-Host "WARN: setup_complete not yet in logs (window still responded)"
             }
-            Write-Host "Launch OK: title=DevStack responding=True within 3s"
+            # Custom titlebar: window is chromeless (decorations=false) but MainWindowHandle must be valid.
+            if ($p.MainWindowHandle -eq [IntPtr]::Zero) {
+              throw "MainWindowHandle is zero — custom titlebar window missing"
+            }
+            # Titlebar button hit-test via Win32: WM_NCHITTEST on caption buttons region is flaky headless;
+            # assert the window still Responding after a synthetic minimize/restore via ShowWindow.
+            Add-Type @"
+            using System;
+            using System.Runtime.InteropServices;
+            public static class NativeWin {
+              [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+              [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+            }
+"@
+            $hwnd = $p.MainWindowHandle
+            [void][NativeWin]::ShowWindow($hwnd, 6) # SW_MINIMIZE
+            Start-Sleep -Milliseconds 200
+            [void][NativeWin]::ShowWindow($hwnd, 9) # SW_RESTORE
+            Start-Sleep -Milliseconds 200
+            $p2 = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+            if (-not $p2 -or -not $p2.Responding) {
+              throw "App hung after minimize/restore (titlebar control path)"
+            }
+            Write-Host "Launch OK: title=DevStack responding=True titleMs=$titleMs trayLog=$sawTray setup=$sawSetup"
+            # Persist UI timings for the matrix report artifact.
+            $uiJson = Join-Path $env:RUNNER_TEMP 'devstack-ui-launch.json'
+            if (-not $env:RUNNER_TEMP) { $uiJson = Join-Path $env:TEMP 'devstack-ui-launch.json' }
+            @{
+              titleMs = $titleMs
+              responding = $true
+              trayLogSeen = $sawTray
+              setupComplete = $sawSetup
+              mainWindowHandle = [int64]$hwnd
+            } | ConvertTo-Json | Set-Content -Path $uiJson -Encoding utf8
+            Write-Host "UI timings → $uiJson"
           } finally {
             if ($proc -and -not $proc.HasExited) {
               Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
@@ -140,6 +205,14 @@ jobs:
               Get-Process -Name 'devstack' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             }
           }
+
+      - name: Upload UI launch timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-ui-launch-v0.3.1
+          path: ${{ runner.temp }}/devstack-ui-launch.json
+          if-no-files-found: ignore
 
       - name: Synthetic HTTPS probe (hosts + openssl s_server + curl)
         timeout-minutes: 5

@@ -76,13 +76,30 @@ pub fn ui_url(state: &AppState, id: &str) -> Option<String> {
     }
 }
 
+/// Platform gate: Typesense does not publish Windows binaries.
+pub fn is_available_on_platform(id: &str) -> bool {
+    !(id == "typesense" && cfg!(windows))
+}
+
+pub fn unavailable_message(id: &str) -> String {
+    match id {
+        "typesense" => {
+            "Not available on Windows — Typesense does not publish Windows binaries.".into()
+        }
+        other => format!("{other} is not available on this platform."),
+    }
+}
+
 pub fn notes(state: &AppState, id: &str) -> Option<String> {
+    if !is_available_on_platform(id) {
+        return Some(unavailable_message(id));
+    }
     let s = &state.stack;
     Some(match id {
         "memcached" => format!("TCP :{} — cache / session backend", s.memcached_port),
         "meilisearch" => format!("HTTP :{} · dev mode, no master key", s.meilisearch_port),
         "typesense" => format!(
-            "HTTP :{} · API key `{TYPESENSE_API_KEY}` · macOS/Linux only",
+            "HTTP :{} · API key `{TYPESENSE_API_KEY}`",
             s.typesense_port
         ),
         "minio" => format!(

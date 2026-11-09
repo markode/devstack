@@ -53,11 +53,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_files = e2e || args.iter().any(|a| a == "--db-files");
     let skip_mariadb = args.iter().any(|a| a == "--skip-mariadb");
     let v030 = args.iter().any(|a| a == "--v030");
+    let windows_matrix = args.iter().any(|a| a == "--windows-matrix");
     // Default: services smoke when no mode flag given; --e2e always runs services.
     let services = e2e
         || services_flag
         || (!install_node
             && !v030
+            && !windows_matrix
             && !stack
             && !perf
             && !wordpress
@@ -67,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.iter().any(|a| a == "--help") {
         eprintln!(
-            "devstack_smoke [--e2e] [--stack] [--perf] [--wordpress] [--apache] [--db-files] [--services] [--v030] [--skip-mariadb] [--install-node]"
+            "devstack_smoke [--e2e] [--stack] [--perf] [--wordpress] [--apache] [--db-files] [--services] [--v030] [--windows-matrix] [--skip-mariadb] [--install-node]"
         );
         return Ok(());
     }
@@ -156,6 +158,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if v030 && !e2e {
         run_v030_features_smoke(&ctx, skip_mariadb).await?;
+    }
+
+    if windows_matrix || (e2e && cfg!(windows)) {
+        let report = std::env::var("DEVSTACK_MATRIX_JSON")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| ctx.paths.root.join("windows-matrix.json"));
+        println!("=== Windows feature matrix → {} ===", report.display());
+        // Ensure stack packages from e2e are present before matrix timing.
+        ensure_stack(&ctx, skip_mariadb).await?;
+        if let Err(e) = devstack_lib::windows_matrix::run(&ctx, &report) {
+            return Err(e.into());
+        }
     }
 
     Ok(())

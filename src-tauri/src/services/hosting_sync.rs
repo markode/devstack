@@ -426,7 +426,15 @@ pub fn tool_status(secrets: &dyn SecretStore) -> HostingTools {
     secrets.delete(probe);
     let mut notes = Vec::new();
     if !has("rsync") {
-        notes.push("rsync not found: dry-run preview is unavailable and pulls use scp without excludes.".into());
+        if cfg!(windows) {
+            notes.push(
+                "rsync not found on Windows: dry-run preview is unavailable; pulls/pushes fall back to scp (excludes and --delete are not applied). Install cwRsync or use WSL rsync for full sync.".into(),
+            );
+        } else {
+            notes.push(
+                "rsync not found: dry-run preview is unavailable and pulls use scp without excludes.".into(),
+            );
+        }
     }
     if !has("ssh") {
         notes.push("OpenSSH client not found — install it to use hosting sync.".into());

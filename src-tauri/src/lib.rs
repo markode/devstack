@@ -10,6 +10,7 @@ pub mod php;
 pub mod services;
 pub mod startup;
 pub mod tray;
+pub mod windows_matrix;
 
 use std::sync::Arc;
 
