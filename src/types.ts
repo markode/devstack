@@ -71,6 +71,17 @@ export interface HostsStatus {
   ok: boolean;
   missing: string[];
   message?: string | null;
+  /** True only when the DevStack CA is verified in the OS trust store. */
+  caTrusted?: boolean;
+  /** Present when HTTPS will warn until the user Retry-trusts the CA. */
+  caMessage?: string | null;
+}
+
+export interface PerformanceSettings {
+  defenderExclusions: boolean;
+  defenderExclusionsSupported: boolean;
+  exclusionPaths: string[];
+  defenderExclusionsHelp: string;
 }
 
 export interface InstalledPackage {
@@ -303,6 +314,8 @@ export interface ManagedServiceStatus {
   logPath?: string | null;
   uiUrl?: string | null;
   notes?: string | null;
+  /** False when the platform cannot run this service (e.g. Typesense on Windows). */
+  available?: boolean;
 }
 
 export interface PhpExtensionView {
@@ -687,6 +700,9 @@ export interface SpxStatus {
   reportDir: string;
   uiQuery: string;
   notes: string[];
+  /** When SPX cannot be installed (e.g. Windows), offer Xdebug profiling instead. */
+  suggestXdebugProfiling?: boolean;
+  downloadUrl?: string | null;
 }
 
 export interface ConfigArchiveMeta {

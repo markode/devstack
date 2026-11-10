@@ -145,16 +145,31 @@ jobs:
           npx playwright install chromium
           npm run test:e2e
 
-      - name: Release E2E — clean ports + busy 80/443/3306/8025 full flow
+      - name: Release E2E — clean ports + busy 80/443/3306/8025 + Windows feature matrix
         working-directory: src-tauri
         shell: pwsh
         env:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}\devstack-release-e2e
           DEVSTACK_RESET_SITES: "1"
+          DEVSTACK_MATRIX_JSON: ${{ runner.temp }}\windows-matrix.json
+          DEVSTACK_MATRIX_MD: ${{ github.workspace }}\docs\test-report-v0.3.1.md
         run: |
           $ErrorActionPreference = 'Stop'
           cargo build --bin devstack_smoke --release
           $bin = Join-Path (Get-Location) 'target\release\devstack_smoke.exe'
           & $bin --e2e
           if ($LASTEXITCODE -ne 0) { throw "release E2E failed ($LASTEXITCODE)" }
-          Write-Host "Release E2E verified: dual nginx+apache HTML 200, WAMP coexist (80/443/3306/8025), status error, stopped status"
+          if (-not (Test-Path $env:DEVSTACK_MATRIX_MD)) {
+            throw "Windows feature matrix report missing"
+          }
+          Write-Host "Release E2E verified: dual nginx+apache HTML 200, WAMP coexist (80/443/3306/8025), status error, stopped status + feature matrix"
+
+      - name: Upload Windows feature matrix report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-feature-matrix-release-v0.3.1
+          path: |
+            ${{ runner.temp }}/windows-matrix.json
+            docs/test-report-v0.3.1.md
+          if-no-files-found: warn

@@ -216,6 +216,26 @@ export function GeneralPage({
           </button>
         </div>
       ) : null}
+      {hosts && hosts.caTrusted === false ? (
+        <div
+          className="error-banner"
+          data-testid="ca-untrusted-banner"
+          style={{ display: "flex", gap: 12, alignItems: "center" }}
+        >
+          <span style={{ flex: 1 }}>
+            {hosts.caMessage ??
+              "HTTPS certificate not trusted — click Retry to install the DevStack CA."}
+          </span>
+          <button
+            type="button"
+            className="btn btn-install"
+            disabled={busy}
+            onClick={() => void repairHosts()}
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
 
       <div className="panel-card settings-list">
         <div className="settings-row">

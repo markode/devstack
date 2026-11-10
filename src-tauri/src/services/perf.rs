@@ -4,13 +4,13 @@ use std::time::{Duration, Instant};
 
 /// Warm `apply_stack` budget (ms) — slightly above the <3s target to absorb CI jitter.
 pub const WARM_APPLY_STACK_BUDGET_MS_UNIX: u128 = 4000;
-/// Windows CI runners pay a large MariaDB process-spawn cost even after a clean
-/// shutdown. Gate is high enough to pass a healthy warm start, low enough to
-/// catch hangs (previously ~unbounded / crash-recovery).
-pub const WARM_APPLY_STACK_BUDGET_MS_WINDOWS: u128 = 60_000;
-/// HTTPS / web-server toggle budget (ms), unchanged from the original perf gate.
+/// Windows warm apply keeps the database up (`stop_web_stack`); budget matches the
+/// <5s product target with a little CI jitter headroom removed — hard 5s gate.
+pub const WARM_APPLY_STACK_BUDGET_MS_WINDOWS: u128 = 5_000;
+/// HTTPS / web-server toggle budget (ms).
 pub const TOGGLE_BUDGET_MS_UNIX: u128 = 3000;
-pub const TOGGLE_BUDGET_MS_WINDOWS: u128 = 8000;
+/// Dual-bound nginx+apache vhosts make toggles metadata-only on Windows.
+pub const TOGGLE_BUDGET_MS_WINDOWS: u128 = 1_000;
 
 /// Filesystem watchers must debounce at least this long to coalesce editor/IDE bursts.
 pub const MIN_WATCH_DEBOUNCE_MS: u64 = 300;
@@ -138,7 +138,17 @@ mod tests {
 
     #[test]
     fn budgets_are_ordered() {
-        assert!(warm_apply_stack_budget_ms() >= 4000);
-        assert!(toggle_budget_ms() >= 3000);
+        // Platform gates match the product targets in docs/performance.md.
+        if cfg!(windows) {
+            assert_eq!(warm_apply_stack_budget_ms(), WARM_APPLY_STACK_BUDGET_MS_WINDOWS);
+            assert_eq!(toggle_budget_ms(), TOGGLE_BUDGET_MS_WINDOWS);
+            assert!(warm_apply_stack_budget_ms() >= 5000);
+            assert!(toggle_budget_ms() >= 1000);
+        } else {
+            assert_eq!(warm_apply_stack_budget_ms(), WARM_APPLY_STACK_BUDGET_MS_UNIX);
+            assert_eq!(toggle_budget_ms(), TOGGLE_BUDGET_MS_UNIX);
+            assert!(warm_apply_stack_budget_ms() >= 4000);
+            assert!(toggle_budget_ms() >= 3000);
+        }
     }
 }

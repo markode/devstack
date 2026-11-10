@@ -326,6 +326,43 @@ pub async fn set_spx_enabled(
     crate::services::metrics::set_spx(&ctx.paths, &mut state, php_version.as_deref(), enabled)
 }
 
+#[tauri::command]
+pub async fn ensure_spx_extension(
+    ctx: Ctx<'_>,
+    php_version: Option<String>,
+) -> Result<SpxStatus> {
+    let state = ctx.state.lock().await.clone();
+    let installed = crate::services::metrics::ensure_spx_extension(
+        &ctx.paths,
+        &state,
+        ctx.registry.client(),
+        php_version.as_deref(),
+    )
+    .await?;
+    let mut status = crate::services::metrics::spx_status(&ctx.paths, &state, php_version.as_deref());
+    if !installed && status.suggest_xdebug_profiling {
+        status.notes.push(
+            "No official php-spx Windows build exists — use “Use Xdebug profiling instead”.".into(),
+        );
+    } else if !installed {
+        status.notes.push("php-spx download/install did not produce a loadable extension.".into());
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn enable_xdebug_profiling(
+    ctx: Ctx<'_>,
+    php_version: Option<String>,
+) -> Result<SpxStatus> {
+    let mut state = ctx.state.lock().await;
+    crate::services::metrics::enable_xdebug_profiling(
+        &ctx.paths,
+        &mut state,
+        php_version.as_deref(),
+    )
+}
+
 // --- 9. Config export / import ---------------------------------------------------
 
 #[tauri::command]
@@ -382,4 +419,34 @@ pub async fn import_config(
     let _ = sync_hosts_after_change(&ctx.paths, &mut state);
     save_state(&ctx.paths.state_file, &state)?;
     Ok(report)
+}
+
+// --- Performance (opt-in Defender exclusions) ----------------------------------
+
+#[tauri::command]
+pub async fn get_performance_settings(
+    ctx: Ctx<'_>,
+) -> Result<crate::services::defender::PerformanceSettingsView> {
+    let state = ctx.state.lock().await;
+    Ok(crate::services::defender::settings_view(
+        &ctx.paths,
+        state.performance.defender_exclusions,
+    ))
+}
+
+/// Opt-in Windows Defender path exclusions. Default OFF; elevates via UAC.
+/// Never invoked from apply_stack — Settings → Performance only.
+#[tauri::command]
+pub async fn set_defender_exclusions(
+    ctx: Ctx<'_>,
+    enabled: bool,
+) -> Result<crate::services::defender::PerformanceSettingsView> {
+    let mut state = ctx.state.lock().await;
+    crate::services::defender::set_defender_exclusions(&ctx.paths, enabled)?;
+    state.performance.defender_exclusions = enabled;
+    save_state(&ctx.paths.state_file, &state)?;
+    Ok(crate::services::defender::settings_view(
+        &ctx.paths,
+        state.performance.defender_exclusions,
+    ))
 }

@@ -153,6 +153,18 @@ export async function repairHosts(): Promise<HostsStatus> {
   return invoke<HostsStatus>("repair_hosts");
 }
 
+export async function getPerformanceSettings(): Promise<
+  import("./types").PerformanceSettings
+> {
+  return invoke("get_performance_settings");
+}
+
+export async function setDefenderExclusions(
+  enabled: boolean,
+): Promise<import("./types").PerformanceSettings> {
+  return invoke("set_defender_exclusions", { enabled });
+}
+
 export async function listInstalled(
   packageId?: string,
 ): Promise<InstalledPackage[]> {
@@ -795,6 +807,22 @@ export async function setSpxEnabled(
   phpVersion?: string | null,
 ): Promise<SpxStatus> {
   return invoke<SpxStatus>("set_spx_enabled", { enabled, phpVersion: phpVersion ?? null });
+}
+
+export async function ensureSpxExtension(
+  phpVersion?: string | null,
+): Promise<SpxStatus> {
+  return invoke<SpxStatus>("ensure_spx_extension", {
+    phpVersion: phpVersion ?? null,
+  });
+}
+
+export async function enableXdebugProfiling(
+  phpVersion?: string | null,
+): Promise<SpxStatus> {
+  return invoke<SpxStatus>("enable_xdebug_profiling", {
+    phpVersion: phpVersion ?? null,
+  });
 }
 
 export async function exportConfig(

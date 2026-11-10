@@ -16,6 +16,10 @@ use crate::services::process::{
 use crate::services::extras_v030;
 use crate::services::tls::ensure_site_cert;
 
+fn default_available() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedServiceStatus {
@@ -28,6 +32,9 @@ pub struct ManagedServiceStatus {
     pub log_path: Option<String>,
     pub ui_url: Option<String>,
     pub notes: Option<String>,
+    /// False when the platform cannot run this service (e.g. Typesense on Windows).
+    #[serde(default = "default_available")]
+    pub available: bool,
 }
 
 pub fn default_ports(id: &str) -> Vec<u16> {
@@ -129,24 +136,19 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
         other => (other, None, default_ports(other), None),
     };
 
-    let running = pid.map(is_running).unwrap_or(false)
-        || ports.iter().any(|p| port_open(*p));
+    let available = extras_v030::is_available_on_platform(id);
+    let running = available
+        && (pid.map(is_running).unwrap_or(false) || ports.iter().any(|p| port_open(*p)));
     let installed = state.installed.contains_key(id)
         || matches!(id, "nginx" | "apache" | "mariadb" | "mysql")
         || (extras_v030::is_new_service(id) && extras_v030::is_installed(state, id));
     let version = latest_installed(state, id).map(|r| r.version.clone());
     let log_path = Some(paths.logs.join(format!("{id}.err")).display().to_string());
 
-    ManagedServiceStatus {
-        id: id.into(),
-        name: name.into(),
-        running,
-        installed: installed || version.is_some(),
-        version,
-        ports,
-        log_path,
-        ui_url: ui,
-        notes: match id {
+    let notes = if !available {
+        Some(extras_v030::unavailable_message(id))
+    } else {
+        match id {
             "mailpit" => Some(format!(
                 "SMTP :{} · UI :{} / mailpit.test",
                 state.stack.mailpit_smtp_port, state.stack.mailpit_ui_port
@@ -164,7 +166,20 @@ pub fn service_status(paths: &Paths, state: &AppState, id: &str) -> ManagedServi
                 state.stack.https_port
             )),
             _ => None,
-        },
+        }
+    };
+
+    ManagedServiceStatus {
+        id: id.into(),
+        name: name.into(),
+        running,
+        installed: installed || version.is_some(),
+        version,
+        ports,
+        log_path,
+        ui_url: ui,
+        notes,
+        available,
     }
 }
 
@@ -207,6 +222,7 @@ pub fn list_managed_services(paths: &Paths, state: &AppState) -> Vec<ManagedServ
                     "Served by Nginx on :{}",
                     state.stack.https_port
                 )),
+                available: true,
             }
         } else {
             service_status(paths, state, id)
@@ -249,7 +265,14 @@ pub fn start_service(paths: &Paths, state: &mut AppState, id: &str) -> Result<Ma
         "postgresql" => start_postgresql(paths, state)?,
         "redis" => start_redis(paths, state)?,
         "mailpit" => start_mailpit(paths, state)?,
-        other if extras_v030::is_new_service(other) => extras_v030::start(paths, state, other)?,
+        other if extras_v030::is_new_service(other) => {
+            if !extras_v030::is_available_on_platform(other) {
+                return Err(DevStackError::Message(extras_v030::unavailable_message(
+                    other,
+                )));
+            }
+            extras_v030::start(paths, state, other)?;
+        }
         "mariadb" => crate::services::database::start_database(paths, state, "mariadb")?,
         "mysql" => crate::services::database::start_database(paths, state, "mysql")?,
         "nginx" => {

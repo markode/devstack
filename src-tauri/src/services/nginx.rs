@@ -66,10 +66,9 @@ pub fn render_stack(
     // mailpit/phpMyAdmin proxy blocks.
     write_default_catch_all(&sites_dir, http_port, https_port)?;
 
+    // Write every site into nginx — Apache-preferred sites are dual-bound so a
+    // web-server toggle is a metadata/URL change, not a stop+start on Windows.
     for site in &state.sites {
-        if crate::services::httpd::site_uses_apache(site) {
-            continue;
-        }
         write_site_conf(
             paths,
             state,
@@ -114,6 +113,10 @@ events {{ worker_connections 1024; }}
 http {{
   include       {mime};
   default_type  application/octet-stream;
+  # Many .test vhosts + aliases (www.test, api.test, helpers) overflow the
+  # default 32/512 hash tables on Windows CI — nginx then exits at startup.
+  server_names_hash_bucket_size 128;
+  server_names_hash_max_size 1024;
   sendfile on;
   keepalive_timeout 65;
   client_max_body_size 0;
@@ -567,4 +570,26 @@ pub fn stop_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppState, Paths};
+
+    #[test]
+    fn render_stack_raises_server_names_hash_bucket() {
+        let dir = std::env::temp_dir().join(format!("devstack-nginx-hash-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        let state = AppState::default();
+        let conf = render_stack(&paths, &state, &[]).unwrap();
+        let body = fs::read_to_string(&conf).unwrap();
+        assert!(
+            body.contains("server_names_hash_bucket_size 128;"),
+            "missing hash bucket bump: {body}"
+        );
+        assert!(body.contains("server_names_hash_max_size 1024;"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -11,7 +11,7 @@ on:
 jobs:
   macos-smoke:
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -20,9 +20,11 @@ jobs:
 
       - name: Cargo test
         working-directory: src-tauri
+        timeout-minutes: 15
         run: cargo test --lib -- --nocapture
 
       - name: Frontend typecheck + vitest
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           npm ci
@@ -30,12 +32,14 @@ jobs:
           npm test
 
       - name: Playwright responsive header screenshots
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           npx playwright install --with-deps chromium
           npm run test:e2e
 
       - name: Brew PHP + MariaDB + httpd (managed packages are Windows-first)
+        timeout-minutes: 20
         run: |
           set -euo pipefail
           brew update
@@ -48,6 +52,7 @@ jobs:
 
       - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip
         working-directory: src-tauri
+        timeout-minutes: 40
         env:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-e2e
           DEVSTACK_RESET_SITES: "1"

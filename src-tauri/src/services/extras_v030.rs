@@ -76,13 +76,30 @@ pub fn ui_url(state: &AppState, id: &str) -> Option<String> {
     }
 }
 
+/// Platform gate: Typesense does not publish Windows binaries.
+pub fn is_available_on_platform(id: &str) -> bool {
+    !(id == "typesense" && cfg!(windows))
+}
+
+pub fn unavailable_message(id: &str) -> String {
+    match id {
+        "typesense" => {
+            "Not available on Windows — Typesense does not publish Windows binaries.".into()
+        }
+        other => format!("{other} is not available on this platform."),
+    }
+}
+
 pub fn notes(state: &AppState, id: &str) -> Option<String> {
+    if !is_available_on_platform(id) {
+        return Some(unavailable_message(id));
+    }
     let s = &state.stack;
     Some(match id {
         "memcached" => format!("TCP :{} — cache / session backend", s.memcached_port),
         "meilisearch" => format!("HTTP :{} · dev mode, no master key", s.meilisearch_port),
         "typesense" => format!(
-            "HTTP :{} · API key `{TYPESENSE_API_KEY}` · macOS/Linux only",
+            "HTTP :{} · API key `{TYPESENSE_API_KEY}`",
             s.typesense_port
         ),
         "minio" => format!(
@@ -319,15 +336,114 @@ pub fn start(paths: &Paths, state: &mut AppState, id: &str) -> Result<()> {
 }
 
 pub fn stop(paths: &Paths, state: &mut AppState, id: &str) -> Result<()> {
+    let ports = ports_of(state, id);
     if let Some(pid) = pid_of(state, id) {
-        stop_pid(pid)?;
+        // Meilisearch (and friends) can ignore a soft TERM briefly; always escalate.
+        let _ = stop_pid(pid);
+        #[cfg(unix)]
+        {
+            // Process-group kill covers binaries that re-exec / daemonize a child
+            // while we still hold the original spawn pid.
+            let _ = crate::services::process::command("kill")
+                .args(["-KILL", &format!("-{pid}")])
+                .status();
+            let _ = crate::services::process::command("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
     }
     set_pid(state, id, None);
     if let Some(pid) = read_pid(&paths.pid_file(id)) {
         let _ = stop_pid(pid);
+        #[cfg(unix)]
+        {
+            let _ = crate::services::process::command("kill")
+                .args(["-KILL", &format!("-{pid}")])
+                .status();
+            let _ = crate::services::process::command("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
     }
     let _ = fs::remove_file(paths.pid_file(id));
+    // service_status treats an open listen port as "running" even with no pid —
+    // wait until our ports are free so stop looks stopped immediately.
+    for port in ports {
+        let _ = crate::services::perf::poll_backoff(
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(40),
+            std::time::Duration::from_secs(3),
+            || (!crate::services::extras::port_open(port)).then_some(()),
+        );
+        if crate::services::extras::port_open(port) {
+            // Last resort: kill whoever still owns the port (only our data-dir
+            // orphans should linger here after stop_pid).
+            #[cfg(unix)]
+            {
+                let _ = crate::services::process::command("sh")
+                    .args([
+                        "-c",
+                        &format!(
+                            "pids=$(lsof -t -iTCP:{port} -sTCP:LISTEN 2>/dev/null); \
+                             [ -n \"$pids\" ] && kill -KILL $pids"
+                        ),
+                    ])
+                    .status();
+            }
+            #[cfg(windows)]
+            {
+                // Prefer netstat — Get-NetTCPConnection regularly hangs for minutes
+                // on Windows CI (CIM). Parse `TCP  127.0.0.1:PORT ... LISTENING  PID`.
+                kill_windows_listeners(port);
+            }
+            let _ = crate::services::perf::poll_backoff(
+                std::time::Duration::from_millis(5),
+                std::time::Duration::from_millis(40),
+                std::time::Duration::from_millis(800),
+                || (!crate::services::extras::port_open(port)).then_some(()),
+            );
+        }
+    }
     Ok(())
+}
+
+#[cfg(windows)]
+fn kill_windows_listeners(port: u16) {
+    let Ok(out) = crate::services::process::command("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+    else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut killed = std::collections::HashSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("TCP") || !line.contains("LISTENING") {
+            continue;
+        }
+        // Columns: TCP  local  foreign  state  pid
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let local = cols[1];
+        let Some(local_port) = local
+            .rsplit_once(':')
+            .map(|(_, p)| p.trim_end_matches(']'))
+            .and_then(|p| p.parse::<u16>().ok())
+        else {
+            continue;
+        };
+        if local_port != port {
+            continue;
+        }
+        let Ok(pid) = cols[4].parse::<u32>() else { continue };
+        if pid == 0 || !killed.insert(pid) {
+            continue;
+        }
+        let _ = stop_pid(pid);
+    }
 }
 
 #[cfg(test)]

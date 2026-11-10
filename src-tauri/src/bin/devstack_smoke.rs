@@ -22,7 +22,7 @@ use devstack_lib::services::backup::{backup_database, seed_large_demo_table};
 use devstack_lib::services::php_runtime::register_system_php;
 use devstack_lib::services::progress::noop_job_progress;
 use devstack_lib::services::sites::create_site;
-use devstack_lib::services::stack::{apply_stack, stop_stack};
+use devstack_lib::services::stack::{apply_stack, stop_stack, stop_web_stack};
 use devstack_lib::services::templates::{
     duplicate_from_source, mark_site_as_template, DuplicateRequest,
 };
@@ -53,11 +53,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_files = e2e || args.iter().any(|a| a == "--db-files");
     let skip_mariadb = args.iter().any(|a| a == "--skip-mariadb");
     let v030 = args.iter().any(|a| a == "--v030");
+    let windows_matrix = args.iter().any(|a| a == "--windows-matrix");
     // Default: services smoke when no mode flag given; --e2e always runs services.
     let services = e2e
         || services_flag
         || (!install_node
             && !v030
+            && !windows_matrix
             && !stack
             && !perf
             && !wordpress
@@ -67,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.iter().any(|a| a == "--help") {
         eprintln!(
-            "devstack_smoke [--e2e] [--stack] [--perf] [--wordpress] [--apache] [--db-files] [--services] [--v030] [--skip-mariadb] [--install-node]"
+            "devstack_smoke [--e2e] [--stack] [--perf] [--wordpress] [--apache] [--db-files] [--services] [--v030] [--windows-matrix] [--skip-mariadb] [--install-node]"
         );
         return Ok(());
     }
@@ -156,6 +158,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if v030 && !e2e {
         run_v030_features_smoke(&ctx, skip_mariadb).await?;
+    }
+
+    if windows_matrix || (e2e && cfg!(windows)) {
+        let report = std::env::var("DEVSTACK_MATRIX_JSON")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| ctx.paths.root.join("windows-matrix.json"));
+        println!("=== Windows feature matrix → {} ===", report.display());
+        // Ensure stack packages from e2e are present before matrix timing.
+        ensure_stack(&ctx, skip_mariadb).await?;
+        // Run on a plain OS thread (not a Tokio worker): matrix uses sync
+        // `blocking_lock` + nested `block_on` for tray/templates. Calling that
+        // in-place on #[tokio::main] panics with "Cannot block the current
+        // thread from within a runtime".
+        let matrix_result = std::thread::scope(|scope| {
+            scope
+                .spawn(|| devstack_lib::windows_matrix::run(&ctx, &report))
+                .join()
+                .unwrap_or_else(|_| Err("windows matrix thread panicked".into()))
+        });
+        if let Err(e) = matrix_result {
+            return Err(e.into());
+        }
     }
 
     Ok(())
@@ -285,7 +309,9 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
 
     {
         let mut state = ctx.state.lock().await;
+        println!("ensure_stack: stop_stack…");
         let _ = stop_stack(&ctx.paths, &mut state);
+        println!("ensure_stack: apply_stack…");
         apply_stack(&ctx.paths, &mut state)?;
         println!(
             "stack up — nginx={} apache={} db={:?} nginx={}/{} apache={}/{}",
@@ -1084,16 +1110,44 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
     println!("=== Milestone 4 services smoke (Postgres / Mongo / Redis / Mailpit) ===");
 
     // Prefer Redis 7.4.x on Unix (source build); Windows uses tporadowski 5.x zips.
+    // Provider retries download.redis.io then GitHub source mirror — Redis must PASS.
     let redis_ver = pick_version(ctx, "redis", |v| {
         v.starts_with("7.4.") || v.starts_with("7.") || v.starts_with("5.0.")
     })
     .await?;
     println!("Installing Redis {redis_ver}…");
-    if let Err(e) = install_pkg(ctx, "redis", &redis_ver).await {
-        println!("[redis] install {redis_ver} failed ({e}); retrying latest listed…");
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let alt = pick_version(ctx, "redis", |_| true).await?;
-        install_pkg(ctx, "redis", &alt).await?;
+    let mut redis_ok = false;
+    let mut last_err = None;
+    for attempt in 1..=4u32 {
+        match install_pkg(ctx, "redis", &redis_ver).await {
+            Ok(()) => {
+                redis_ok = true;
+                break;
+            }
+            Err(e) => {
+                println!("[redis] install {redis_ver} attempt {attempt}/4 failed ({e})");
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_secs(3u64 * attempt as u64)).await;
+            }
+        }
+    }
+    if !redis_ok {
+        if let Ok(alt) = pick_version(ctx, "redis", |_| true).await {
+            println!("[redis] retrying latest listed {alt}…");
+            match install_pkg(ctx, "redis", &alt).await {
+                Ok(()) => redis_ok = true,
+                Err(e) => last_err = Some(e),
+            }
+        }
+    }
+    if !redis_ok {
+        return Err(format!(
+            "Redis install failed after retries: {}",
+            last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        )
+        .into());
     }
 
     let mailpit_ver = pick_version(ctx, "mailpit", |_| true).await?;
@@ -1135,7 +1189,13 @@ async fn run_services_smoke(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error:
     }
 
     // Probe ports
-    for (name, port) in [("redis", 6379u16), ("postgresql", 5432), ("mongodb", 27017), ("mailpit-ui", 8025), ("mailpit-smtp", 1025)] {
+    for (name, port) in [
+        ("redis", 6379u16),
+        ("postgresql", 5432),
+        ("mongodb", 27017),
+        ("mailpit-ui", 8025),
+        ("mailpit-smtp", 1025),
+    ] {
         let ok = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
         println!("port {port} ({name}): {}", if ok { "open" } else { "CLOSED" });
         if !ok {
@@ -1484,18 +1544,46 @@ async fn run_persistence_and_sites_smoke(
             ctx.paths.root.join("sites/empty-smoke"),
             php_ver,
         )?;
+        // Plain HTTP only — HTTPS redirects + catch-all races on remapped
+        // coexistence ports made Windows release-e2e report Host 404.
         site.web_server = Some("nginx".into());
+        site.https = false;
         if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
             s.web_server = Some("nginx".into());
+            s.https = false;
         }
         apply_stack(&ctx.paths, &mut state)?;
         let http = state.stack.http_port;
         (site.id, site.domain.clone(), http)
     };
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let body = http_get_scheme(&empty.1, empty.2, "/", "http")?;
+    // Wait until the Host matches our vhost (not the default_server 404).
+    let mut body = String::new();
+    let mut last_err: Option<String> = None;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        match http_get_scheme(&empty.1, empty.2, "/", "http") {
+            Ok(b) => {
+                if b.contains("no site matched this Host header") {
+                    last_err = Some("empty site still hitting default_server".into());
+                    continue;
+                }
+                body = b;
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e.to_string());
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(e.into());
+    }
     if body.to_lowercase().contains("no input file specified") {
         return Err("empty site: No input file specified".into());
+    }
+    if body.contains("no site matched this Host header") {
+        return Err("empty site: Host header unmatched (default_server 404)".into());
     }
     println!("empty site {} OK ({} bytes)", empty.1, body.len());
 
@@ -2368,23 +2456,22 @@ async fn run_perf_bench(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Err
         state.db_files.auto_export_interval_secs = 0;
     }
 
-    // Warm-up: full start + stop so the measured start only pays steady-state costs.
-    // On Windows, one extra cycle lets InnoDB finish a clean shutdown before we time.
-    let warm_up_cycles = if cfg!(windows) { 2 } else { 1 };
-    let mut cold_ms = 0u128;
-    for i in 0..warm_up_cycles {
+    // Warm-up: full start so certs/php.ini/DB datadir are primed. Cold figure is
+    // a full stop→start (includes MariaDB). Measured warm runs use stop_web_stack
+    // so DB/DNS/PHP stay up — product warm path is front-end restart only
+    // (re-paying InnoDB or Defender php-cgi scans is a cold start on CI disks).
+    let cold_ms = {
         let mut state = ctx.state.lock().await;
         let _ = stop_stack(&ctx.paths, &mut state);
         let (res, ms) = time_ms(|| apply_stack(&ctx.paths, &mut state));
         res?;
-        if i == 0 {
-            cold_ms = ms;
-        }
-        println!("PERF_BENCH warm_up[{i}] apply_stack_ms={ms}");
-    }
+        println!("PERF_BENCH warm_up[0] apply_stack_ms={ms} (cold, full stack)");
+        ms
+    };
     let stop_ms = {
         let mut state = ctx.state.lock().await;
-        let (res, ms) = time_ms(|| stop_stack(&ctx.paths, &mut state));
+        // Leave DB running for warm apply measurements.
+        let (res, ms) = time_ms(|| stop_web_stack(&ctx.paths, &mut state));
         res?;
         ms
     };
@@ -2396,7 +2483,7 @@ async fn run_perf_bench(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Err
         res?;
         warm_runs.push(ms);
         if warm_runs.len() < 2 {
-            let _ = stop_stack(&ctx.paths, &mut state);
+            let _ = stop_web_stack(&ctx.paths, &mut state);
         }
     }
     let apply_stack_warm_ms = *warm_runs.iter().min().unwrap_or(&0);

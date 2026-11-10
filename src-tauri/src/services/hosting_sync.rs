@@ -154,6 +154,20 @@ pub fn default_excludes() -> Vec<String> {
     .collect()
 }
 
+/// Absolute remote path for SFTP: Unix `/…` / `~…`, or Windows `C:/…` / `C:\…`.
+pub fn is_absolute_remote_path(path: &str) -> bool {
+    let p = path.trim();
+    if p.starts_with('/') || p.starts_with('~') {
+        return true;
+    }
+    // Windows drive-letter absolute (OpenSSH on Win accepts forward slashes).
+    let b = p.as_bytes();
+    b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'/' || b[2] == b'\\')
+}
+
 pub fn validate_profile(p: &HostingProfile) -> Result<()> {
     if p.host.trim().is_empty() || p.host.contains(char::is_whitespace) || p.host.starts_with('-') {
         return Err(DevStackError::Message("invalid host".into()));
@@ -161,8 +175,10 @@ pub fn validate_profile(p: &HostingProfile) -> Result<()> {
     if p.user.trim().is_empty() || p.user.contains(char::is_whitespace) || p.user.starts_with('-') {
         return Err(DevStackError::Message("invalid user".into()));
     }
-    if !p.remote_path.starts_with('/') && !p.remote_path.starts_with('~') {
-        return Err(DevStackError::Message("remote path must be absolute (or start with ~)".into()));
+    if !is_absolute_remote_path(&p.remote_path) {
+        return Err(DevStackError::Message(
+            "remote path must be absolute (or start with ~)".into(),
+        ));
     }
     if p.remote_path.contains(['\n', '\r', '\'', '"', '`', '$', ';']) {
         return Err(DevStackError::Message("remote path contains unsupported characters".into()));
@@ -426,7 +442,9 @@ pub fn tool_status(secrets: &dyn SecretStore) -> HostingTools {
     secrets.delete(probe);
     let mut notes = Vec::new();
     if !has("rsync") {
-        notes.push("rsync not found: dry-run preview is unavailable and pulls use scp without excludes.".into());
+        notes.push(
+            "rsync not found — using built-in SFTP for dry-run and pull/push (excludes applied; size-based diff). Install rsync/cwRsync for faster delta sync.".into(),
+        );
     }
     if !has("ssh") {
         notes.push("OpenSSH client not found — install it to use hosting sync.".into());
@@ -651,16 +669,7 @@ pub fn preview(
     let site = site_for_profile(state, &profile)?;
     let local = crate::paths_util::expand_home(&site.path);
     if which::which("rsync").is_err() {
-        let mut plan = summarize(
-            &profile.id,
-            direction,
-            true,
-            if direction == Direction::Push { local_push_listing(&local, &profile.excludes) } else { vec![] },
-            profile.excludes.clone(),
-            "local-listing",
-        );
-        plan.notes.push("rsync not installed: showing local files only; remote differences cannot be previewed.".into());
-        return Ok(plan);
+        return crate::services::hosting_sftp::preview(&profile, secrets, direction, &local);
     }
     let pw = secrets.get(&ssh_secret_key(&profile.id));
     let args = rsync_args(&profile, direction, true, &local, delete);
@@ -977,9 +986,29 @@ pub fn run_sync(
         deleted = d;
         bytes = b;
     } else {
-        emit(progress, job_id, "transfer", "Transferring with scp…", 0, None);
-        scp_fallback(paths, &profile, secrets, direction, &local)?;
-        notes.push("rsync not installed — used scp (excludes and --delete are not applied).".into());
+        emit(progress, job_id, "transfer", "Transferring with SFTP…", 0, None);
+        match crate::services::hosting_sftp::transfer(
+            &profile,
+            secrets,
+            direction,
+            &local,
+            delete,
+            progress,
+            job_id,
+        ) {
+            Ok((f, d, b, n)) => {
+                files = f;
+                deleted = d;
+                bytes = b;
+                notes.extend(n);
+            }
+            Err(e) => {
+                // Last resort: legacy scp (no excludes).
+                emit(progress, job_id, "transfer", "SFTP failed — falling back to scp…", 0, None);
+                scp_fallback(paths, &profile, secrets, direction, &local)?;
+                notes.push(format!("SFTP failed ({e}); used scp without excludes."));
+            }
+        }
     }
 
     let mut database_synced = false;
@@ -1131,6 +1160,19 @@ mod tests {
         bad.host = "-oProxyCommand=evil".into();
         assert!(validate_profile(&bad).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_path_accepts_windows_drive_letters() {
+        assert!(is_absolute_remote_path("/var/www"));
+        assert!(is_absolute_remote_path("~/sites"));
+        assert!(is_absolute_remote_path("C:/Users/devstackssh/devstack-hosting-remote"));
+        assert!(is_absolute_remote_path(r"D:\data\remote"));
+        assert!(!is_absolute_remote_path("relative/path"));
+        assert!(!is_absolute_remote_path("C:relative"));
+        let mut p = profile();
+        p.remote_path = "C:/Users/devstackssh/devstack-hosting-remote".into();
+        assert!(validate_profile(&p).is_ok());
     }
 
     #[test]

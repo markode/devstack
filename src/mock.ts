@@ -1424,7 +1424,11 @@ export async function mockSpxStatus(): Promise<SpxStatus> {
     enabled: spxEnabled,
     reportDir: "/tmp/DevStack/spx-reports",
     uiQuery: "?SPX_KEY=dev&SPX_UI_URI=/",
-    notes: ["php-spx extension not installed for this PHP."],
+    notes: [
+      "SPX is not available on Windows — NoiseByNorthwest does not publish php_spx.dll. Use Xdebug profiling instead.",
+    ],
+    suggestXdebugProfiling: true,
+    downloadUrl: null,
   };
 }
 
@@ -1433,10 +1437,25 @@ export async function mockSetSpx(enabled: boolean): Promise<SpxStatus> {
   return mockSpxStatus();
 }
 
+export async function mockEnsureSpx(): Promise<SpxStatus> {
+  return mockSpxStatus();
+}
+
+export async function mockEnableXdebugProfiling(): Promise<SpxStatus> {
+  const s = await mockSpxStatus();
+  return {
+    ...s,
+    notes: [
+      ...s.notes,
+      "Xdebug enabled for profiling/debugging (xdebug.mode=debug,develop).",
+    ],
+  };
+}
+
 const mockArchiveMeta = (): ConfigArchiveMeta => ({
   format: "devstack-config",
   formatVersion: 1,
-  appVersion: "0.3.0",
+  appVersion: "0.3.1",
   createdAt: new Date(0).toISOString(),
   os: "mock",
   siteCount: sites.length,

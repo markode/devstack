@@ -3,7 +3,12 @@ import { SectionHeader } from "../components/SectionHeader";
 import * as client from "../client";
 import { humanizeError } from "../portBusy";
 import { openInFileManager } from "../open";
-import type { MetricsSnapshot, SlowQueryInfo, SpxStatus } from "../types";
+import type {
+  MetricsSnapshot,
+  PerformanceSettings,
+  SlowQueryInfo,
+  SpxStatus,
+} from "../types";
 import {
   formatBytes,
   formatPercent,
@@ -19,6 +24,9 @@ export function PerformancePage({ active = true }: { active?: boolean }) {
   const [memHistory, setMemHistory] = useState<number[]>([]);
   const [slow, setSlow] = useState<SlowQueryInfo | null>(null);
   const [spx, setSpx] = useState<SpxStatus | null>(null);
+  const [perfSettings, setPerfSettings] = useState<PerformanceSettings | null>(
+    null,
+  );
   const [threshold, setThreshold] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,13 +45,18 @@ export function PerformancePage({ active = true }: { active?: boolean }) {
   }, []);
 
   const loadDetails = useCallback(async () => {
-    const [a, b] = await Promise.allSettled([client.getSlowQueryInfo(50), client.getSpxStatus()]);
+    const [a, b, c] = await Promise.allSettled([
+      client.getSlowQueryInfo(50),
+      client.getSpxStatus(),
+      client.getPerformanceSettings(),
+    ]);
     if (!mounted.current) return;
     if (a.status === "fulfilled") {
       setSlow(a.value);
       setThreshold(a.value.thresholdSecs || 1);
     }
     if (b.status === "fulfilled") setSpx(b.value);
+    if (c.status === "fulfilled") setPerfSettings(c.value);
   }, []);
 
   useEffect(() => {
@@ -82,6 +95,37 @@ export function PerformancePage({ active = true }: { active?: boolean }) {
         description="Live CPU and memory for every DevStack-managed process, slow queries and profiling."
       />
       {error ? <div className="error-banner">{error}</div> : null}
+
+      {perfSettings?.defenderExclusionsSupported ? (
+        <div
+          className="panel-card settings-list"
+          style={{ marginBottom: 16 }}
+          data-testid="defender-exclusions-panel"
+        >
+          <div className="settings-row settings-row-head">
+            <label>
+              Windows Defender exclusions
+              <span className="hint">{perfSettings.defenderExclusionsHelp}</span>
+            </label>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={perfSettings.defenderExclusions}
+              aria-label="Windows Defender exclusions"
+              className={`toggle ${perfSettings.defenderExclusions ? "on" : ""}`}
+              disabled={busy}
+              onClick={() =>
+                void guard(async () => {
+                  const next = !perfSettings.defenderExclusions;
+                  setPerfSettings(
+                    await client.setDefenderExclusions(next),
+                  );
+                })
+              }
+            />
+          </div>
+        </div>
+      ) : null}
 
       <div className="perf-summary">
         <div className="panel-card perf-card">
@@ -215,21 +259,50 @@ export function PerformancePage({ active = true }: { active?: boolean }) {
             >
               Open report folder
             </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy || !spx || (!spx.available && !spx.enabled)}
-              onClick={() => void guard(async () => setSpx(await client.setSpxEnabled(!spx?.enabled)))}
-            >
-              {spx?.enabled ? "Disable" : "Enable"}
-            </button>
+            {!spx?.available && !spx?.suggestXdebugProfiling ? (
+              <button
+                type="button"
+                className="btn btn-install"
+                disabled={busy || !spx}
+                onClick={() =>
+                  void guard(async () => setSpx(await client.ensureSpxExtension()))
+                }
+              >
+                Install SPX
+              </button>
+            ) : null}
+            {spx?.suggestXdebugProfiling ? (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy || !spx}
+                onClick={() =>
+                  void guard(async () =>
+                    setSpx(await client.enableXdebugProfiling()),
+                  )
+                }
+              >
+                Use Xdebug profiling instead
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy || !spx || (!spx.available && !spx.enabled)}
+                onClick={() => void guard(async () => setSpx(await client.setSpxEnabled(!spx?.enabled)))}
+              >
+                {spx?.enabled ? "Disable" : "Enable"}
+              </button>
+            )}
           </div>
         </div>
         <div className="settings-row settings-row-block">
           <span className="hint">
             {spx?.available
               ? `Add ${spx.uiQuery} to any site URL to open the SPX control panel.`
-              : "Install the php-spx extension to enable profiling."}
+              : spx?.suggestXdebugProfiling
+                ? "SPX has no Windows builds — enable Xdebug profiling as the supported alternative."
+                : "Install the php-spx extension to enable profiling."}
           </span>
           {spx?.notes.map((n) => (
             <span key={n} className="hint">

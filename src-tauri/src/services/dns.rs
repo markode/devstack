@@ -77,6 +77,10 @@ pub struct HostsStatus {
     pub ok: bool,
     pub missing: Vec<String>,
     pub message: Option<String>,
+    /// True only when the DevStack CA is verified in the OS trust store.
+    pub ca_trusted: bool,
+    /// Set when HTTPS will warn because the CA is not trusted (includes Retry hint).
+    pub ca_message: Option<String>,
 }
 
 /// Build the DevStack hosts block (IPv4 + IPv6) for the given domains.
@@ -276,8 +280,9 @@ fn helper_run_linux(paths: &Paths, args: &[&str]) -> Result<()> {
 fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
     let script = ensure_helper_script(paths)?;
     // Prefer passwordless sudo (GitHub Actions / admin shells) — same path as Linux.
-    // osascript "with administrator privileges" needs a GUI auth dialog and was
-    // also mis-quoted (AppleScript strings use ", not ').
+    // Never fall through to osascript under CI / non-interactive sessions: the
+    // "with administrator privileges" dialog blocks forever with no UI, which is
+    // exactly what hung macos-smoke for 35+ minutes after the first stack stop.
     let sudo = crate::services::process::command("sudo")
         .arg("-n")
         .arg(&script)
@@ -286,21 +291,36 @@ fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output();
-    if let Ok(out) = &sudo {
-        if out.status.success() {
-            return Ok(());
+    match &sudo {
+        Ok(out) if out.status.success() => return Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!(
+                "devstack helper: sudo -n failed for {:?} (exit {}): {stderr}",
+                args, out.status
+            );
         }
+        Err(e) => eprintln!("devstack helper: sudo -n spawn failed for {:?}: {e}", args),
     }
-    // Fall through to GUI elevation when sudo needs a password or is unavailable.
 
+    if macos_skip_osascript() {
+        let detail = match &sudo {
+            Ok(out) => format!(
+                "sudo -n exit {}; {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => format!("sudo -n spawn error: {e}"),
+        };
+        return Err(DevStackError::Message(format!(
+            "macOS privileged helper unavailable in CI/headless ({detail}). \
+             Grant passwordless sudo for the DevStack helper or pre-install hosts/resolver/CA."
+        )));
+    }
+
+    // Interactive desktop only: GUI elevation when sudo needs a password.
     let apple = macos_osascript_helper_command(&script, args);
-    let output = crate::services::process::command("osascript")
-        .args(["-e", &apple])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| DevStackError::Message(format!("osascript helper: {e}")))?;
+    let output = run_osascript_with_timeout(&apple, Duration::from_secs(30))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -308,6 +328,59 @@ fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
         Err(DevStackError::Message(format!(
             "macOS privileged helper failed: {stderr}"
         )))
+    }
+}
+
+/// CI and other non-interactive sessions must not invoke osascript — it waits
+/// forever on an admin dialog that never appears on GitHub-hosted runners.
+#[cfg(target_os = "macos")]
+fn macos_skip_osascript() -> bool {
+    if std::env::var_os("CI").is_some() || std::env::var_os("DEVSTACK_NO_OSA").is_some() {
+        return true;
+    }
+    // No TTY → headless / launchd agent; osascript auth cannot succeed.
+    use std::io::IsTerminal;
+    !std::io::stdin().is_terminal()
+}
+
+/// Run `osascript -e` with a hard wall-clock timeout so a stuck auth dialog
+/// cannot freeze apply_stack / start_dns for the entire CI job.
+#[cfg(target_os = "macos")]
+fn run_osascript_with_timeout(
+    apple: &str,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    let mut child = crate::services::process::command("osascript")
+        .args(["-e", apple])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| DevStackError::Message(format!("osascript helper: {e}")))?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| DevStackError::Message(format!("osascript helper: {e}")));
+            }
+            Ok(None) if start.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(DevStackError::Message(format!(
+                    "osascript helper timed out after {}s waiting for administrator privileges",
+                    timeout.as_secs()
+                )));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(DevStackError::Message(format!("osascript helper: {e}")));
+            }
+        }
     }
 }
 
@@ -430,20 +503,60 @@ fn trust_ca_windows(paths: &Paths, ca: &Path) -> Result<()> {
             ca.display()
         )));
     }
-    if crate::services::tls::is_ca_trust_cached(paths) {
+    if crate::services::tls::is_ca_trusted(paths) {
+        return Ok(());
+    }
+    if crate::services::tls::is_ca_trust_deferred(paths) {
+        // User declined / timed out / CI skipped — do not re-prompt until Retry.
         return Ok(());
     }
     if try_trust_ca_direct(ca) {
-        let _ = crate::services::tls::mark_ca_trusted(paths);
+        return finalize_ca_trust(paths);
+    }
+    if windows_skip_uac() {
+        // CI/headless: never fake trust, never block on RunAs. Defer until Retry
+        // (or an interactive session) so warm apply_stack stays within budget.
+        eprintln!("devstack: skipping elevated CA trust under CI/headless (not marking trusted)");
+        crate::services::tls::mark_ca_trust_deferred(paths)?;
         return Ok(());
     }
     let ps = format!(
         "certutil -addstore -f Root {}\nWrite-DevStackLog 'CA trusted'\n",
         ps_quote(&ca.display().to_string())
     );
-    run_elevated_powershell(paths, &ps)?;
+    match run_elevated_powershell(paths, &ps) {
+        Ok(()) => finalize_ca_trust(paths),
+        Err(e) => {
+            let msg = e.to_string();
+            if uac_declined_or_timed_out(&msg) {
+                crate::services::tls::mark_ca_trust_deferred(paths)?;
+                return Ok(());
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Mark trusted only after the CA is actually present in the cert store.
+#[cfg(windows)]
+fn finalize_ca_trust(paths: &Paths) -> Result<()> {
+    if !crate::services::tls::is_ca_in_trust_store(paths) {
+        crate::services::tls::mark_ca_trust_deferred(paths)?;
+        return Err(DevStackError::Message(
+            crate::services::tls::ca_untrusted_message().into(),
+        ));
+    }
     crate::services::tls::mark_ca_trusted(paths)?;
     Ok(())
+}
+
+fn uac_declined_or_timed_out(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("canceled by the user")
+        || m.contains("cancelled by the user")
+        || m.contains("uac cancelled")
+        || m.contains("timed out")
+        || m.contains("uac elevation unavailable")
 }
 
 /// Write hosts + trust the DevStack CA in a **single** UAC prompt on Windows.
@@ -469,18 +582,43 @@ pub fn sync_hosts_and_trust_ca_windows(
     } else {
         try_write_hosts_direct(&hosts_path, &merged)?
     };
-    let ca_cached = crate::services::tls::is_ca_trust_cached(paths);
-    let ca_ok = ca_cached || try_trust_ca_direct(ca);
-    if ca_ok && !ca_cached {
-        let _ = crate::services::tls::mark_ca_trusted(paths);
+    let ca_trusted = crate::services::tls::is_ca_trusted(paths);
+    let ca_deferred = crate::services::tls::is_ca_trust_deferred(paths);
+    let mut ca_ok = ca_trusted;
+    if !ca_ok && !ca_deferred {
+        if try_trust_ca_direct(ca) {
+            match finalize_ca_trust(paths) {
+                Ok(()) => ca_ok = true,
+                Err(_) => ca_ok = false,
+            }
+        }
+    } else if ca_deferred {
+        // Do not elevate for CA again until Retry clears the deferred marker.
+        ca_ok = true; // "ok" for prompting purposes — hosts may still need elevation
     }
-    if hosts_ok && ca_ok {
+    if hosts_ok && (ca_trusted || ca_deferred || ca_ok) {
         if !hosts_complete {
             verify_hosts_contain(&hosts_path, domains)?;
+        }
+        // If CA still untrusted but deferred, leave it — status API surfaces notice.
+        return Ok(());
+    }
+
+    if windows_skip_uac() {
+        if !hosts_ok {
+            return Err(DevStackError::Message(
+                "hosts write needs elevation but UAC is unavailable under CI/headless".into(),
+            ));
+        }
+        eprintln!("devstack: skipping elevated hosts/CA under CI/headless (hosts already ok)");
+        if !crate::services::tls::is_ca_trusted(paths) {
+            crate::services::tls::mark_ca_trust_deferred(paths)?;
         }
         return Ok(());
     }
 
+    let need_ca = !crate::services::tls::is_ca_trusted(paths)
+        && !crate::services::tls::is_ca_trust_deferred(paths);
     let tmp = paths.helper.join("hosts.devstack.tmp");
     fs::create_dir_all(&paths.helper)?;
     fs::write(&tmp, &merged)?;
@@ -488,18 +626,35 @@ pub fn sync_hosts_and_trust_ca_windows(
     if !hosts_ok {
         parts.push_str(&windows_hosts_copy_ps(&tmp, &hosts_path));
     }
-    if !ca_ok {
+    if need_ca {
         parts.push_str(&format!(
             "certutil -addstore -f Root {}\nWrite-DevStackLog 'CA trusted'\n",
             ps_quote(&ca.display().to_string())
         ));
     }
-    run_elevated_powershell(paths, &parts)?;
-    let _ = fs::remove_file(&tmp);
-    if !hosts_ok {
-        verify_hosts_contain(&hosts_path, domains)?;
+    match run_elevated_powershell(paths, &parts) {
+        Ok(()) => {
+            let _ = fs::remove_file(&tmp);
+            if !hosts_ok {
+                verify_hosts_contain(&hosts_path, domains)?;
+            }
+            if need_ca {
+                let _ = finalize_ca_trust(paths);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            let msg = e.to_string();
+            if need_ca && uac_declined_or_timed_out(&msg) {
+                crate::services::tls::mark_ca_trust_deferred(paths)?;
+                if hosts_ok {
+                    return Ok(());
+                }
+            }
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 #[cfg(windows)]
@@ -520,8 +675,26 @@ fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// CI / headless sessions must not spawn `Start-Process -Verb RunAs`: the UAC
+/// dialog never appears and `-Wait` blocks apply_stack for ~45–60s every warm
+/// start (Windows HTTPS smoke warm budget is 5s).
 #[cfg(windows)]
-fn run_elevated_powershell(paths: &Paths, command: &str) -> Result<()> {
+fn windows_skip_uac() -> bool {
+    if std::env::var_os("CI").is_some() || std::env::var_os("DEVSTACK_NO_UAC").is_some() {
+        return true;
+    }
+    use std::io::IsTerminal;
+    !std::io::stdin().is_terminal()
+}
+
+#[cfg(windows)]
+pub(crate) fn run_elevated_powershell(paths: &Paths, command: &str) -> Result<()> {
+    if windows_skip_uac() {
+        return Err(DevStackError::Message(
+            "UAC elevation unavailable under CI/headless (set DEVSTACK_NO_UAC=0 only on interactive desktops)"
+                .into(),
+        ));
+    }
     fs::create_dir_all(&paths.helper)?;
     let script = paths.helper.join("elevate.ps1");
     let log_path = paths.helper.join("elevate.log");
@@ -555,6 +728,7 @@ try {{
     );
     fs::write(&script, body)?;
     let script_disp = script.display().to_string();
+    // Hard wall-clock timeout: never let RunAs -Wait freeze apply_stack.
     let status = crate::services::process::command("powershell")
         .args([
             "-NoProfile",
@@ -564,7 +738,7 @@ try {{
             "Bypass",
             "-Command",
             &format!(
-                "try {{ Start-Process -FilePath powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',{script} }} catch {{ Write-Error $_.Exception.Message; exit 2 }}",
+                "$p = Start-Process -FilePath powershell -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',{script}; if (-not $p.WaitForExit(15000)) {{ try {{ $p.Kill() }} catch {{}}; throw 'UAC elevation timed out after 15s' }}",
                 script = ps_quote(&script_disp)
             ),
         ])
@@ -579,8 +753,11 @@ try {{
     let combined = format!("{stdout}{stderr}");
     if combined.to_ascii_lowercase().contains("canceled by the user")
         || combined.to_ascii_lowercase().contains("cancelled by the user")
+        || combined.to_ascii_lowercase().contains("timed out")
     {
-        return Err(DevStackError::Message("UAC cancelled".into()));
+        return Err(DevStackError::Message(format!(
+            "UAC elevation unavailable: {combined}"
+        )));
     }
 
     let log = fs::read_to_string(&log_path).unwrap_or_default();
@@ -630,15 +807,18 @@ pub fn sync_hosts(paths: &Paths, state: &AppState) -> Result<()> {
 
 /// Sync hosts file and trust the local CA — one elevation on Windows.
 ///
-/// Skips both steps when hosts already contain every domain and the CA trust
-/// marker matches the on-disk root cert (avoids UAC / certutil on every toggle).
+/// Skips both steps when hosts already contain every domain and the CA is
+/// verified in the OS trust store (avoids UAC / certutil on every toggle).
+/// Never marks the CA trusted unless store verification succeeds. When UAC is
+/// declined/timed out (or CI skips elevation), defers CA trust so apply_stack
+/// does not re-prompt until the user hits Retry.
 pub fn sync_hosts_and_trust_ca(paths: &Paths, state: &AppState) -> Result<()> {
     let ca = crate::services::tls::ca_cert_path(paths);
     if !ca.exists() {
         crate::services::tls::ensure_root_ca(paths)?;
     }
     let hosts_ok = check_hosts_status(paths, state).ok;
-    let ca_ok = crate::services::tls::is_ca_trust_cached(paths);
+    let ca_ok = crate::services::tls::is_ca_trusted(paths);
     if hosts_ok && ca_ok {
         return Ok(());
     }
@@ -646,27 +826,36 @@ pub fn sync_hosts_and_trust_ca(paths: &Paths, state: &AppState) -> Result<()> {
     {
         let domains = site_domains(&state.sites);
         if hosts_ok && !ca_ok {
-            trust_ca_windows(paths, &ca)?;
-            crate::services::tls::mark_ca_trusted(paths)?;
-            return Ok(());
+            return trust_ca_windows(paths, &ca);
         }
         if !hosts_ok && ca_ok {
             return sync_hosts_windows(paths, &domains);
         }
-        sync_hosts_and_trust_ca_windows(paths, &domains, &ca)?;
-        crate::services::tls::mark_ca_trusted(paths)?;
-        Ok(())
+        sync_hosts_and_trust_ca_windows(paths, &domains, &ca)
     }
     #[cfg(not(windows))]
     {
         if !hosts_ok {
             sync_hosts(paths, state)?;
         }
-        if !ca_ok {
-            crate::services::tls::trust_ca_via_helper(paths)?;
+        if !ca_ok && !crate::services::tls::is_ca_trust_deferred(paths) {
+            match crate::services::tls::trust_ca_via_helper(paths) {
+                Ok(()) => {}
+                Err(e) => {
+                    // Defer so we do not re-prompt sudo/osascript on every apply.
+                    let _ = crate::services::tls::mark_ca_trust_deferred(paths);
+                    eprintln!("devstack: CA trust deferred: {e}");
+                }
+            }
         }
         Ok(())
     }
+}
+
+/// Clear the CA deferred marker and attempt hosts + CA trust again (Retry).
+pub fn retry_hosts_and_ca_trust(paths: &Paths, state: &AppState) -> Result<()> {
+    crate::services::tls::clear_ca_trust_deferred(paths);
+    sync_hosts_and_trust_ca(paths, state)
 }
 
 /// Hosts-only sync when entries are missing (never re-trusts the CA).
@@ -692,6 +881,17 @@ pub fn domain_resolves_locally(domain: &str) -> bool {
     false
 }
 
+fn with_ca_status(paths: &Paths, mut status: HostsStatus) -> HostsStatus {
+    let ca_trusted = crate::services::tls::is_ca_trusted(paths);
+    status.ca_trusted = ca_trusted;
+    status.ca_message = if ca_trusted {
+        None
+    } else {
+        Some(crate::services::tls::ca_untrusted_message().into())
+    };
+    status
+}
+
 /// Prefer parsing the hosts file (avoids DNS-cache false negatives), then fall back to resolution.
 pub fn check_hosts_status(paths: &Paths, state: &AppState) -> HostsStatus {
     let domains = site_domains(&state.sites);
@@ -699,24 +899,33 @@ pub fn check_hosts_status(paths: &Paths, state: &AppState) -> HostsStatus {
     if let Ok(contents) = fs::read_to_string(&hosts_path) {
         let missing = domains_missing_from_hosts(&contents, &domains);
         if missing.is_empty() {
-            return HostsStatus {
-                ok: true,
-                missing,
-                message: None,
-            };
+            return with_ca_status(
+                paths,
+                HostsStatus {
+                    ok: true,
+                    missing,
+                    message: None,
+                    ca_trusted: false,
+                    ca_message: None,
+                },
+            );
         }
-        return HostsStatus {
-            ok: false,
-            message: Some(format!(
-                "Hosts file is missing DevStack entries for: {}. .test domains will not open until repaired.",
-                missing.join(", ")
-            )),
-            missing,
-        };
+        return with_ca_status(
+            paths,
+            HostsStatus {
+                ok: false,
+                message: Some(format!(
+                    "Hosts file is missing DevStack entries for: {}. .test domains will not open until repaired.",
+                    missing.join(", ")
+                )),
+                missing,
+                ca_trusted: false,
+                ca_message: None,
+            },
+        );
     }
 
     // Unreadable hosts file — fall back to DNS resolution.
-    let _ = paths;
     let mut missing = Vec::new();
     for d in &domains {
         if !domain_resolves_locally(d) {
@@ -724,21 +933,31 @@ pub fn check_hosts_status(paths: &Paths, state: &AppState) -> HostsStatus {
         }
     }
     if missing.is_empty() {
-        HostsStatus {
-            ok: true,
-            missing,
-            message: None,
-        }
+        with_ca_status(
+            paths,
+            HostsStatus {
+                ok: true,
+                missing,
+                message: None,
+                ca_trusted: false,
+                ca_message: None,
+            },
+        )
     } else {
-        HostsStatus {
-            ok: false,
-            message: Some(format!(
-                "Could not read {} and these .test domains do not resolve locally: {}.",
-                hosts_path.display(),
-                missing.join(", ")
-            )),
-            missing,
-        }
+        with_ca_status(
+            paths,
+            HostsStatus {
+                ok: false,
+                message: Some(format!(
+                    "Could not read {} and these .test domains do not resolve locally: {}.",
+                    hosts_path.display(),
+                    missing.join(", ")
+                )),
+                missing,
+                ca_trusted: false,
+                ca_message: None,
+            },
+        )
     }
 }
 
@@ -1010,5 +1229,51 @@ mod tests {
             !apple.starts_with("do shell script '"),
             "bare single-quoted args break AppleScript: {apple}"
         );
+    }
+
+    #[test]
+    fn uac_decline_detection_covers_cancel_and_timeout() {
+        assert!(uac_declined_or_timed_out("UAC cancelled"));
+        assert!(uac_declined_or_timed_out("operation canceled by the user"));
+        assert!(uac_declined_or_timed_out("UAC elevation timed out after 15s"));
+        assert!(uac_declined_or_timed_out("UAC elevation unavailable under CI"));
+        assert!(!uac_declined_or_timed_out("permission denied writing hosts"));
+    }
+
+    #[test]
+    fn hosts_status_reports_untrusted_ca_without_store() {
+        let dir = std::env::temp_dir().join(format!("devstack-hosts-ca-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        crate::services::tls::ensure_root_ca(&paths).unwrap();
+        // Marker alone must not count.
+        let _ = fs::write(paths.certs.join("ca/.trusted-sha256"), "fake");
+        let state = AppState::default();
+        let status = check_hosts_status(&paths, &state);
+        assert!(!status.ca_trusted);
+        assert!(
+            status
+                .ca_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("HTTPS certificate not trusted"),
+            "expected clear notice, got {:?}",
+            status.ca_message
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_clears_deferred_ca_marker() {
+        let dir = std::env::temp_dir().join(format!("devstack-ca-retry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        crate::services::tls::ensure_root_ca(&paths).unwrap();
+        crate::services::tls::mark_ca_trust_deferred(&paths).unwrap();
+        assert!(crate::services::tls::is_ca_trust_deferred(&paths));
+        // retry clears deferred before attempting sync (which may still defer on CI).
+        crate::services::tls::clear_ca_trust_deferred(&paths);
+        assert!(!crate::services::tls::is_ca_trust_deferred(&paths));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

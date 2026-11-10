@@ -165,6 +165,13 @@ export function ServicesPage() {
         description="Ports, process state, and recent logs for each managed service."
       />
       {error ? <div className="error-banner">{error}</div> : null}
+      {services
+        .filter((svc) => svc.available === false)
+        .map((svc) => (
+          <div key={`unavail-${svc.id}`} className="port-notice-banner" role="status">
+            {svc.name}: {svc.notes ?? "Not available on this platform."}
+          </div>
+        ))}
       {portConflict && !portConflict.ok ? (
         <PortConflictDialog
           conflict={portConflict}
@@ -198,10 +205,23 @@ export function ServicesPage() {
               <button
                 type="button"
                 className={`btn ${svc.running ? "btn-install" : "btn-primary"}`}
-                disabled={busyId === svc.id || !svc.installed}
+                disabled={
+                  busyId === svc.id ||
+                  !svc.installed ||
+                  svc.available === false
+                }
+                title={
+                  svc.available === false
+                    ? (svc.notes ?? "Not available on this platform")
+                    : undefined
+                }
                 onClick={() => void toggle(svc)}
               >
-                {svc.running ? "Stop" : "Start"}
+                {svc.running
+                  ? "Stop"
+                  : svc.available === false
+                    ? "Unavailable"
+                    : "Start"}
               </button>
               <button
                 type="button"

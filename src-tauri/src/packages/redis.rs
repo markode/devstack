@@ -224,22 +224,67 @@ impl PackageProvider for RedisProvider {
                 }
             })
             .ok_or_else(|| DevStackError::VersionNotFound(version.into()))?;
-        let url = meta
+        let primary = meta
             .download_url
             .clone()
             .ok_or_else(|| DevStackError::Message("No Redis download URL".into()))?;
-        let file_name = url.rsplit('/').next().unwrap_or("redis.tgz").to_string();
-        let archive = paths.downloads.join(&file_name);
-        download_and_verify(
-            &self.client,
-            &url,
-            &archive,
-            meta.sha256.as_deref(),
-            "redis",
-            &meta.version,
-            &progress,
-        )
-        .await?;
+        // download.redis.io occasionally DNS-fails on CI — GitHub source tags are a reliable mirror.
+        let github_mirror = if current_os() != "windows" {
+            Some(format!(
+                "https://github.com/redis/redis/archive/refs/tags/{}.tar.gz",
+                meta.version
+            ))
+        } else {
+            None
+        };
+        let mut urls: Vec<(String, Option<&str>)> = vec![(primary.clone(), meta.sha256.as_deref())];
+        if let Some(m) = github_mirror {
+            if m != primary {
+                // GitHub archive checksum differs from redis-hashes — skip sha for mirror.
+                urls.push((m, None));
+            }
+        }
+        let mut archive = paths.downloads.join("redis-download.tgz");
+        let mut last_err = None;
+        let mut used_url = primary.clone();
+        for (attempt, (url, sha)) in urls.into_iter().enumerate() {
+            let file_name = url.rsplit('/').next().unwrap_or("redis.tgz").to_string();
+            archive = paths.downloads.join(&file_name);
+            match download_and_verify(
+                &self.client,
+                &url,
+                &archive,
+                sha,
+                "redis",
+                &meta.version,
+                &progress,
+            )
+            .await
+            {
+                Ok(()) => {
+                    used_url = url;
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[redis] download attempt {} failed for {url}: {e}",
+                        attempt + 1
+                    );
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1))).await;
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(e);
+        }
+        let _ = used_url;
+        let file_name = archive
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("redis.tgz")
+            .to_string();
 
         progress(ProgressEvent {
             package_id: "redis".into(),

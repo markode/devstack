@@ -126,7 +126,9 @@ pub fn render_stack(
     let http_port = state.stack.apache_http_port;
     let https_port = state.stack.apache_https_port;
 
-    for site in state.sites.iter().filter(|s| site_uses_apache(s)) {
+    // Dual-bind every site (see nginx render_stack). web_server preference only
+    // affects Open URL / status; both front-ends stay ready for instant toggles.
+    for site in &state.sites {
         write_vhost(paths, state, site, php_runtimes, &sites_dir, http_port, https_port)?;
     }
 
@@ -511,11 +513,8 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
     let bin = apache_bin(&root)?;
     let conf = render_stack(paths, state, &runtimes)?;
 
-    // Only start if we have at least one apache site, or force for smoke
-    if !state.sites.iter().any(site_uses_apache) {
-        return Ok(());
-    }
-
+    // Start whenever Apache is installed (needs_apache above), even with zero
+    // apache-preferred sites — dual-bound vhosts keep toggles under 1s.
     let conf_s = conf.display().to_string();
     // Configtest on cold start so we surface syntax/module errors. Reload skips
     // it — the conf was just rendered and the extra httpd -t was ~1–2s on CI.

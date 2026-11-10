@@ -93,6 +93,12 @@ fn ca_trust_marker(paths: &Paths) -> PathBuf {
     paths.certs.join("ca/.trusted-sha256")
 }
 
+/// Set when the user declined / timed out UAC (or CI skipped elevation) so
+/// apply_stack does not re-prompt on every warm start. Cleared by Retry.
+fn ca_trust_deferred_marker(paths: &Paths) -> PathBuf {
+    paths.certs.join("ca/.trust-deferred")
+}
+
 fn ca_sha256(paths: &Paths) -> Result<String> {
     let bytes = fs::read(ca_cert_path(paths))?;
     let mut h = Sha256::new();
@@ -100,23 +106,220 @@ fn ca_sha256(paths: &Paths) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
-/// True when we previously recorded a successful trust of the current CA file.
-pub fn is_ca_trust_cached(paths: &Paths) -> bool {
-    let Ok(hash) = ca_sha256(paths) else {
-        return false;
-    };
-    fs::read_to_string(ca_trust_marker(paths))
-        .map(|s| s.trim() == hash)
-        .unwrap_or(false)
+/// Parse `Cert Hash(sha1): aabb...` lines from `certutil -dump` output.
+pub fn parse_certutil_sha1_hash(dump: &str) -> Option<String> {
+    for line in dump.lines() {
+        let lower = line.to_ascii_lowercase();
+        let Some(idx) = lower.find("cert hash(sha1):") else {
+            continue;
+        };
+        let raw = line[idx + "cert hash(sha1):".len()..].trim();
+        let hex: String = raw
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if hex.len() == 40 {
+            return Some(hex);
+        }
+    }
+    None
 }
 
+/// True when a `certutil -store` listing contains the given SHA1 thumbprint.
+pub fn store_output_contains_hash(store_out: &str, hash: &str) -> bool {
+    let want = hash
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if want.len() != 40 {
+        return false;
+    }
+    let compact = store_out
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    compact.contains(&want)
+}
+
+/// Probe CurrentUser and LocalMachine Root stores for our CA (Windows).
+/// Non-Windows: check helper-installed locations / marker only after verify helpers.
+pub fn is_ca_in_trust_store(paths: &Paths) -> bool {
+    let ca = ca_cert_path(paths);
+    if !ca.exists() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        return is_ca_in_trust_store_windows(&ca);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return is_ca_in_trust_store_macos(&ca, paths);
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return is_ca_in_trust_store_linux(paths);
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = paths;
+        false
+    }
+}
+
+#[cfg(windows)]
+fn is_ca_in_trust_store_windows(ca: &Path) -> bool {
+    let dump = crate::services::process::command("certutil")
+        .args(["-dump", &ca.display().to_string()])
+        .output()
+        .ok();
+    let Some(dump) = dump else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&dump.stdout);
+    let Some(hash) = parse_certutil_sha1_hash(&text) else {
+        return false;
+    };
+    for user_flag in [false, true] {
+        let mut cmd = crate::services::process::command("certutil");
+        if user_flag {
+            cmd.arg("-user");
+        }
+        let out = cmd.args(["-store", "Root", &hash]).output();
+        if let Ok(o) = out {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            if o.status.success() && store_output_contains_hash(&combined, &hash) {
+                return true;
+            }
+            // certutil -store Root <hash> succeeds with the cert body when present.
+            if o.status.success() && combined.to_ascii_lowercase().contains("devstack local ca") {
+                return true;
+            }
+            if o.status.success() && !combined.to_ascii_lowercase().contains("element not found")
+            {
+                // Hash lookup returned a cert entry.
+                if combined.to_ascii_lowercase().contains("serial")
+                    || combined.to_ascii_lowercase().contains("issuer")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn is_ca_in_trust_store_macos(ca: &Path, paths: &Paths) -> bool {
+    let _ = ca;
+    let Ok(want) = ca_sha256(paths) else {
+        return false;
+    };
+    let out = crate::services::process::command("security")
+        .args([
+            "find-certificate",
+            "-a",
+            "-c",
+            "DevStack Local CA",
+            "-Z",
+            "/Library/Keychains/System.keychain",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout).to_ascii_lowercase();
+            text.contains(&want) || text.contains("devstack local ca")
+        }
+        _ => false,
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn is_ca_in_trust_store_linux(paths: &Paths) -> bool {
+    let installed = Path::new("/usr/local/share/ca-certificates/devstack-root.crt");
+    if !installed.exists() {
+        return false;
+    }
+    let Ok(want) = ca_sha256(paths) else {
+        return false;
+    };
+    let mut h = Sha256::new();
+    if let Ok(bytes) = fs::read(installed) {
+        h.update(&bytes);
+        return hex::encode(h.finalize()) == want;
+    }
+    false
+}
+
+/// True only when the CA is verified present in the OS trust store.
+/// A on-disk marker alone never counts as trusted.
+pub fn is_ca_trusted(paths: &Paths) -> bool {
+    if !is_ca_in_trust_store(paths) {
+        // Stale marker from older builds that marked trust without store proof.
+        let _ = clear_ca_trusted_marker(paths);
+        return false;
+    }
+    // Refresh marker so warm paths can short-circuit hosts+CA when both ok.
+    let _ = mark_ca_trusted(paths);
+    true
+}
+
+/// Legacy name — now requires store verification (marker alone is insufficient).
+pub fn is_ca_trust_cached(paths: &Paths) -> bool {
+    is_ca_trusted(paths)
+}
+
+/// Record trust **only after** `is_ca_in_trust_store` is true.
 pub fn mark_ca_trusted(paths: &Paths) -> Result<()> {
+    if !is_ca_in_trust_store(paths) {
+        return Err(DevStackError::Message(
+            "refusing to mark CA trusted: certificate not found in CurrentUser/LocalMachine Root (or system store)"
+                .into(),
+        ));
+    }
     let hash = ca_sha256(paths)?;
     if let Some(parent) = ca_trust_marker(paths).parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(ca_trust_marker(paths), hash)?;
+    clear_ca_trust_deferred(paths);
     Ok(())
+}
+
+pub fn clear_ca_trusted_marker(paths: &Paths) -> Result<()> {
+    let p = ca_trust_marker(paths);
+    if p.exists() {
+        fs::remove_file(&p)?;
+    }
+    Ok(())
+}
+
+pub fn is_ca_trust_deferred(paths: &Paths) -> bool {
+    ca_trust_deferred_marker(paths).exists()
+}
+
+pub fn mark_ca_trust_deferred(paths: &Paths) -> Result<()> {
+    if let Some(parent) = ca_trust_deferred_marker(paths).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(ca_trust_deferred_marker(paths), "1")?;
+    Ok(())
+}
+
+pub fn clear_ca_trust_deferred(paths: &Paths) {
+    let _ = fs::remove_file(ca_trust_deferred_marker(paths));
+}
+
+/// User-facing notice when the CA is not in the trust store.
+pub fn ca_untrusted_message() -> &'static str {
+    "HTTPS certificate not trusted — browsers will warn until the DevStack CA is installed. Click Retry to elevate and trust it."
 }
 
 pub fn trust_ca_via_helper(paths: &Paths) -> Result<()> {
@@ -124,10 +327,15 @@ pub fn trust_ca_via_helper(paths: &Paths) -> Result<()> {
     if !ca.exists() {
         ensure_root_ca(paths)?;
     }
-    if is_ca_trust_cached(paths) {
+    if is_ca_trusted(paths) {
         return Ok(());
     }
     crate::services::dns::helper_run(paths, &["trust-ca", &ca.display().to_string()])?;
+    if !is_ca_in_trust_store(paths) {
+        return Err(DevStackError::Message(
+            "CA trust helper finished but the certificate is not in the system trust store".into(),
+        ));
+    }
     mark_ca_trusted(paths)?;
     Ok(())
 }
@@ -229,9 +437,44 @@ mod tests {
             second.as_millis() < 50,
             "cached cert should be near-instant, took {second:?} (first {first:?})"
         );
-        assert!(is_ca_trust_cached(&paths) == false);
-        mark_ca_trusted(&paths).unwrap();
-        assert!(is_ca_trust_cached(&paths));
+        assert!(!is_ca_trust_cached(&paths));
+        // Marker-only must never count as trusted without store verification.
+        let _ = fs::write(ca_trust_marker(&paths), "deadbeef");
+        assert!(!is_ca_trusted(&paths));
+        let err = mark_ca_trusted(&paths).unwrap_err().to_string();
+        assert!(
+            err.contains("refusing to mark CA trusted"),
+            "mark without store must fail: {err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn certutil_hash_parsers_roundtrip() {
+        let dump = "\
+Cert Hash(md5): 11 22 33\r\n\
+Cert Hash(sha1): Aa Bb Cc Dd Ee Ff 01 23 45 67 89 Ab Cd Ef 01 23 45 67 89 Ab\r\n\
+Cert Hash(sha256): deadbeef\r\n";
+        let hash = parse_certutil_sha1_hash(dump).expect("hash");
+        assert_eq!(hash, "aabbccddeeff0123456789abcdef0123456789ab");
+        assert!(store_output_contains_hash(
+            "================ Certificate 0 ================\r\nCert Hash(sha1): aa bb cc dd ee ff 01 23 45 67 89 ab cd ef 01 23 45 67 89 ab\r\n",
+            &hash
+        ));
+        assert!(!store_output_contains_hash("empty", &hash));
+    }
+
+    #[test]
+    fn deferred_marker_blocks_reprompt_until_cleared() {
+        let dir = std::env::temp_dir().join(format!("devstack-tls-def-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        ensure_root_ca(&paths).unwrap();
+        assert!(!is_ca_trust_deferred(&paths));
+        mark_ca_trust_deferred(&paths).unwrap();
+        assert!(is_ca_trust_deferred(&paths));
+        clear_ca_trust_deferred(&paths);
+        assert!(!is_ca_trust_deferred(&paths));
         let _ = fs::remove_dir_all(&dir);
     }
 

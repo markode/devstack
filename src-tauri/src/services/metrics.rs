@@ -332,6 +332,12 @@ pub struct SpxStatus {
     /// Open on any site: `{site url}/?SPX_KEY=dev&SPX_UI_URI=/`.
     pub ui_query: String,
     pub notes: Vec<String>,
+    /// True when SPX cannot be installed on this platform/PHP and Xdebug profiling is the fallback.
+    #[serde(default)]
+    pub suggest_xdebug_profiling: bool,
+    /// Download URL that was attempted for this PHP (if any).
+    #[serde(default)]
+    pub download_url: Option<String>,
 }
 
 pub fn spx_report_dir(paths: &Paths) -> PathBuf {
@@ -391,6 +397,98 @@ fn spx_extension_available(install: &Path) -> bool {
         || install.join("ext/php_spx.dll").exists()
 }
 
+/// Official NoiseByNorthwest php-spx release asset URL for this PHP/OS/arch, if one exists.
+///
+/// Upstream publishes linux/mac NTS builds only — Windows returns `None` (no `php_spx.dll`).
+pub fn spx_download_url(php_version: &str, os: &str, arch: &str) -> Option<String> {
+    let major_minor = {
+        let parts: Vec<_> = php_version.split('.').take(2).collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        format!("{}.{}", parts[0], parts[1])
+    };
+    let (platform, _) = match (os, arch) {
+        ("linux", "x86_64") => ("linux-gcc", "x86_64"),
+        ("linux", "aarch64") => ("linux-gcc", "aarch64"),
+        ("macos", "x86_64") | ("macos", "aarch64") => ("mac-clang", arch),
+        ("windows", _) => return None,
+        _ => return None,
+    };
+    // Pin to a known release that ships PHP 8.x assets.
+    let tag = "v0.4.22";
+    Some(format!(
+        "https://github.com/NoiseByNorthwest/php-spx/releases/download/{tag}/spx-php-{major_minor}-nts-{platform}.zip"
+    ))
+}
+
+/// Attempt to download + install php-spx into the PHP extension dir.
+/// On Windows (no official DLL) returns Ok(false) so callers can offer Xdebug profiling.
+pub async fn ensure_spx_extension(
+    paths: &Paths,
+    state: &AppState,
+    client: &reqwest::Client,
+    version: Option<&str>,
+) -> Result<bool> {
+    let ver = version
+        .map(|v| v.to_string())
+        .or_else(|| default_php_version(state))
+        .ok_or_else(|| DevStackError::Message("install a PHP version first".into()))?;
+    let install = php_install_for(paths, state, &ver)
+        .ok_or_else(|| DevStackError::VersionNotFound(ver.clone()))?;
+    if spx_extension_available(&install) {
+        return Ok(true);
+    }
+    let Some(url) = spx_download_url(&ver, std::env::consts::OS, std::env::consts::ARCH) else {
+        return Ok(false);
+    };
+    let dest = paths.downloads.join(format!("php-spx-{ver}.zip"));
+    crate::downloads::download_file(
+        client,
+        &url,
+        &dest,
+        "php-spx",
+        &ver,
+        &crate::downloads::noop_progress(),
+    )
+    .await?;
+    let file = fs::File::open(&dest)?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| DevStackError::Archive(e.to_string()))?;
+    let ext_dir = {
+        let Some(php) = crate::services::process::find_bin(&install, &["php", "php.exe"]) else {
+            return Ok(false);
+        };
+        let mut cmd = crate::services::process::command(php);
+        crate::php::apply_php_ini_to_command(&mut cmd, &install);
+        let out = cmd.args(["-r", "echo ini_get('extension_dir');"]).output()?;
+        let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        if dir.as_os_str().is_empty() {
+            install.join("ext")
+        } else {
+            dir
+        }
+    };
+    fs::create_dir_all(&ext_dir)?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| DevStackError::Archive(e.to_string()))?;
+        let name = entry.name().to_string();
+        let lower = name.to_ascii_lowercase();
+        if !(lower.ends_with(".so") || lower.ends_with(".dll")) {
+            continue;
+        }
+        let file_name = Path::new(&name)
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("spx.so"));
+        let out_path = ext_dir.join(file_name);
+        let mut out = fs::File::create(&out_path)?;
+        std::io::copy(&mut entry, &mut out)?;
+    }
+    Ok(spx_extension_available(&install))
+}
+
 fn default_php_version(state: &AppState) -> Option<String> {
     state
         .stack
@@ -405,10 +503,20 @@ pub fn spx_status(paths: &Paths, state: &AppState, version: Option<&str>) -> Spx
     let install = ver.as_deref().and_then(|v| php_install_for(paths, state, v));
     let available = install.as_deref().map(spx_extension_available).unwrap_or(false);
     let enabled = state.php_extensions.get(ver.as_deref().unwrap_or("")).map(|s| s.spx).unwrap_or(false);
+    let download_url = ver
+        .as_deref()
+        .and_then(|v| spx_download_url(v, std::env::consts::OS, std::env::consts::ARCH));
+    let suggest_xdebug_profiling = !available && cfg!(windows);
     if ver.is_none() {
         notes.push("Install a PHP version first.".into());
+    } else if !available && cfg!(windows) {
+        notes.push(
+            "SPX is not available on Windows — NoiseByNorthwest does not publish php_spx.dll. Use Xdebug profiling instead (Sites → Xdebug, or the button below).".into(),
+        );
     } else if !available {
-        notes.push("php-spx extension not installed for this PHP. Install it (pecl install spx, or your distro's php-spx package) and SPX turns on from here.".into());
+        notes.push(
+            "php-spx extension not installed for this PHP. Use Install SPX (downloads the official release) or pecl install spx.".into(),
+        );
     }
     SpxStatus {
         php_version: ver,
@@ -417,7 +525,31 @@ pub fn spx_status(paths: &Paths, state: &AppState, version: Option<&str>) -> Spx
         report_dir: spx_report_dir(paths).display().to_string(),
         ui_query: format!("?SPX_KEY={SPX_KEY}&SPX_UI_URI=/"),
         notes,
+        suggest_xdebug_profiling,
+        download_url,
     }
+}
+
+/// Enable Xdebug on the active PHP version as an SPX substitute (debug+develop mode).
+pub fn enable_xdebug_profiling(
+    paths: &Paths,
+    state: &mut AppState,
+    version: Option<&str>,
+) -> Result<SpxStatus> {
+    let ver = version
+        .map(|v| v.to_string())
+        .or_else(|| default_php_version(state))
+        .ok_or_else(|| DevStackError::Message("install a PHP version first".into()))?;
+    crate::php::set_xdebug(state, paths, &ver, true)?;
+    if state.runtime.php_pids.contains_key(&ver) {
+        let _ = crate::services::php_runtime::stop_php(paths, state, &ver);
+        let _ = crate::services::php_runtime::start_php(paths, state, &ver);
+    }
+    let mut status = spx_status(paths, state, Some(&ver));
+    status.notes.push(
+        "Xdebug enabled for profiling/debugging (xdebug.mode=debug,develop). Open a site and use your IDE listener on :9003.".into(),
+    );
+    Ok(status)
 }
 
 fn apply_spx_to_ini(paths: &Paths, install: &Path, enable: bool) -> Result<()> {

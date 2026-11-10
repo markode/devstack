@@ -50,16 +50,22 @@ pub fn write_db_config(
     } else {
         format!("socket={}\n", quoted_conf_path(&sock))
     };
+    // MySQL 8.0.30+ / 9.x removed `innodb_log_file_size` (use redo_log_capacity).
+    // MariaDB still wants the classic log_file_size knob.
+    let redo_log = if engine == "mysql" {
+        "innodb_redo_log_capacity=268435456\n"
+    } else {
+        "innodb_log_file_size=256M\n"
+    };
     let body = format!(
         r#"[mysqld]
 port={port}
 bind-address=127.0.0.1
 datadir={datadir}
 {socket_mysqld}max_allowed_packet=1G
-# Keep log file size stable across releases — changing it forces a slow redo resize.
+# Keep redo size stable across releases — resizing forces a slow rebuild.
 innodb_buffer_pool_size=128M
-innodb_log_file_size=256M
-innodb_log_buffer_size=16M
+{redo_log}innodb_log_buffer_size=16M
 innodb_flush_log_at_trx_commit=2
 # Clean stop → fast warm start (avoid crash recovery after force-kill).
 innodb_fast_shutdown=1
@@ -80,6 +86,7 @@ host=127.0.0.1
         datadir = quoted_conf_path(datadir),
         socket_mysqld = socket_mysqld,
         socket_client = socket_client,
+        redo_log = redo_log,
     );
     fs::write(&conf, body)?;
     Ok(conf)
@@ -239,6 +246,25 @@ fn install_db_if_needed(root: &Path, datadir: &Path, conf: &Path) -> Result<()> 
 pub fn start_database(paths: &Paths, state: &mut AppState, engine: &str) -> Result<()> {
     if let Some(pid) = state.runtime.database_pid {
         if is_running(pid) && state.runtime.database_engine.as_deref() == Some(engine) {
+            println!("[database] {engine} pid={pid} still running — skip restart");
+            return Ok(());
+        }
+        // Stale PID but our listen port still answers SELECT 1 (warm apply after
+        // stop_web_stack / pid-file drift): reuse the live server instead of a
+        // 45s InnoDB respawn that blows the Windows warm budget.
+        let port = crate::services::ports::engine_db_port(&state.stack, engine);
+        let sock = socket_path(paths, engine);
+        if db_accepting(&sock, port) && database_select_ok(paths, state, engine) {
+            if let Some(live) = read_pid(&paths.pid_file(engine)).filter(|p| is_running(*p)) {
+                state.runtime.database_pid = Some(live);
+            }
+            state.runtime.database_engine = Some(engine.into());
+            state.active_database = Some(engine.into());
+            println!("[database] {engine} already accepting on port {port} — reusing without restart");
+            crate::applog::info(
+                "database",
+                &format!("{engine} already accepting on port {port} — reusing without restart"),
+            );
             return Ok(());
         }
         let _ = stop_database(paths, state);
@@ -357,6 +383,24 @@ fn db_accepting(sock: &Path, port: u16) -> bool {
     }
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
+}
+
+/// True when `SELECT 1` succeeds against the configured root account (fast probe).
+fn database_select_ok(paths: &Paths, state: &AppState, engine: &str) -> bool {
+    let Ok(root) = engine_install_dir(state, engine) else {
+        return false;
+    };
+    let Ok(cli) = client_bin(&root) else {
+        return false;
+    };
+    let mut args = mysql_root_args(paths, state, engine);
+    args.push("-e".into());
+    args.push("SELECT 1".into());
+    crate::services::process::command(&cli)
+        .args(&args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 pub fn stop_database(paths: &Paths, state: &mut AppState) -> Result<()> {
@@ -606,5 +650,35 @@ mod perf_tests {
         assert!(db_accepting(missing, port));
         drop(listener);
         assert!(!db_accepting(missing, port));
+    }
+
+    #[test]
+    fn mysql_config_uses_redo_log_capacity_not_log_file_size() {
+        let dir = std::env::temp_dir().join(format!(
+            "devstack-dbconf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = crate::config::Paths::from_root(dir.clone()).unwrap();
+        let datadir = paths.databases.join("mysql/data");
+        fs::create_dir_all(&datadir).unwrap();
+        let conf = write_db_config(&paths, "mysql", &datadir, 3307).unwrap();
+        let body = fs::read_to_string(&conf).unwrap();
+        assert!(
+            body.contains("innodb_redo_log_capacity="),
+            "MySQL 9 rejects innodb_log_file_size: {body}"
+        );
+        assert!(
+            !body.contains("innodb_log_file_size="),
+            "must not emit removed MySQL knob: {body}"
+        );
+        let conf_m = write_db_config(&paths, "mariadb", &datadir, 3308).unwrap();
+        let body_m = fs::read_to_string(&conf_m).unwrap();
+        assert!(body_m.contains("innodb_log_file_size=256M"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -188,25 +188,32 @@ pub fn apply_stack_with_progress(
     let mut php_snapshot = state.clone();
     let (ca_res, db_res, php_pids) = std::thread::scope(|scope| {
         let ca_h = scope.spawn(|| -> Result<()> {
+            let sw = crate::services::perf::Stopwatch::start();
             ensure_root_ca(paths)?;
             // Single UAC on Windows for hosts + CA trust; unix uses helper/sudo separately.
             let _ = sync_hosts_and_trust_ca(paths, &ca_snapshot);
+            eprintln!("[perf] apply ca/hosts {}ms", sw.elapsed_ms());
             Ok(())
         });
         let db_h = scope.spawn(|| -> Option<(Result<()>, AppState)> {
             let engine = engine.as_deref()?;
             let mut st = db_snapshot?;
+            let sw = crate::services::perf::Stopwatch::start();
             let res = start_database(paths, &mut st, engine);
             if res.is_ok() {
                 let _ = configure_phpmyadmin(paths, &st);
             }
+            eprintln!("[perf] apply database {}ms", sw.elapsed_ms());
             Some((res, st))
         });
         let php_h = scope.spawn(|| {
+            let sw = crate::services::perf::Stopwatch::start();
             let _ = start_php_many(paths, &mut php_snapshot, &php_versions);
+            eprintln!("[perf] apply php {}ms", sw.elapsed_ms());
             php_snapshot.runtime.php_pids.clone()
         });
 
+        let sw = crate::services::perf::Stopwatch::start();
         match start_dns(paths, state, state.stack.dns_port) {
             Ok(()) => {}
             Err(e) => {
@@ -217,6 +224,7 @@ pub fn apply_stack_with_progress(
                 state.runtime.dns_pid = None;
             }
         }
+        eprintln!("[perf] apply dns {}ms", sw.elapsed_ms());
         (
             ca_h.join(),
             db_h.join(),
@@ -260,19 +268,25 @@ pub fn apply_stack_with_progress(
     let remap_changed = remap.changed;
     let (nginx_err, apache_err) = std::thread::scope(|scope| {
         let wp_h = scope.spawn(|| {
+            let sw = crate::services::perf::Stopwatch::start();
             if remap_changed {
                 let _ = rewrite_all_wp_urls_for_port_remap(paths, &wp_snapshot, before);
             }
             // Catch install/toggle mismatches even when ports did not remap this start.
             let _ = crate::services::wp_url::repair_mismatched_wp_urls(paths, &wp_snapshot);
+            eprintln!("[perf] apply wp-url {}ms", sw.elapsed_ms());
         });
         // Both front-ends can run together on different ports (see docs/apache.md).
         // PHP is already up (start_php_many above) so these skip straight to spawn.
         // Never auto-open a browser from Start stack — the Sites UI owns that.
+        let sw = crate::services::perf::Stopwatch::start();
         stack_phase(progress, "nginx", "Starting Nginx…");
         let nginx_err = start_nginx(paths, state).err();
+        eprintln!("[perf] apply nginx {}ms", sw.elapsed_ms());
+        let sw = crate::services::perf::Stopwatch::start();
         stack_phase(progress, "apache", "Starting Apache…");
         let apache_err = start_apache(paths, state).err();
+        eprintln!("[perf] apply apache {}ms", sw.elapsed_ms());
         let _ = wp_h.join();
         (nginx_err, apache_err)
     });
@@ -309,14 +323,62 @@ pub fn start_stack_with_progress(
     apply_stack_with_progress(paths, state, progress)
 }
 
+fn stop_running_extras(paths: &Paths, state: &mut AppState) {
+    let extras_ids: Vec<&'static str> = crate::services::extras_v030::NEW_SERVICE_IDS
+        .iter()
+        .copied()
+        .chain(["redis", "mailpit", "mongodb", "postgresql"])
+        .collect();
+    for id in extras_ids {
+        let pid = match id {
+            "redis" => state.runtime.redis_pid,
+            "mailpit" => state.runtime.mailpit_pid,
+            "mongodb" => state.runtime.mongodb_pid,
+            "postgresql" => state.runtime.postgresql_pid,
+            other => crate::services::extras_v030::pid_of(state, other),
+        };
+        let alive = pid.map(is_running).unwrap_or(false)
+            || crate::services::process::read_pid(&paths.pid_file(id))
+                .map(is_running)
+                .unwrap_or(false);
+        if alive {
+            let _ = crate::services::extras::stop_service(paths, state, id);
+        }
+    }
+}
+
+/// Stop nginx/apache (and extras) but leave the database, DNS, and PHP running.
+/// Used for warm `apply_stack` measurements so Windows does not re-pay InnoDB
+/// start or Defender cold-scan of php-cgi / the DNS helper binary.
+pub fn stop_web_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
+    let _ = crate::services::share::stop_share(paths, state);
+    stop_running_extras(paths, state);
+    let _ = stop_nginx(paths, state);
+    let _ = stop_apache(paths, state);
+    // Keep DNS + PHP up: respawning them dominates Windows CI warm apply (~45s)
+    // under Defender and is not part of the product "warm front-end" path.
+    state.runtime.stack_intentionally_stopped = true;
+    state.runtime.last_start_error = None;
+    refresh_site_process_status(state);
+    save_state(&paths.state_file, state)?;
+    Ok(stack_status(state))
+}
+
 pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
     let _ = crate::services::share::stop_share(paths, state);
     // The database shutdown (export-on-stop + mysqladmin) is the long pole, so run
     // it on a snapshot while the front-ends, DNS and PHP are stopped here.
     let mut db_snapshot = state.clone();
+    // One-click extras (meilisearch etc.) are independent of the web stack but must
+    // still die with "Stop Stack" so they cannot outlive the session.
+    // Clone before the scoped threads so front-end stops can mutate `state` freely.
+    let mut extras_snapshot = state.clone();
     std::thread::scope(|scope| {
         let db_h = scope.spawn(|| {
             let _ = stop_database(paths, &mut db_snapshot);
+        });
+        let extras_h = scope.spawn(|| {
+            stop_running_extras(paths, &mut extras_snapshot);
         });
         let _ = stop_nginx(paths, state);
         let _ = stop_apache(paths, state);
@@ -325,7 +387,18 @@ pub fn stop_stack(paths: &Paths, state: &mut AppState) -> Result<StackStatus> {
             let _ = crate::services::php_runtime::stop_php(paths, state, &version);
         }
         let _ = db_h.join();
+        let _ = extras_h.join();
     });
+    // Merge cleared extras pids (front-end/DB fields come from the other paths).
+    state.runtime.redis_pid = extras_snapshot.runtime.redis_pid;
+    state.runtime.mailpit_pid = extras_snapshot.runtime.mailpit_pid;
+    state.runtime.mongodb_pid = extras_snapshot.runtime.mongodb_pid;
+    state.runtime.postgresql_pid = extras_snapshot.runtime.postgresql_pid;
+    state.runtime.memcached_pid = extras_snapshot.runtime.memcached_pid;
+    state.runtime.meilisearch_pid = extras_snapshot.runtime.meilisearch_pid;
+    state.runtime.typesense_pid = extras_snapshot.runtime.typesense_pid;
+    state.runtime.minio_pid = extras_snapshot.runtime.minio_pid;
+    state.runtime.reverb_pid = extras_snapshot.runtime.reverb_pid;
     state.runtime.database_pid = db_snapshot.runtime.database_pid;
     state.runtime.database_engine = db_snapshot.runtime.database_engine;
     // Intentional stop → grey sites; clear start errors so probes never show stale logs.
@@ -408,14 +481,22 @@ pub fn apply_site_environment_change(
     }
 
     if now_apache != was_apache {
-        // Front-end switch: regenerate both configs; stop Apache when unused.
-        reload_nginx(paths, state)?;
-        if now_apache || state.sites.iter().any(crate::services::httpd::site_uses_apache) {
-            reload_apache(paths, state)?;
+        // Dual-bound vhosts: both front-ends already serve every site. Ensure the
+        // destination is up, then rewrite WP URLs — no Windows FOREGROUND stop+start.
+        if now_apache {
+            if state.runtime.apache_pid.filter(|p| is_running(*p)).is_none() {
+                start_apache(paths, state)?;
+            } else {
+                // Config already has this site; fingerprint no-op on Windows.
+                let _ = reload_apache(paths, state);
+            }
+        } else if state.runtime.nginx_pid.filter(|p| is_running(*p)).is_none() {
+            start_nginx(paths, state)?;
         } else {
-            let _ = crate::services::httpd::stop_apache(paths, state);
+            let _ = reload_nginx(paths, state);
         }
         rewrite_wp_urls_for_server_switch(paths, state, &site, was_apache, now_apache)?;
+        refresh_site_process_status(state);
     } else if now_apache {
         reload_apache(paths, state)?;
         if site.https != prev_https {
