@@ -104,6 +104,9 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LZMA_API_STATIC: "1"
+          LIBZ_SYS_STATIC: "1"
+          OPENSSL_STATIC: "1"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "DevStack ${{ github.ref_name }}"
@@ -118,6 +121,44 @@ jobs:
           releaseDraft: false
           prerelease: true
           args: ${{ matrix.args }}
+
+      - name: Gate macOS dylibs (otool) + clean launch without Homebrew xz
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-clean-launch
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(
+            src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/dmg/*.dmg
+          )
+          found=0
+          for d in "${dmgs[@]}"; do
+            [[ -f "$d" ]] || continue
+            found=1
+            echo "Checking $d"
+            ./scripts/macos-check-app-dylibs.sh "$d"
+            ./scripts/macos-clean-launch.sh "$d" "$DEVSTACK_DATA_DIR"
+          done
+          if [[ "$found" -eq 0 ]]; then
+            echo "FAIL: no .dmg found under src-tauri/target/**/bundle/dmg" >&2
+            find src-tauri/target -name '*.dmg' -o -name 'DevStack.app' 2>/dev/null | head -50 >&2 || true
+            exit 1
+          fi
+
+      - name: Gate Windows DLL dependents (dumpbin)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem -Path 'src-tauri/target/release' -Filter 'devstack.exe' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\deps\\' } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $exe) { throw 'devstack.exe not found after tauri build' }
+          & "$env:GITHUB_WORKSPACE/scripts/check-windows-dlls.ps1" -Exe $exe
+          if ($LASTEXITCODE -ne 0) { throw "check-windows-dlls.ps1 failed ($LASTEXITCODE)" }
 
   # Dedicated E2E on the tagged commit after installers build — verifies clean + busy-port flows.
   release-e2e:
@@ -186,7 +227,10 @@ jobs:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-release-e2e
           DEVSTACK_RESET_SITES: "1"
           DEVSTACK_MATRIX_JSON: ${{ runner.temp }}/windows-matrix.json
-          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.1.md
+          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.2.md
+          LZMA_API_STATIC: "1"
+          LIBZ_SYS_STATIC: "1"
+          OPENSSL_STATIC: "1"
         run: |
           $ErrorActionPreference = 'Stop'
           cargo build --bin devstack_smoke --release
@@ -202,8 +246,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-feature-matrix-release-v0.3.1
+          name: windows-feature-matrix-release-v0.3.2
           path: |
             ${{ runner.temp }}/windows-matrix.json
-            docs/test-report-v0.3.1.md
+            docs/test-report-v0.3.2.md
           if-no-files-found: warn
