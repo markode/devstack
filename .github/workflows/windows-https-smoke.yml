@@ -113,7 +113,10 @@ jobs:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-e2e
           DEVSTACK_RESET_SITES: "1"
           DEVSTACK_MATRIX_JSON: ${{ runner.temp }}/windows-matrix.json
-          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.1.md
+          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.2.md
+          LZMA_API_STATIC: "1"
+          LIBZ_SYS_STATIC: "1"
+          OPENSSL_STATIC: "1"
         run: |
           $ErrorActionPreference = 'Stop'
           cargo build --bin devstack_smoke --release
@@ -133,10 +136,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-feature-matrix-v0.3.1
+          name: windows-feature-matrix-v0.3.2
           path: |
             ${{ runner.temp }}/windows-matrix.json
-            docs/test-report-v0.3.1.md
+            docs/test-report-v0.3.2.md
           if-no-files-found: warn
 
       - name: Launch built exe - window responds + UI within 3s
@@ -144,6 +147,9 @@ jobs:
         shell: pwsh
         env:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-launch-ui
+          LZMA_API_STATIC: "1"
+          LIBZ_SYS_STATIC: "1"
+          OPENSSL_STATIC: "1"
         run: |
           $ErrorActionPreference = 'Stop'
           # Real Tauri app (not smoke bin): catches AppHangB1 / "Tauri App" title / blocked setup.
@@ -155,6 +161,8 @@ jobs:
               Select-Object -First 1 -ExpandProperty FullName
           }
           if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { throw "devstack.exe not found after tauri build" }
+          & "$env:GITHUB_WORKSPACE/scripts/check-windows-dlls.ps1" -Exe $exe
+          if ($LASTEXITCODE -ne 0) { throw "check-windows-dlls.ps1 failed ($LASTEXITCODE)" }
           & "$env:GITHUB_WORKSPACE/scripts/windows-ui-launch.ps1" -Exe $exe -DataDir $env:DEVSTACK_DATA_DIR -TimingsJson (Join-Path $env:RUNNER_TEMP 'devstack-ui-launch.json')
           if ($LASTEXITCODE -ne 0) { throw "windows-ui-launch.ps1 failed ($LASTEXITCODE)" }
 
@@ -162,7 +170,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-ui-launch-v0.3.1
+          name: windows-ui-launch-v0.3.2
           path: ${{ runner.temp }}/devstack-ui-launch.json
           if-no-files-found: ignore
 

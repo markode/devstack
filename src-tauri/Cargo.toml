@@ -1,6 +1,6 @@
 [package]
 name = "devstack"
-version = "0.3.1"
+version = "0.3.2"
 description = "DevStack — local PHP/Node development environment"
 authors = ["DevStack"]
 edition = "2021"
@@ -30,8 +30,16 @@ hex = "0.4"
 rand = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
-flate2 = "1"
-xz2 = "0.1"
+# Pure-Rust gzip (no system zlib). Do not enable flate2's `zlib` feature.
+flate2 = { version = "1", default-features = true }
+# Static liblzma — Homebrew's liblzma.5.dylib must never appear in shipped .app
+# (v0.3.1 arm64 crash: dyld Library not loaded /opt/homebrew/*/liblzma.5.dylib).
+xz2 = { version = "0.1", features = ["static"] }
+# Pin transitive native crates to static/vendored so pkg-config cannot pick up
+# Homebrew /usr/local shared libs during CI builds.
+lzma-sys = { version = "0.1", features = ["static"] }
+libz-sys = { version = "1", default-features = false, features = ["static"] }
+openssl-sys = { version = "0.9", features = ["vendored"] }
 async-trait = "0.1"
 regex = "1"
 semver = "1"
@@ -47,6 +55,7 @@ tauri-plugin-dialog = "2.8.4"
 dunce = "1"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# Vendored OpenSSL; libssh2-sys builds libssh2 from source (no Homebrew dylib).
 ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 
 [profile.release]

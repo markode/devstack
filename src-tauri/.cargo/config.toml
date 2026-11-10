@@ -1,0 +1,7 @@
+# Portable desktop builds: never pick up Homebrew /usr/local shared libs.
+# xz2/lzma-sys honour LZMA_API_STATIC; libz-sys/openssl are also forced static
+# via Cargo.toml features. Keeping the env here covers transitive build.rs paths.
+[env]
+LZMA_API_STATIC = "1"
+LIBZ_SYS_STATIC = "1"
+OPENSSL_STATIC = "1"

@@ -909,20 +909,21 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
 }
 
 fn write_markdown(json_path: &Path, report: &MatrixReport) -> Result<(), String> {
+    let ver = env!("CARGO_PKG_VERSION");
+    let md_name = format!("test-report-v{ver}.md");
     let md_path = std::env::var("DEVSTACK_MATRIX_MD")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             // Prefer repo docs/ when present.
-            let cand = PathBuf::from("../docs/test-report-v0.3.1.md");
+            let cand = PathBuf::from(format!("../docs/{md_name}"));
             if cand.parent().map(|p| p.exists()).unwrap_or(false) {
                 cand
             } else {
-                json_path
-                    .with_file_name("test-report-v0.3.1.md")
+                json_path.with_file_name(&md_name)
             }
         });
     let mut md = String::new();
-    md.push_str("# DevStack v0.3.1 — Windows feature matrix\n\n");
+    md.push_str(&format!("# DevStack v{ver} — Windows feature matrix\n\n"));
     md.push_str(&format!(
         "Generated: `{}` · os=`{}` arch=`{}` version=`{}` · total `{}` ms\n\n",
         report.started_at, report.os, report.arch, report.version, report.total_ms
@@ -933,6 +934,10 @@ fn write_markdown(json_path: &Path, report: &MatrixReport) -> Result<(), String>
     ));
     md.push_str(
         "Skipped rows are **not** passes — each includes an explicit `SKIPPED:` reason. Required gates (`hosting.sftp_live`, `svc.redis_required`) must be `pass` before release.\n\n",
+    );
+    md.push_str("## Portable linkage (v0.3.2)\n\n");
+    md.push_str(
+        "v0.3.1 arm64 crashed on user Macs (`dyld` missing `/opt/homebrew/*/liblzma.5.dylib`). v0.3.2 statically links liblzma/zlib and vendors OpenSSL; CI `otool`/`dumpbin` gates reject non-system deps.\n\n",
     );
     md.push_str("## Hang root cause (v0.3.0 → 0.3.1)\n\n");
     md.push_str(
