@@ -45,7 +45,10 @@ $allowed = @(
   'VCRUNTIME140.DLL','VCRUNTIME140_1.DLL','MSVCP140.DLL','MSVCP140_1.DLL','MSVCP140_2.DLL',
   'CONCRT140.DLL','API-MS-WIN-*.DLL','WEBVIEW2LOADER.DLL','WEBVIEW2LOADER.DLL.DLL',
   'WINDOWSCODECSEXT.DLL','WINDOWSCODECS.DLL','MFPLAT.DLL','MF.DLL','MFREADWRITE.DLL',
-  'WLDAP32.DLL','NORMALIZ.DLL','DBGHELP.DLL','BCYPTPRIMITIVES.DLL'
+  'WLDAP32.DLL','NORMALIZ.DLL','DBGHELP.DLL','BCYPTPRIMITIVES.DLL',
+  # Common system DLLs seen on Tauri/WebView2 release builds:
+  'COMBASE.DLL','PDH.DLL','PSAPI.DLL','USERENV.DLL','NETUTILS.DLL','AUTHZ.DLL',
+  'WINSPOOL.DRV','IPHLPAPI.DLL','ONDEMANDCONNROUTEHELPER.DLL'
 )
 
 $deps = @()
@@ -53,9 +56,16 @@ $in = $false
 foreach ($line in ($out -split "`r?`n")) {
   $t = $line.Trim()
   if ($t -match '^Image has the following dependencies') { $in = $true; continue }
-  if ($in -and ($t -eq '' -or $t -match '^Summary' -or $t -match '^Image has the following delay')) { $in = $false; continue }
+  # dumpbin inserts a blank line after the header — do NOT end the section on blank lines.
+  if ($in -and ($t -match '^Summary' -or $t -match '^Image has the following delay')) { $in = $false; continue }
   if ($in -and $t -match '\.DLL$') { $deps += $t.ToUpperInvariant() }
 }
+
+if ($deps.Count -eq 0) {
+  Write-Error 'FAIL: dumpbin reported zero DLL dependents — parser bug or non-PE input'
+  exit 1
+}
+Write-Host ("Parsed $($deps.Count) dependents: " + ($deps -join ', '))
 
 $bad = @()
 foreach ($d in $deps) {
