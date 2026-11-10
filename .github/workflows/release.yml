@@ -145,18 +145,52 @@ jobs:
           npx playwright install chromium
           npm run test:e2e
 
+      - name: Exclude workspace + temp from Windows Defender (CI only)
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # CI-ONLY (same as windows-https-smoke). Never mirrored into the shipped app.
+          foreach ($p in @(
+            $env:RUNNER_TEMP,
+            $env:GITHUB_WORKSPACE,
+            (Join-Path $env:GITHUB_WORKSPACE 'src-tauri\target')
+          )) {
+            if ($p -and (Test-Path -LiteralPath $p)) {
+              Write-Host "Defender exclusion (CI): $p"
+              Add-MpPreference -ExclusionPath $p -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Enable OpenSSH Server for hosting SFTP E2E
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Required gate hosting.sftp_live — must match windows-https-smoke.yml.
+          & "$env:GITHUB_WORKSPACE/scripts/windows-sshd-hosting.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "windows-sshd-hosting.ps1 failed ($LASTEXITCODE)" }
+          if (-not $env:DEVSTACK_HOSTING_SSH_HOST) {
+            throw "DEVSTACK_HOSTING_SSH_HOST not set after OpenSSH setup"
+          }
+          if (-not $env:DEVSTACK_HOSTING_SSH_PASSWORD) {
+            throw "DEVSTACK_HOSTING_SSH_PASSWORD not set after OpenSSH setup"
+          }
+          Write-Host "Hosting SSH env ready for $($env:DEVSTACK_HOSTING_SSH_USER)@$($env:DEVSTACK_HOSTING_SSH_HOST)"
+
       - name: Release E2E — clean ports + busy 80/443/3306/8025 + Windows feature matrix
         working-directory: src-tauri
         shell: pwsh
         env:
-          DEVSTACK_DATA_DIR: ${{ runner.temp }}\devstack-release-e2e
+          # Forward slashes avoid YAML/Actions treating \t in \test-report as a tab.
+          DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-release-e2e
           DEVSTACK_RESET_SITES: "1"
-          DEVSTACK_MATRIX_JSON: ${{ runner.temp }}\windows-matrix.json
-          DEVSTACK_MATRIX_MD: ${{ github.workspace }}\docs\test-report-v0.3.1.md
+          DEVSTACK_MATRIX_JSON: ${{ runner.temp }}/windows-matrix.json
+          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.1.md
         run: |
           $ErrorActionPreference = 'Stop'
           cargo build --bin devstack_smoke --release
-          $bin = Join-Path (Get-Location) 'target\release\devstack_smoke.exe'
+          $bin = Join-Path (Get-Location) 'target/release/devstack_smoke.exe'
           & $bin --e2e
           if ($LASTEXITCODE -ne 0) { throw "release E2E failed ($LASTEXITCODE)" }
           if (-not (Test-Path $env:DEVSTACK_MATRIX_MD)) {
