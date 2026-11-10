@@ -31,10 +31,10 @@ Root cause: `xz2` → `lzma-sys` dynamically linked Homebrew’s liblzma from th
 
 | Check | Result | Notes |
 |-------|--------|-------|
-| macOS smoke otool gate | **PASS** | [run 42803142205](https://github.com/markode/devstack/actions/runs/42803142205) — no `/opt/homebrew`, no `liblzma` |
+| macOS smoke otool gate | **PASS** | [run 42814504754](https://github.com/markode/devstack/actions/runs/42814504754) — no `/opt/homebrew`, no `liblzma` |
 | macOS clean launch (xz hidden) | **PASS** | `OK: release binary alive 3s with Homebrew xz hidden` |
-| Windows dumpbin gate | **PASS** (parser fixed after first green) | first green vacuously passed blank-line bug; fixed + re-verified |
-| Windows / macOS smokes | **PASS** | macos-smoke + windows-smoke on PR #27 |
+| Windows dumpbin gate | **PASS** | [run 42814504741](https://github.com/markode/devstack/actions/runs/42814504741) — 30 system DLL dependents parsed |
+| Windows / macOS smokes | **PASS** | macos-smoke + windows-smoke on PR #27 @ `9ed8b6b` |
 | Release 4 assets | _pending tag_ | arm64/x64 dmg + exe/msi |
 
 ### macOS `otool -L` — `./target/release/devstack` (smoke CI)
@@ -64,36 +64,21 @@ OK: release binary alive 3s with Homebrew xz hidden
 
 No `liblzma`, `/opt/homebrew`, or `/usr/local` paths.
 
-### Windows `dumpbin /dependents` — `devstack.exe` (smoke CI)
+### Windows `dumpbin /dependents` — `devstack.exe` (smoke CI @ `9ed8b6b`)
 
 ```
 === dumpbin /dependents …\devstack.exe ===
-  Image has the following dependencies:
-    kernel32.dll
-    bcryptprimitives.dll
-    ntdll.dll
-    api-ms-win-core-synch-l1-2-0.dll
-    shell32.dll
-    user32.dll
-    ole32.dll
-    oleaut32.dll
-    gdi32.dll
-    dwmapi.dll
-    imm32.dll
-    combase.dll
-    comctl32.dll
-    shlwapi.dll
-    advapi32.dll
-    api-ms-win-core-winrt-error-l1-1-0.dll
-    ws2_32.dll
-    bcrypt.dll
-    pdh.dll
-    psapi.dll
-    powrprof.dll
-    crypt32.dll
-    api-ms-win-crt-*.dll
+Parsed 30 dependents: KERNEL32.DLL, BCRYPTPRIMITIVES.DLL, NTDLL.DLL,
+  API-MS-WIN-CORE-SYNCH-L1-2-0.DLL, SHELL32.DLL, USER32.DLL, OLE32.DLL,
+  OLEAUT32.DLL, GDI32.DLL, DWMAPI.DLL, IMM32.DLL, COMBASE.DLL, COMCTL32.DLL,
+  SHLWAPI.DLL, ADVAPI32.DLL, API-MS-WIN-CORE-WINRT-ERROR-L1-1-0.DLL,
+  WS2_32.DLL, BCRYPT.DLL, PDH.DLL, PSAPI.DLL, POWRPROF.DLL, CRYPT32.DLL,
+  API-MS-WIN-CRT-MATH-L1-1-0.DLL, API-MS-WIN-CRT-STRING-L1-1-0.DLL,
+  API-MS-WIN-CRT-RUNTIME-L1-1-0.DLL, API-MS-WIN-CRT-HEAP-L1-1-0.DLL,
+  API-MS-WIN-CRT-STDIO-L1-1-0.DLL, API-MS-WIN-CRT-ENVIRONMENT-L1-1-0.DLL,
+  API-MS-WIN-CRT-CONVERT-L1-1-0.DLL, API-MS-WIN-CRT-LOCALE-L1-1-0.DLL
 OK: …\devstack.exe dependents are system / WebView2 only
-Launch OK: title=DevStack responding=True titleMs=909
+Launch OK: title=DevStack responding=True titleMs=933
 ```
 
 ## Expected otool shape (good)
