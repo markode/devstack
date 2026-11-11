@@ -1022,6 +1022,170 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
         },
     );
 
+    // --- v0.3.4 hotfix scenarios (probe/vhosts/Open URL/DNS/placeholder path) ---
+    rec.check(
+        "hotfix034.placeholder_abs_path",
+        "Empty-site placeholder embeds logo + absolute path",
+        || {
+            let dir = ctx.paths.root.join("sites/placeholder-path");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            sites::ensure_site_placeholder(&dir).map_err(|e| e.to_string())?;
+            let html = fs::read_to_string(dir.join("index.html")).map_err(|e| e.to_string())?;
+            if !html.contains(sites::EMPTY_SITE_MARKER) {
+                return Err("missing empty-site marker".into());
+            }
+            if !html.contains("data:image/png;base64,") || !html.contains("alt=\"DevStack\"") {
+                return Err("missing DevStack logo lockup".into());
+            }
+            let abs = dunce::canonicalize(&dir).unwrap_or(dir.clone());
+            let abs_s = abs.display().to_string();
+            if !html.contains(&abs_s) {
+                return Err(format!("absolute path missing from HTML: {abs_s}"));
+            }
+            if !html.contains("id=\"copy-path\"") {
+                return Err("missing Copy button".into());
+            }
+            Ok(format!("path={abs_s}"))
+        },
+    );
+
+    rec.check(
+        "hotfix034.apache_http_open_8088",
+        "Apache HTTP Open URL stays on :apache_http_port (never :8444)",
+        || {
+            let state = lock(ctx);
+            let http = state.stack.apache_http_port;
+            let https = state.stack.apache_https_port;
+            let site = SiteRecord {
+                id: "open-apache-http".into(),
+                name: "open-apache-http".into(),
+                path: ctx.paths.root.join("sites/open-apache-http"),
+                domain: "open-apache-http.test".into(),
+                php_version: None,
+                node_version: None,
+                https: false,
+                web_server: Some("apache".into()),
+                framework: None,
+                database_engine: None,
+                database_name: None,
+                database_user: None,
+                database_password: None,
+                status: "stopped".into(),
+                is_template: false,
+                parked: false,
+                xdebug: false,
+                tld: "test".into(),
+                aliases: Vec::new(),
+                wildcard: false,
+            };
+            let url = ports::canonical_site_url(&site, &state);
+            if !url.starts_with("http://") {
+                return Err(format!("expected http scheme, got {url}"));
+            }
+            if https != 80 && url.contains(&format!(":{https}")) {
+                return Err(format!("Open remapped onto SSL port {https}: {url}"));
+            }
+            if http != 80 && !url.contains(&format!(":{http}")) {
+                return Err(format!("Open missing :{http}: {url}"));
+            }
+            Ok(url)
+        },
+    );
+
+    rec.check(
+        "hotfix034.single_bind_purge",
+        "Apache-preferred site purged from nginx sites-enabled",
+        || {
+            let mut state = lock(ctx);
+            let dir = ctx.paths.root.join("sites/purge-apache");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let php = crate::services::php_runtime::default_php_version(&state);
+            let site = sites::create_site(
+                &mut state,
+                &ctx.paths,
+                "purge-apache",
+                dir,
+                php,
+            )
+            .map_err(|e| e.to_string())?;
+            if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+                s.domain = "purge-apache.test".into();
+                s.https = true;
+                s.web_server = Some("apache".into());
+            }
+            let _ = save_state(&ctx.paths.state_file, &state);
+            // Seed a stale nginx conf that must be deleted on apply.
+            let nginx_sites = ctx.paths.nginx_sites_dir();
+            fs::create_dir_all(&nginx_sites).map_err(|e| e.to_string())?;
+            fs::write(
+                nginx_sites.join(format!("{}.conf", site.id)),
+                "server { listen 80; server_name stale; }\n",
+            )
+            .map_err(|e| e.to_string())?;
+            apply_stack(&ctx.paths, &mut state).map_err(|e| e.to_string())?;
+            if nginx_sites.join(format!("{}.conf", site.id)).exists() {
+                return Err("stale nginx conf survived for apache site".into());
+            }
+            let apache_conf = ctx.paths.apache_sites_dir().join(format!("{}.conf", site.id));
+            if !apache_conf.exists() {
+                return Err("apache vhost missing after apply".into());
+            }
+            let body = fs::read_to_string(&apache_conf).unwrap_or_default();
+            if body.contains("Redirect permanent") {
+                return Err("apache still emits Redirect permanent (301)".into());
+            }
+            if !body.contains("Redirect / ") {
+                return Err(format!("expected temporary Redirect /, got:\n{body}"));
+            }
+            Ok(format!("purged nginx + apache 302 for {}", site.id))
+        },
+    );
+
+    rec.check(
+        "hotfix034.dns_port_pick",
+        "DNS picks a bindable UDP port (Hyper-V-safe)",
+        || {
+            let preferred = {
+                let state = lock(ctx);
+                state.stack.dns_port
+            };
+            let chosen = dns::pick_dns_port(preferred);
+            if !dns::udp_port_bindable(chosen) {
+                return Err(format!("pick_dns_port returned unbindable {chosen}"));
+            }
+            Ok(format!("preferred={preferred} chosen={chosen}"))
+        },
+    );
+
+    rec.check(
+        "hotfix034.null_php_migrate",
+        "migrate_null_php_versions fills legacy null",
+        || {
+            let mut state = lock(ctx);
+            let expected = crate::services::php_runtime::default_php_version(&state)
+                .ok_or("no installed PHP")?;
+            let before = state.sites.iter().filter(|s| s.php_version.is_none()).count();
+            // Force one site null, then migrate.
+            if let Some(s) = state.sites.first_mut() {
+                s.php_version = None;
+            } else {
+                return Err("no sites to migrate".into());
+            }
+            let changed = sites::migrate_null_php_versions(&mut state);
+            if !changed {
+                return Err("migrate reported no change".into());
+            }
+            let still_null = state.sites.iter().filter(|s| s.php_version.is_none()).count();
+            if still_null != 0 {
+                return Err(format!("{still_null} sites still null after migrate"));
+            }
+            let _ = before;
+            Ok(format!("default={expected}"))
+        },
+    );
+
     {
         let mut state = lock(ctx);
         let _ = stop_stack(&ctx.paths, &mut state);
