@@ -1325,9 +1325,14 @@ fn pid_name_matches_frontend(pid: u32, runtime: &crate::config::RuntimeState) ->
     false
 }
 
-/// After nginx/apache reports listening: ensure exactly one DevStack-owned
-/// listener on `port`. Kills extra data-dir orphans; never kills foreign
-/// processes outside the DevStack data root (WAMP on :80 must survive).
+/// After nginx/apache reports listening: verify every LISTENING PID on `port`
+/// is DevStack-owned (exe under the data dir, or our recorded master / frontend
+/// name). Never kills foreign processes (WAMP on :80 must survive).
+///
+/// Unix/macOS nginx workers all appear as LISTENING on the shared socket — that
+/// is healthy. Windows SO_REUSEADDR orphan *masters* are reclaimed before start;
+/// here we only fail if a foreign listener remains or the owned count looks like
+/// a leftover pile-up (many independent masters).
 pub fn assert_single_owned_listener(
     port: u16,
     paths: &crate::config::Paths,
@@ -1343,7 +1348,6 @@ pub fn assert_single_owned_listener(
         )));
     }
 
-    let mut data_dir_pids = Vec::new();
     let mut owned_pids = Vec::new();
     let mut foreign = Vec::new();
 
@@ -1351,13 +1355,9 @@ pub fn assert_single_owned_listener(
         let under = pid_exe_under_data_root(pid, &paths.root);
         let in_runtime = owned_runtime.contains(&pid);
         let frontend = pid_name_matches_frontend(pid, runtime);
-        if under {
-            data_dir_pids.push(pid);
-            owned_pids.push(pid);
-        } else if in_runtime || frontend {
+        if under || in_runtime || frontend {
             owned_pids.push(pid);
         } else {
-            // Exe outside data dir (or unknown) and not a tracked runtime PID.
             foreign.push(pid);
         }
     }
@@ -1385,57 +1385,48 @@ pub fn assert_single_owned_listener(
         )));
     }
 
-    // Prefer the recorded master PID when choosing which listener to keep.
+    // Windows orphan pile-up: dozens of independent masters (user diag ~20).
+    // Healthy master+workers is typically a handful. Cap only on Windows.
+    #[cfg(windows)]
+    {
+        const MAX_OWNED_LISTENERS: usize = 8;
+        if owned_pids.len() > MAX_OWNED_LISTENERS {
+            // Reclaim data-dir orphans once more, then re-check.
+            crate::startup::reclaim_orphans(paths);
+            let left = listening_pids_on_port(port);
+            let still_owned: Vec<u32> = left
+                .into_iter()
+                .filter(|pid| {
+                    pid_exe_under_data_root(*pid, &paths.root)
+                        || owned_runtime_pids_with_files(paths, runtime).contains(pid)
+                        || pid_name_matches_frontend(*pid, runtime)
+                })
+                .collect();
+            if still_owned.len() > MAX_OWNED_LISTENERS {
+                return Err(DevStackError::Message(format!(
+                    "port {port} still has {} DevStack LISTENING PIDs after reclaim (orphan pile-up?): {:?}",
+                    still_owned.len(),
+                    still_owned
+                )));
+            }
+            if still_owned.is_empty() {
+                return Err(DevStackError::Message(format!(
+                    "port {port} has no LISTENING process after orphan reclaim"
+                )));
+            }
+        }
+    }
+
+    let sole = owned_pids[0];
+    let under = pid_exe_under_data_root(sole, &paths.root);
     let prefer = [runtime.nginx_pid, runtime.apache_pid]
         .into_iter()
         .flatten()
-        .find(|p| owned_pids.contains(p))
-        .unwrap_or(owned_pids[0]);
-
-    for pid in &data_dir_pids {
-        if *pid == prefer {
-            continue;
-        }
-        crate::applog::info(
-            "ports",
-            format!("killing extra data-dir listener pid={pid} on port {port} (keeping {prefer})"),
-        );
-        let _ = crate::services::process::stop_pid(*pid);
-    }
-
-    // Brief settle for taskkill / SIGTERM.
-    let _ = crate::services::perf::poll_backoff(
-        std::time::Duration::from_millis(5),
-        std::time::Duration::from_millis(20),
-        std::time::Duration::from_millis(500),
-        || {
-            let left = listening_pids_on_port(port);
-            (left.len() == 1
-                && (left.contains(&prefer)
-                    || owned_runtime_pids_with_files(paths, runtime).contains(&left[0])))
-            .then_some(())
-        },
-    );
-
-    let remaining = listening_pids_on_port(port);
-    if remaining.is_empty() {
+        .find(|p| owned_pids.contains(p));
+    let in_runtime = owned_runtime.contains(&sole) || prefer == Some(sole);
+    if !under && !in_runtime && !pid_name_matches_frontend(sole, runtime) {
         return Err(DevStackError::Message(format!(
-            "port {port} has no LISTENING process after orphan cleanup"
-        )));
-    }
-    if remaining.len() > 1 {
-        return Err(DevStackError::Message(format!(
-            "port {port} still has {} LISTENING PIDs after cleanup: {:?}",
-            remaining.len(),
-            remaining
-        )));
-    }
-    let sole = remaining[0];
-    let under = pid_exe_under_data_root(sole, &paths.root);
-    let in_runtime = owned_runtime.contains(&sole) || sole == prefer;
-    if !under && !in_runtime {
-        return Err(DevStackError::Message(format!(
-            "port {port} sole listener pid={sole} is not DevStack-owned"
+            "port {port} listener pid={sole} is not DevStack-owned"
         )));
     }
     Ok(())

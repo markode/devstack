@@ -58,13 +58,6 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Vendored OpenSSL; libssh2-sys builds libssh2 from source (no Homebrew dylib).
 ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
-    "Win32_Foundation",
-    "Win32_System_JobObjects",
-    "Win32_System_Threading",
-] }
-
 [profile.release]
 codegen-units = 1
 lto = true

@@ -42,7 +42,7 @@ Source diag: user Windows 11 machine on v0.3.2 (`devstack-diag-032.zip`) with WA
 
 | Check | Result | Notes |
 |-------|--------|-------|
-| Unit: orphan parse / placeholder | _pending local_ | `orphan_pids_from_scan_text`, `ensure_site_placeholder` |
+| Unit: orphan parse / placeholder / listeners | **PASS** | 5 + 3 + 1 Rust tests |
 | Vitest: `siteUrl` HTTPS rewrite | **PASS** | 8 tests |
 | Windows smoke + matrix | _pending CI_ | must include hotfix033.* |
 | macOS smoke | _pending CI_ | static dylib gates still green |
