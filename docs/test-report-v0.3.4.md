@@ -2,6 +2,8 @@
 
 Date: 2026-11-11  
 Branch: `cursor/hotfix-0-3-4-probe-vhosts-b7b6`  
+PR: https://github.com/markode/devstack/pull/29  
+Head: `b14ac0f3507110019c07116709f3cdb0dc9fcae4`  
 Source: real Windows 11 follow-up on v0.3.3 (Open→8444, cold probe, double Start, DNS 5353, null PHP, empty-site path).
 
 ## Symptoms (v0.3.3)
@@ -17,27 +19,36 @@ Source: real Windows 11 follow-up on v0.3.3 (Open→8444, cold probe, double Sta
 
 | Area | Change |
 |------|--------|
-| Probe | 10s curl + one retry; warm PHP before probe; 3xx OK; WP `install.php` + missing PHP hints |
+| Probe | 10s curl + one retry; warm PHP before probe (not inside `apply_stack`); 3xx OK; WP `install.php` + missing PHP hints |
 | Vhosts | Single-bind apache/nginx; purge foreign/orphan confs; `00-default`; **302** not 301 |
 | Open | `siteOpenUrl` / `formatSiteUrl` only — never remap `:8088`→`:8444` |
 | Start | Coalesce `startDevStack` promise; stack Start guard while in flight |
-| DNS | Bindable UDP pick + Hyper-V excluded ranges; warn not error badge |
+| DNS | Bindable UDP pick + Hyper-V excluded ranges; warn not error badge; macOS helper/security hard timeouts |
 | PHP | Migrate null → installed default |
 | Placeholder | Inline DevStack logo + HTML-escaped absolute path + Copy |
+| Perf CI | Windows toggle budget **2500 ms** for single-bind dual reload |
 
-## CI results
+## CI results (PR #29 @ `b14ac0f`)
 
-_Pending Windows/macOS smoke on this PR._
+| Check | Result | Run |
+|-------|--------|-----|
+| macOS smoke | **PASS** | [43028848405](https://github.com/markode/devstack/actions/runs/43028848405) |
+| Windows HTTPS smoke + matrix | **PASS** (56 pass / 0 fail / 2 skipped) | [43028848485](https://github.com/markode/devstack/actions/runs/43028848485) |
+| Warm apply (Windows) | **4189 ms** (< 5000 ms) | `PERF_BENCH apply_stack_warm_ms=4189` |
+| Warm apply (macOS) | **743 ms** (< 4000 ms) | `PERF_BENCH apply_stack_warm_ms=743` |
+| Web-server toggle (Windows) | **1494 ms** (< 2500 ms) | `apache_toggle_ms=1494` |
 
-### hotfix034 scenarios (expected)
+### hotfix034 scenarios (actual)
 
-| Id | Expect |
-|----|--------|
-| `hotfix034.placeholder_abs_path` | logo + absolute path + Copy |
-| `hotfix034.apache_http_open_8088` | `http://…:apache_http_port` |
-| `hotfix034.single_bind_purge` | apache site purged from nginx; Redirect temporary |
-| `hotfix034.dns_port_pick` | bindable UDP chosen |
-| `hotfix034.null_php_migrate` | null → default |
+| Id | Result | Detail |
+|----|--------|--------|
+| `hotfix034.placeholder_abs_path` | **PASS** 0ms | `path=D:\a\_temp\devstack-e2e\sites\placeholder-path` |
+| `hotfix034.apache_http_open_8088` | **PASS** 0ms | `http://open-apache-http.test:8088` |
+| `hotfix034.single_bind_purge` | **PASS** 6524ms | purged nginx + apache 302 for `purge-apache` |
+| `hotfix034.dns_port_pick` | **PASS** 71ms | `preferred=5354 chosen=5356` |
+| `hotfix034.null_php_migrate` | **PASS** 0ms | `default=8.5` |
+
+`MATRIX DONE pass=56 fail=0 skipped=2 total_ms=55385`
 
 ## Release assets
 
