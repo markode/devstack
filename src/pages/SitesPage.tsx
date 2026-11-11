@@ -432,6 +432,13 @@ export function SitesPage({
           onMobilePreview={() =>
             setMobileSite({ id: selected.site.id, name: selected.site.name })
           }
+          onDeleted={(warnings) => {
+            if (warnings.length) {
+              setError(warnings.join(" · "));
+            }
+            backToGrid();
+            void refresh();
+          }}
         />
         {mobileSite ? (
           <MobilePreviewModal
@@ -1354,6 +1361,7 @@ function SiteDetail({
   onTerminal,
   onRefresh,
   onMobilePreview,
+  onDeleted,
 }: {
   details: SiteDetails;
   stack: StackStatus | null;
@@ -1381,6 +1389,7 @@ function SiteDetail({
   onTerminal: () => void;
   onRefresh: () => void;
   onMobilePreview: () => void;
+  onDeleted: (warnings: string[]) => void;
 }) {
   const site = details.site;
   const siteUrl = siteOpenUrl(site, stack);
@@ -1389,7 +1398,14 @@ function SiteDetail({
   const [srFrom, setSrFrom] = useState("");
   const [srTo, setSrTo] = useState("");
   const [backupsDir, setBackupsDir] = useState<string | null>(null);
+  const [showDelete, setShowDelete] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [removeFromDevstack, setRemoveFromDevstack] = useState(true);
+  const [dropDatabase, setDropDatabase] = useState(false);
+  const [deleteFolder, setDeleteFolder] = useState(false);
   const webServer = (site.webServer ?? "nginx").toLowerCase();
+  const dbName = details.databaseName ?? site.databaseName ?? null;
+  const dbUser = details.databaseUser ?? site.databaseUser ?? dbName;
 
   useEffect(() => {
     void client
@@ -1931,10 +1947,115 @@ function SiteDetail({
       <SiteBackupsPanel siteId={site.id} />
 
       <div className="danger-zone" style={{ marginTop: 16 }}>
-        <button type="button" className="danger-btn" disabled>
+        <button
+          type="button"
+          className="danger-btn"
+          disabled={busy || deleteBusy}
+          data-testid="delete-application"
+          onClick={() => {
+            setRemoveFromDevstack(true);
+            setDropDatabase(false);
+            setDeleteFolder(false);
+            setShowDelete(true);
+          }}
+        >
           Delete Application
         </button>
       </div>
+
+      {showDelete ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="modal-card" data-testid="delete-site-modal">
+            <h3>Delete {site.name}?</h3>
+            <p className="hint" style={{ marginTop: 0 }}>
+              Choose what to remove. Parked folders are only deleted from disk when
+              that box is checked.
+            </p>
+            <label className="field" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <input
+                type="checkbox"
+                checked={removeFromDevstack}
+                data-testid="delete-opt-devstack"
+                onChange={(e) => setRemoveFromDevstack(e.target.checked)}
+              />
+              <span>
+                Remove from DevStack
+                <span className="hint">
+                  vhosts, hosts entries, certs, per-site php.ini and logs under the
+                  DevStack data dir
+                </span>
+              </span>
+            </label>
+            <label className="field" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <input
+                type="checkbox"
+                checked={dropDatabase}
+                disabled={!dbName}
+                data-testid="delete-opt-database"
+                onChange={(e) => setDropDatabase(e.target.checked)}
+              />
+              <span>
+                Also drop database + DB user
+                <span className="hint">
+                  {dbName
+                    ? `${dbName} / ${dbUser ?? "—"}`
+                    : "No database recorded for this site"}
+                </span>
+              </span>
+            </label>
+            <label className="field" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <input
+                type="checkbox"
+                checked={deleteFolder}
+                data-testid="delete-opt-folder"
+                onChange={(e) => setDeleteFolder(e.target.checked)}
+              />
+              <span>
+                Also delete the site folder from disk
+                <span className="hint" style={{ wordBreak: "break-all" }}>
+                  {details.absolutePath}
+                  {site.parked ? " (parked)" : ""}
+                </span>
+              </span>
+            </label>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn btn-install"
+                disabled={deleteBusy}
+                onClick={() => setShowDelete(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary danger-btn"
+                disabled={deleteBusy || !removeFromDevstack}
+                data-testid="delete-site-confirm"
+                onClick={() => {
+                  setDeleteBusy(true);
+                  void client
+                    .deleteSite(site.id, {
+                      removeFromDevstack,
+                      dropDatabase: Boolean(dbName) && dropDatabase,
+                      deleteFolder,
+                    })
+                    .then((r) => {
+                      setShowDelete(false);
+                      onDeleted(r.warnings ?? []);
+                    })
+                    .catch((e) =>
+                      onToast(e instanceof Error ? e.message : String(e)),
+                    )
+                    .finally(() => setDeleteBusy(false));
+                }}
+              >
+                {deleteBusy ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

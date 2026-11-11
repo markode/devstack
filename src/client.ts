@@ -256,6 +256,9 @@ export async function startDevStack(): Promise<StackStatus> {
   return startDevStackInflight;
 }
 
+/** Coalesce concurrent Stop clicks / Strict-mode double invokes into one IPC. */
+let stopDevStackInflight: Promise<StackStatus> | null = null;
+
 export async function stopDevStack(): Promise<StackStatus> {
   if (useMock())
     return {
@@ -264,7 +267,11 @@ export async function stopDevStack(): Promise<StackStatus> {
       apache: false,
       database: false,
     };
-  return api.stopDevStack();
+  if (stopDevStackInflight) return stopDevStackInflight;
+  stopDevStackInflight = api.stopDevStack().finally(() => {
+    stopDevStackInflight = null;
+  });
+  return stopDevStackInflight;
 }
 
 export async function onInstallProgress(
@@ -304,6 +311,18 @@ export async function createSite(
     };
   }
   return api.createSite(name, path, phpVersion, opts);
+}
+
+export async function deleteSite(
+  siteId: string,
+  options: {
+    removeFromDevstack: boolean;
+    dropDatabase: boolean;
+    deleteFolder: boolean;
+  },
+): Promise<{ warnings: string[] }> {
+  if (useMock()) return { warnings: [] };
+  return api.deleteSite(siteId, options);
 }
 
 export async function createWordpress(

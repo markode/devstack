@@ -901,6 +901,82 @@ mod tests {
     }
 
     #[test]
+    fn http_only_vhost_has_no_ssl_engine() {
+        let dir = std::env::temp_dir().join(format!("devstack-apache-http-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        let apache_pkg = dir.join("packages/apache/2.4");
+        fs::create_dir_all(apache_pkg.join("modules")).unwrap();
+        fs::write(apache_pkg.join("httpd.exe"), b"").unwrap();
+        fs::write(apache_pkg.join("httpd"), b"").unwrap();
+        let site_path = dir.join("sites/test");
+        fs::create_dir_all(&site_path).unwrap();
+        let mut state = AppState::default();
+        state.stack.apache_version = Some("2.4".into());
+        crate::config::mark_installed(
+            &mut state,
+            "apache",
+            crate::config::InstalledRecord {
+                version: "2.4".into(),
+                path: apache_pkg,
+                channel: None,
+                installed_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .unwrap();
+        state.sites.push(SiteRecord {
+            id: "test".into(),
+            name: "test".into(),
+            path: site_path,
+            domain: "test.test".into(),
+            php_version: Some("8.3".into()),
+            node_version: None,
+            https: false,
+            web_server: Some("apache".into()),
+            framework: None,
+            database_engine: None,
+            database_name: None,
+            database_user: None,
+            database_password: None,
+            status: "stopped".into(),
+            is_template: false,
+            parked: false,
+            xdebug: false,
+            tld: "test".into(),
+            aliases: Vec::new(),
+            wildcard: false,
+        });
+        let rt = PhpRuntime {
+            version: "8.3".into(),
+            root: PathBuf::from("."),
+            php_bin: PathBuf::from("php"),
+            fpm_bin: None,
+            cgi_bin: None,
+            listen: "127.0.0.1:9083".into(),
+            is_system: false,
+        };
+        let _ = render_stack(&paths, &state, &[("8.3".into(), rt)]);
+        let vhost = fs::read_to_string(paths.apache_sites_dir().join("test.conf")).unwrap_or_default();
+        assert!(
+            vhost.contains("DocumentRoot"),
+            "http site must serve DocumentRoot, got:\n{vhost}"
+        );
+        assert!(
+            !vhost.contains("SSLEngine"),
+            "https=false must not emit SSL vhost:\n{vhost}"
+        );
+        assert!(
+            !vhost.contains("Redirect /"),
+            "https=false must not redirect to SSL:\n{vhost}"
+        );
+        assert!(
+            vhost.contains("test-error.log") && !vhost.contains("test-ssl-error.log"),
+            "http site must use non-ssl error log:\n{vhost}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn https_redirect_is_temporary_not_permanent() {
         let dir = std::env::temp_dir().join(format!("devstack-apache-302-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

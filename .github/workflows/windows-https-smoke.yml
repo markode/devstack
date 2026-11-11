@@ -113,7 +113,7 @@ jobs:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-e2e
           DEVSTACK_RESET_SITES: "1"
           DEVSTACK_MATRIX_JSON: ${{ runner.temp }}/windows-matrix.json
-          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.4.md
+          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.5.md
           LZMA_API_STATIC: "1"
           LIBZ_SYS_STATIC: "1"
           OPENSSL_STATIC: "1"
@@ -136,10 +136,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-feature-matrix-v0.3.4
+          name: windows-feature-matrix-v0.3.5
           path: |
             ${{ runner.temp }}/windows-matrix.json
-            docs/test-report-v0.3.4.md
+            docs/test-report-v0.3.5.md
           if-no-files-found: warn
 
       - name: Launch built exe - window responds + UI within 3s
@@ -170,7 +170,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-ui-launch-v0.3.4
+          name: windows-ui-launch-v0.3.5
           path: ${{ runner.temp }}/devstack-ui-launch.json
           if-no-files-found: ignore
 

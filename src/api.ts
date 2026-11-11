@@ -233,6 +233,20 @@ export async function createSite(
   });
 }
 
+export async function deleteSite(
+  siteId: string,
+  options: {
+    removeFromDevstack: boolean;
+    dropDatabase: boolean;
+    deleteFolder: boolean;
+  },
+): Promise<{ warnings: string[] }> {
+  return invokeAny<{ warnings: string[] }>(["delete_site_cmd", "delete_site"], {
+    siteId,
+    options,
+  });
+}
+
 export async function updateSiteEnvironment(
   siteId: string,
   patch: {
