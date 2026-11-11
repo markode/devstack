@@ -228,6 +228,16 @@ export interface SiteRecord {
   wildcard?: boolean;
 }
 
+export interface DeleteSiteOptions {
+  removeFromDevstack: boolean;
+  dropDatabase: boolean;
+  deleteFolder: boolean;
+}
+
+export interface DeleteSiteResult {
+  warnings: string[];
+}
+
 export interface SiteDetails {
   site: SiteRecord;
   framework: string;

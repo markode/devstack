@@ -1188,19 +1188,243 @@ pub fn create_site(
     Ok(site)
 }
 
-/// Remove a site from state and drop its nginx/apache vhost snippets.
-/// Does not delete the site files on disk.
-pub fn delete_site(paths: &Paths, state: &mut AppState, site_id: &str) -> Result<()> {
-    let existed = state.sites.iter().any(|s| s.id == site_id);
-    if !existed {
-        return Err(DevStackError::Message(format!("site not found: {site_id}")));
+/// Options for [`delete_site_with_options`]. `remove_from_devstack` is required.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSiteOptions {
+    /// Remove from DevStack (state, vhosts, hosts, certs, per-site meta/logs). Required.
+    #[serde(default = "default_true")]
+    pub remove_from_devstack: bool,
+    /// Also `DROP DATABASE` + DB user when present.
+    #[serde(default)]
+    pub drop_database: bool,
+    /// Also delete the project folder on disk (including parked folders).
+    #[serde(default)]
+    pub delete_folder: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for DeleteSiteOptions {
+    fn default() -> Self {
+        Self {
+            remove_from_devstack: true,
+            drop_database: false,
+            delete_folder: false,
+        }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSiteResult {
+    pub warnings: Vec<String>,
+}
+
+/// Remove a site from state and drop its nginx/apache vhost snippets.
+/// Does not delete the site files on disk (see [`delete_site_with_options`]).
+pub fn delete_site(paths: &Paths, state: &mut AppState, site_id: &str) -> Result<()> {
+    let _ = delete_site_with_options(paths, state, site_id, &DeleteSiteOptions::default())?;
+    Ok(())
+}
+
+/// Full delete with optional DB drop and disk folder removal.
+pub fn delete_site_with_options(
+    paths: &Paths,
+    state: &mut AppState,
+    site_id: &str,
+    opts: &DeleteSiteOptions,
+) -> Result<DeleteSiteResult> {
+    if !opts.remove_from_devstack {
+        return Err(DevStackError::Message(
+            "removeFromDevstack must be checked — nothing to do".into(),
+        ));
+    }
+    let site = state
+        .sites
+        .iter()
+        .find(|s| s.id == site_id)
+        .cloned()
+        .ok_or_else(|| DevStackError::Message(format!("site not found: {site_id}")))?;
+
+    let mut warnings = Vec::new();
+
+    if opts.drop_database {
+        if let Err(e) = drop_site_database(paths, state, &site) {
+            warnings.push(format!("database drop: {e}"));
+        }
+    }
+
+    // Drop from state before rewriting hosts / reloading so the domain disappears.
     state.sites.retain(|s| s.id != site_id);
-    state.templates.retain(|t| t.source_site_id != site_id && t.id != site_id);
+    state
+        .templates
+        .retain(|t| t.source_site_id != site_id && t.id != site_id);
+
     let nginx_conf = paths.nginx_sites_dir().join(format!("{site_id}.conf"));
     let apache_conf = paths.apache_sites_dir().join(format!("{site_id}.conf"));
-    let _ = fs::remove_file(nginx_conf);
-    let _ = fs::remove_file(apache_conf);
+    let _ = fs::remove_file(&nginx_conf);
+    let _ = fs::remove_file(&apache_conf);
+
+    // Per-site meta (php.ini overrides, etc.) under AppData/DevStack/sites/<id>.
+    let meta = paths.sites_meta.join(site_id);
+    if meta.exists() {
+        if let Err(e) = remove_path_with_retry(&meta, 5) {
+            warnings.push(format!("sites meta {}: {e}", meta.display()));
+        }
+    }
+
+    // Certs for this domain (+ aliases).
+    for domain in cert_domains_for_site(&site) {
+        let cert_dir = paths.certs.join("sites").join(&domain);
+        if cert_dir.exists() {
+            if let Err(e) = remove_path_with_retry(&cert_dir, 3) {
+                warnings.push(format!("certs {}: {e}", cert_dir.display()));
+            }
+        }
+    }
+
+    // Web server log files for this site.
+    for name in [
+        format!("apache/{site_id}-error.log"),
+        format!("apache/{site_id}-access.log"),
+        format!("apache/{site_id}-ssl-error.log"),
+        format!("apache/{site_id}-ssl-access.log"),
+        format!("nginx/{site_id}-error.log"),
+        format!("nginx/{site_id}-access.log"),
+    ] {
+        let p = paths.logs.join(&name);
+        let _ = fs::remove_file(p);
+    }
+
+    if opts.delete_folder {
+        let folder = crate::paths_util::expand_home(&site.path);
+        // Parked folders are only removed when this box is checked (caller opted in).
+        if folder.exists() {
+            // Best-effort: clear read-only / briefly wait for Windows file locks.
+            if let Err(e) = remove_path_with_retry(&folder, 8) {
+                warnings.push(format!(
+                    "could not delete folder {}: {e}",
+                    folder.display()
+                ));
+            }
+        }
+    }
+
+    Ok(DeleteSiteResult { warnings })
+}
+
+fn cert_domains_for_site(site: &crate::config::SiteRecord) -> Vec<String> {
+    let mut out = vec![site.domain.clone()];
+    for a in &site.aliases {
+        if !a.is_empty() && !out.contains(a) {
+            out.push(a.clone());
+        }
+    }
+    out
+}
+
+fn remove_path_with_retry(path: &Path, attempts: u32) -> std::result::Result<(), String> {
+    let mut last = String::new();
+    for i in 0..attempts {
+        match remove_path_once(path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = e;
+                if i + 1 < attempts {
+                    std::thread::sleep(Duration::from_millis(80 * (i as u64 + 1)));
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
+fn remove_path_once(path: &Path) -> std::result::Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let res = if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    res.map_err(|e| e.to_string())?;
+    if path.exists() {
+        return Err("path still present after remove".into());
+    }
+    Ok(())
+}
+
+/// Start DB if needed, DROP DATABASE + USER for the site, leave DB running if we started it
+/// only when the stack already had it up (we leave it up either way — Start owns lifecycle).
+fn drop_site_database(
+    paths: &Paths,
+    state: &mut AppState,
+    site: &crate::config::SiteRecord,
+) -> Result<()> {
+    let Some(db_name) = site.database_name.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let engine = site
+        .database_engine
+        .clone()
+        .or_else(|| state.active_database.clone())
+        .or_else(|| state.runtime.database_engine.clone())
+        .unwrap_or_else(|| "mariadb".into());
+
+    let was_running = state
+        .runtime
+        .database_pid
+        .filter(|p| crate::services::process::is_running(*p))
+        .is_some();
+    if !was_running {
+        crate::services::database::start_database(paths, state, &engine)?;
+    }
+
+    let root = crate::services::database::engine_install_dir(state, &engine)?;
+    let client = crate::services::database::client_bin_for(&root)?;
+    let user = site
+        .database_user
+        .clone()
+        .unwrap_or_else(|| db_name.to_string());
+
+    let sql = format!(
+        "DROP DATABASE IF EXISTS `{db_name}`;\n\
+         DROP USER IF EXISTS '{user}'@'localhost';\n\
+         DROP USER IF EXISTS '{user}'@'127.0.0.1';\n\
+         FLUSH PRIVILEGES;"
+    );
+    let mut args = crate::services::database::mysql_root_args(paths, state, &engine);
+    args.push("-e".into());
+    args.push(sql);
+    let status = crate::services::process::command(&client)
+        .args(&args)
+        .status()
+        .map_err(|e| DevStackError::Message(e.to_string()))?;
+    if !status.success() {
+        // Older MariaDB/MySQL without DROP USER IF EXISTS.
+        let sql2 = format!("DROP DATABASE IF EXISTS `{db_name}`;");
+        let mut args2 = crate::services::database::mysql_root_args(paths, state, &engine);
+        args2.push("-e".into());
+        args2.push(sql2);
+        let status2 = crate::services::process::command(&client)
+            .args(&args2)
+            .status()
+            .map_err(|e| DevStackError::Message(e.to_string()))?;
+        if !status2.success() {
+            return Err(DevStackError::Message(format!(
+                "failed to drop database `{db_name}`"
+            )));
+        }
+    }
+
+    if !was_running {
+        // We started DB just for the drop — stop it again so Stopped stays Stopped.
+        let _ = crate::services::database::stop_database(paths, state);
+    }
     Ok(())
 }
 

@@ -128,14 +128,23 @@ pub fn source_path(paths: &Paths, state: &AppState, site: &SiteRecord, source: &
         }
         "web-error" => {
             if apache {
-                paths.logs.join(format!("apache/{}-ssl-error.log", site.id))
+                // Match httpd write_vhost: SSL logs only when the site has HTTPS on.
+                if site.https {
+                    paths.logs.join(format!("apache/{}-ssl-error.log", site.id))
+                } else {
+                    paths.logs.join(format!("apache/{}-error.log", site.id))
+                }
             } else {
                 paths.logs.join(format!("nginx/{}-error.log", site.id))
             }
         }
         "web-access" => {
             if apache {
-                paths.logs.join(format!("apache/{}-ssl-access.log", site.id))
+                if site.https {
+                    paths.logs.join(format!("apache/{}-ssl-access.log", site.id))
+                } else {
+                    paths.logs.join(format!("apache/{}-access.log", site.id))
+                }
             } else {
                 paths.logs.join(format!("nginx/{}-access.log", site.id))
             }
@@ -604,6 +613,33 @@ mod tests {
         s.ensure_domain();
         state.sites.push(s);
         (paths, state)
+    }
+
+    #[test]
+    fn apache_http_site_uses_non_ssl_log_paths() {
+        let dir = std::env::temp_dir().join(format!("devstack-sitelogs-http-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (paths, mut state) = site_in(&dir, false);
+        {
+            let s = state.sites.first_mut().unwrap();
+            s.id = "test".into();
+            s.web_server = Some("apache".into());
+            s.https = false;
+        }
+        let err = source_path(&paths, &state, &state.sites[0], "web-error").unwrap();
+        let access = source_path(&paths, &state, &state.sites[0], "web-access").unwrap();
+        assert!(
+            err.ends_with("apache/test-error.log"),
+            "expected non-ssl error log, got {}",
+            err.display()
+        );
+        assert!(
+            access.ends_with("apache/test-access.log"),
+            "expected non-ssl access log, got {}",
+            access.display()
+        );
+        assert!(!err.to_string_lossy().contains("-ssl-"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1525,7 +1525,7 @@ async fn run_persistence_and_sites_smoke(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use devstack_lib::services::dns::check_hosts_status;
     use devstack_lib::services::pma_signon::mint_signon_url;
-    use devstack_lib::services::sites::{create_site, delete_site};
+    use devstack_lib::services::sites::create_site;
 
     println!("=== Persistence / empty site / PMA token smoke ===");
 
@@ -1641,15 +1641,47 @@ async fn run_persistence_and_sites_smoke(
         println!("state persistence OK ({} sites)", before);
     }
 
-    // Delete empty site — vhost gone, hosts cleaned on next sync.
+    // Delete empty site — vhost gone, hosts cleaned on next sync; folder optional.
     {
+        use devstack_lib::services::sites::{delete_site_with_options, DeleteSiteOptions};
+        let folder = {
+            let state = ctx.state.lock().await;
+            state
+                .sites
+                .iter()
+                .find(|s| s.id == empty.0)
+                .map(|s| s.path.clone())
+        };
         let mut state = ctx.state.lock().await;
-        delete_site(&ctx.paths, &mut state, &empty.0)?;
+        let result = delete_site_with_options(
+            &ctx.paths,
+            &mut state,
+            &empty.0,
+            &DeleteSiteOptions {
+                remove_from_devstack: true,
+                drop_database: false,
+                delete_folder: true,
+            },
+        )?;
         apply_stack(&ctx.paths, &mut state)?;
         if state.sites.iter().any(|s| s.id == empty.0) {
             return Err("delete_site left site in state".into());
         }
-        println!("delete_site({}) OK", empty.0);
+        if let Some(p) = folder {
+            if p.exists() {
+                return Err(format!(
+                    "delete_site left folder {} warnings={:?}",
+                    p.display(),
+                    result.warnings
+                )
+                .into());
+            }
+        }
+        println!(
+            "delete_site({}) OK (folder removed, warnings={})",
+            empty.0,
+            result.warnings.len()
+        );
     }
 
     println!("SMOKE PASS: persistence + empty site + PMA token");

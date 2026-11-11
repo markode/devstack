@@ -1189,6 +1189,112 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
         },
     );
 
+    // --- v0.3.5 hotfix scenarios (delete site, apache http logs/vhost) ---
+    rec.check(
+        "hotfix035.apache_http_logs",
+        "Apache https=false uses non-ssl log paths + HTTP vhost",
+        || {
+            let mut state = lock(ctx);
+            let dir = ctx.paths.root.join("sites/apache-http-only");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            fs::write(dir.join("index.php"), "<?php echo 'APACHE_HTTP_OK';\n")
+                .map_err(|e| e.to_string())?;
+            let php = crate::services::php_runtime::default_php_version(&state);
+            let site = sites::create_site(
+                &mut state,
+                &ctx.paths,
+                "apache-http-only",
+                dir,
+                php,
+            )
+            .map_err(|e| e.to_string())?;
+            if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+                s.domain = "apache-http-only.test".into();
+                s.https = false;
+                s.web_server = Some("apache".into());
+            }
+            let _ = save_state(&ctx.paths.state_file, &state);
+            apply_stack(&ctx.paths, &mut state).map_err(|e| e.to_string())?;
+            let site = state
+                .sites
+                .iter()
+                .find(|s| s.id == site.id)
+                .cloned()
+                .ok_or("missing site")?;
+            let err = site_logs::source_path(&ctx.paths, &state, &site, "web-error")
+                .map_err(|e| e.to_string())?;
+            if err.to_string_lossy().contains("-ssl-") {
+                return Err(format!("log path still SSL: {}", err.display()));
+            }
+            let conf = ctx.paths.apache_sites_dir().join(format!("{}.conf", site.id));
+            let body = fs::read_to_string(&conf).unwrap_or_default();
+            if body.contains("SSLEngine") || body.contains("Redirect /") {
+                return Err(format!("stale SSL/redirect in vhost:\n{body}"));
+            }
+            let url = ports::canonical_site_url(&site, &state);
+            if !url.starts_with("http://") || url.contains(":8444") {
+                return Err(format!("Open URL wrong for http apache: {url}"));
+            }
+            Ok(format!("url={url} log={}", err.display()))
+        },
+    );
+
+    rec.check(
+        "hotfix035.delete_site_full",
+        "Delete site removes DevStack meta; optional folder",
+        || {
+            let mut state = lock(ctx);
+            let dir = ctx.paths.root.join("sites/delete-me");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            fs::write(dir.join("index.html"), "<h1>bye</h1>\n").map_err(|e| e.to_string())?;
+            let php = crate::services::php_runtime::default_php_version(&state);
+            let site = sites::create_site(&mut state, &ctx.paths, "delete-me", dir.clone(), php)
+                .map_err(|e| e.to_string())?;
+            let sid = site.id.clone();
+            // Seed per-site meta + fake cert + logs.
+            let meta = ctx.paths.sites_meta.join(&sid);
+            fs::create_dir_all(&meta).map_err(|e| e.to_string())?;
+            fs::write(meta.join("php.ini"), "; test\n").map_err(|e| e.to_string())?;
+            let cert = ctx.paths.certs.join("sites").join(&site.domain);
+            fs::create_dir_all(&cert).map_err(|e| e.to_string())?;
+            fs::write(cert.join("fullchain.pem"), "x").map_err(|e| e.to_string())?;
+            let _ = fs::create_dir_all(ctx.paths.logs.join("nginx"));
+            fs::write(
+                ctx.paths.logs.join(format!("nginx/{sid}-error.log")),
+                "err\n",
+            )
+            .map_err(|e| e.to_string())?;
+            let _ = save_state(&ctx.paths.state_file, &state);
+            let opts = sites::DeleteSiteOptions {
+                remove_from_devstack: true,
+                drop_database: false,
+                delete_folder: true,
+            };
+            let result = sites::delete_site_with_options(&ctx.paths, &mut state, &sid, &opts)
+                .map_err(|e| e.to_string())?;
+            let _ = save_state(&ctx.paths.state_file, &state);
+            if state.sites.iter().any(|s| s.id == sid) {
+                return Err("site still in state".into());
+            }
+            if meta.exists() {
+                return Err("sites meta dir left behind".into());
+            }
+            if cert.exists() {
+                return Err("certs dir left behind".into());
+            }
+            if dir.exists() {
+                return Err(format!(
+                    "folder left behind: {} warnings={:?}",
+                    dir.display(),
+                    result.warnings
+                ));
+            }
+            Ok(format!("warnings={}", result.warnings.len()))
+        },
+    );
+
     {
         let mut state = lock(ctx);
         let _ = stop_stack(&ctx.paths, &mut state);
