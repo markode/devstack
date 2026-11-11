@@ -1,7 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import * as client from "../client";
 import { humanizeError } from "../portBusy";
 import type { JobProgress } from "../types";
+import { Modal } from "./Modal";
 
 export type AsyncJobState = {
   busy: boolean;
@@ -119,6 +120,7 @@ type AsyncModalProps = {
   children: ReactNode;
   actions: ReactNode;
   wide?: boolean;
+  testId?: string;
 };
 
 /** Shared shell: blocks dismiss while busy, shows inline progress + errors. */
@@ -132,32 +134,25 @@ export function AsyncModal({
   children,
   actions,
   wide,
+  testId,
 }: AsyncModalProps) {
+  const titleId = useId();
   return (
-    <div
-      className="modal-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-busy={busy || undefined}
-      onMouseDown={(e) => {
-        if (busy) return;
-        if (e.target === e.currentTarget) onClose();
-      }}
+    <Modal
+      onClose={onClose}
+      busy={busy}
+      labelledBy={titleId}
+      wide={wide}
+      testId={testId}
     >
-      <div
-        className="modal-card"
-        style={wide ? { maxWidth: 560 } : undefined}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <h3>{title}</h3>
-        {description ? <p className="muted">{description}</p> : null}
-        {busy ? <ModalProgress progress={progress ?? null} /> : null}
-        {error ? <div className="error-banner modal-inline-error">{error}</div> : null}
-        <fieldset className="modal-fieldset" disabled={busy}>
-          {children}
-        </fieldset>
-        <div className="modal-actions">{actions}</div>
-      </div>
-    </div>
+      <h3 id={titleId}>{title}</h3>
+      {description ? <p className="muted">{description}</p> : null}
+      {busy ? <ModalProgress progress={progress ?? null} /> : null}
+      {error ? <div className="error-banner modal-inline-error">{error}</div> : null}
+      <fieldset className="modal-fieldset" disabled={busy}>
+        {children}
+      </fieldset>
+      <div className="modal-actions">{actions}</div>
+    </Modal>
   );
 }

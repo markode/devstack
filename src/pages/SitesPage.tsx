@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import * as client from "../client";
 import {
   AsyncModal,
   BusyLabel,
   useAsyncJob,
 } from "../components/AsyncModal";
+import { DeleteSiteModal } from "../components/DeleteSiteModal";
+import { Modal } from "../components/Modal";
 import { PortConflictDialog } from "../components/PortConflictDialog";
 import { MobilePreviewModal } from "../components/MobilePreviewModal";
 import { SiteBackupsPanel } from "../components/SiteBackupsPanel";
@@ -1293,49 +1295,57 @@ function CredentialsModal({
   onClose: () => void;
   onOpenBrowser: (url: string) => void;
 }) {
+  const titleId = useId();
   return (
-    <div className="modal-backdrop" role="dialog">
-      <div className="modal-card">
-        <h3>WordPress ready</h3>
-        <p>
-          Admin credentials are shown <strong>once</strong> — copy them now.
-        </p>
-        <div className="cred-box">
+    <Modal
+      onClose={onClose}
+      labelledBy={titleId}
+      initialFocus="[data-autofocus]"
+    >
+      <h3 id={titleId}>WordPress ready</h3>
+      <p>
+        Admin credentials are shown <strong>once</strong> — copy them now.
+      </p>
+      <div className="cred-box">
+        <div>
+          <span className="muted">URL</span>
+          <div>{result.url}</div>
+        </div>
+        <div>
+          <span className="muted">User</span>
           <div>
-            <span className="muted">URL</span>
-            <div>{result.url}</div>
-          </div>
-          <div>
-            <span className="muted">User</span>
-            <div>
-              <code>{result.adminUser}</code>
-            </div>
-          </div>
-          <div>
-            <span className="muted">Password</span>
-            <div>
-              <code>{result.adminPassword}</code>
-            </div>
-          </div>
-          <div>
-            <span className="muted">Email</span>
-            <div>{result.adminEmail}</div>
+            <code>{result.adminUser}</code>
           </div>
         </div>
-        <div className="modal-actions">
-          <button
-            type="button"
-            className="btn btn-install"
-            onClick={() => onOpenBrowser(result.url)}
-          >
-            Open in browser
-          </button>
-          <button type="button" className="btn btn-primary" onClick={onClose}>
-            Done
-          </button>
+        <div>
+          <span className="muted">Password</span>
+          <div>
+            <code>{result.adminPassword}</code>
+          </div>
+        </div>
+        <div>
+          <span className="muted">Email</span>
+          <div>{result.adminEmail}</div>
         </div>
       </div>
-    </div>
+      <div className="modal-actions">
+        <button
+          type="button"
+          className="btn btn-install"
+          onClick={() => onOpenBrowser(result.url)}
+        >
+          Open in browser
+        </button>
+        <button
+          type="button"
+          className="btn btn-primary"
+          data-autofocus
+          onClick={onClose}
+        >
+          Done
+        </button>
+      </div>
+    </Modal>
   );
 }
 
@@ -1399,13 +1409,8 @@ function SiteDetail({
   const [srTo, setSrTo] = useState("");
   const [backupsDir, setBackupsDir] = useState<string | null>(null);
   const [showDelete, setShowDelete] = useState(false);
-  const [deleteBusy, setDeleteBusy] = useState(false);
-  const [removeFromDevstack, setRemoveFromDevstack] = useState(true);
-  const [dropDatabase, setDropDatabase] = useState(false);
-  const [deleteFolder, setDeleteFolder] = useState(false);
   const webServer = (site.webServer ?? "nginx").toLowerCase();
   const dbName = details.databaseName ?? site.databaseName ?? null;
-  const dbUser = details.databaseUser ?? site.databaseUser ?? dbName;
 
   useEffect(() => {
     void client
@@ -1950,111 +1955,28 @@ function SiteDetail({
         <button
           type="button"
           className="danger-btn"
-          disabled={busy || deleteBusy}
+          disabled={busy}
           data-testid="delete-application"
-          onClick={() => {
-            setRemoveFromDevstack(true);
-            setDropDatabase(false);
-            setDeleteFolder(false);
-            setShowDelete(true);
-          }}
+          onClick={() => setShowDelete(true)}
         >
           Delete Application
         </button>
       </div>
 
       {showDelete ? (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal-card" data-testid="delete-site-modal">
-            <h3>Delete {site.name}?</h3>
-            <p className="hint" style={{ marginTop: 0 }}>
-              Choose what to remove. Parked folders are only deleted from disk when
-              that box is checked.
-            </p>
-            <label className="field" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-              <input
-                type="checkbox"
-                checked={removeFromDevstack}
-                data-testid="delete-opt-devstack"
-                onChange={(e) => setRemoveFromDevstack(e.target.checked)}
-              />
-              <span>
-                Remove from DevStack
-                <span className="hint">
-                  vhosts, hosts entries, certs, per-site php.ini and logs under the
-                  DevStack data dir
-                </span>
-              </span>
-            </label>
-            <label className="field" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-              <input
-                type="checkbox"
-                checked={dropDatabase}
-                disabled={!dbName}
-                data-testid="delete-opt-database"
-                onChange={(e) => setDropDatabase(e.target.checked)}
-              />
-              <span>
-                Also drop database + DB user
-                <span className="hint">
-                  {dbName
-                    ? `${dbName} / ${dbUser ?? "—"}`
-                    : "No database recorded for this site"}
-                </span>
-              </span>
-            </label>
-            <label className="field" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-              <input
-                type="checkbox"
-                checked={deleteFolder}
-                data-testid="delete-opt-folder"
-                onChange={(e) => setDeleteFolder(e.target.checked)}
-              />
-              <span>
-                Also delete the site folder from disk
-                <span className="hint" style={{ wordBreak: "break-all" }}>
-                  {details.absolutePath}
-                  {site.parked ? " (parked)" : ""}
-                </span>
-              </span>
-            </label>
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="btn btn-install"
-                disabled={deleteBusy}
-                onClick={() => setShowDelete(false)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary danger-btn"
-                disabled={deleteBusy || !removeFromDevstack}
-                data-testid="delete-site-confirm"
-                onClick={() => {
-                  setDeleteBusy(true);
-                  void client
-                    .deleteSite(site.id, {
-                      removeFromDevstack,
-                      dropDatabase: Boolean(dbName) && dropDatabase,
-                      deleteFolder,
-                    })
-                    .then((r) => {
-                      setShowDelete(false);
-                      onDeleted(r.warnings ?? []);
-                    })
-                    .catch((e) =>
-                      onToast(e instanceof Error ? e.message : String(e)),
-                    )
-                    .finally(() => setDeleteBusy(false));
-                }}
-              >
-                {deleteBusy ? "Deleting…" : "Delete"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <DeleteSiteModal
+          siteId={site.id}
+          siteName={site.name}
+          absolutePath={details.absolutePath}
+          parked={Boolean(site.parked)}
+          databaseName={dbName}
+          databaseUser={details.databaseUser ?? site.databaseUser ?? dbName}
+          onClose={() => setShowDelete(false)}
+          onDeleted={(warnings) => {
+            setShowDelete(false);
+            onDeleted(warnings);
+          }}
+        />
       ) : null}
     </div>
   );

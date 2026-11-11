@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import * as client from "../client";
 import { AsyncModal, BusyLabel, useAsyncJob } from "./AsyncModal";
+import { Modal } from "./Modal";
 import type {
   CreateFromTemplateResult,
   SiteTemplateInfo,
@@ -123,33 +124,38 @@ export function TemplateResultModal({
   result: CreateFromTemplateResult;
   onClose: () => void;
 }) {
+  const titleId = useId();
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="modal-card" style={{ maxWidth: 520 }} data-testid="template-result">
-        <h3>{result.site.name} created</h3>
-        <p className="muted">{result.url}</p>
-        <ul className="xdebug-steps">
-          {result.steps.map((s) => (
-            <li key={s.name} style={{ color: s.ok ? undefined : "var(--danger)" }}>
-              <strong>{s.name}</strong>: {s.message}
-              {s.skipped ? " (skipped)" : ""}
-            </li>
-          ))}
-        </ul>
-        {result.database ? (
-          <pre className="code-block">{`DB ${result.database.name}\nuser ${result.database.user}\npass ${result.database.password}\nhost ${result.database.host}:${result.database.port}`}</pre>
-        ) : null}
-        {result.notes.map((n) => (
-          <p key={n} className="hint">
-            {n}
-          </p>
+    <Modal
+      onClose={onClose}
+      labelledBy={titleId}
+      testId="template-result"
+      style={{ maxWidth: 520 }}
+      initialFocus="[data-autofocus]"
+    >
+      <h3 id={titleId}>{result.site.name} created</h3>
+      <p className="muted">{result.url}</p>
+      <ul className="xdebug-steps">
+        {result.steps.map((s) => (
+          <li key={s.name} style={{ color: s.ok ? undefined : "var(--danger)" }}>
+            <strong>{s.name}</strong>: {s.message}
+            {s.skipped ? " (skipped)" : ""}
+          </li>
         ))}
-        <div className="modal-actions">
-          <button type="button" className="btn btn-primary" onClick={onClose}>
-            Open site
-          </button>
-        </div>
+      </ul>
+      {result.database ? (
+        <pre className="code-block">{`DB ${result.database.name}\nuser ${result.database.user}\npass ${result.database.password}\nhost ${result.database.host}:${result.database.port}`}</pre>
+      ) : null}
+      {result.notes.map((n) => (
+        <p key={n} className="hint">
+          {n}
+        </p>
+      ))}
+      <div className="modal-actions">
+        <button type="button" className="btn btn-primary" data-autofocus onClick={onClose}>
+          Open site
+        </button>
       </div>
-    </div>
+    </Modal>
   );
 }
