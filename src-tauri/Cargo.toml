@@ -1,6 +1,6 @@
 [package]
 name = "devstack"
-version = "0.3.2"
+version = "0.3.3"
 description = "DevStack — local PHP/Node development environment"
 authors = ["DevStack"]
 edition = "2021"
@@ -57,6 +57,13 @@ keyring = { version = "3", default-features = false, features = ["apple-native",
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Vendored OpenSSL; libssh2-sys builds libssh2 from source (no Homebrew dylib).
 ssh2 = { version = "0.9", features = ["vendored-openssl"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [profile.release]
 codegen-units = 1

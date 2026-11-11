@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./api";
+import { ensureHttpsSchemeForSslPort } from "./siteUrl";
 
 function errMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
@@ -11,14 +12,20 @@ function errMessage(e: unknown): string {
 }
 
 /** Open http(s) in the system browser. */
-export async function openInBrowser(url: string): Promise<void> {
+export async function openInBrowser(
+  url: string,
+  opts?: { sslPorts?: number[] },
+): Promise<void> {
   if (!url) throw new Error("No URL to open");
+  const target = opts?.sslPorts?.length
+    ? ensureHttpsSchemeForSslPort(url, opts.sslPorts)
+    : url;
   if (!isTauri()) {
-    window.open(url, "_blank", "noopener,noreferrer");
+    window.open(target, "_blank", "noopener,noreferrer");
     return;
   }
   try {
-    await openUrl(url);
+    await openUrl(target);
   } catch (e) {
     throw new Error(`Could not open browser: ${errMessage(e)}`);
   }

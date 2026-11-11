@@ -196,6 +196,7 @@ fn write_site_conf(
     https_port: u16,
 ) -> Result<()> {
     let root = expand_home(&site.path);
+    let _ = crate::services::sites::ensure_site_placeholder(&root);
     // Always write a server block for the site domain — never leave Host
     // unmatched so nginx falls through to mailpit/phpMyAdmin.
     let php_block = if let Some(runtime) = php_for_site(site, runtimes, state) {
@@ -424,6 +425,8 @@ pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
             return reload_nginx(paths, state);
         }
     }
+    // Kill stale DevStack nginx masters left by prior runs (never touches WAMP).
+    crate::startup::reclaim_orphans_for_names(paths, &["nginx.exe", "php-cgi.exe"]);
     crate::services::ports::ensure_ports_free(&state.stack, "nginx")?;
 
     let versions = collect_php_versions(state);
@@ -458,7 +461,14 @@ pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
     std::mem::forget(child);
     write_pid(&paths.pid_file("nginx"), pid)?;
     state.runtime.nginx_pid = Some(pid);
-    if let Err(e) = wait_nginx_listen(pid, state.stack.http_port, &log_err) {
+    if let Err(e) = wait_nginx_listen(
+        pid,
+        state.stack.http_port,
+        state.stack.https_port,
+        &log_err,
+        paths,
+        &state.runtime,
+    ) {
         state.runtime.nginx_pid = None;
         return Err(e);
     }
@@ -473,11 +483,19 @@ pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
 
 /// Short backoff poll (5ms → 25ms, ≤3s) until nginx accepts on its HTTP port.
 /// Fails fast with the error log if the master exits during startup.
-fn wait_nginx_listen(pid: u32, http_port: u16, log_err: &Path) -> Result<()> {
+fn wait_nginx_listen(
+    pid: u32,
+    http_port: u16,
+    https_port: u16,
+    log_err: &Path,
+    paths: &Paths,
+    runtime: &crate::config::RuntimeState,
+) -> Result<()> {
     use std::time::Duration;
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], http_port));
+    let http_addr = std::net::SocketAddr::from(([127, 0, 0, 1], http_port));
+    let https_addr = std::net::SocketAddr::from(([127, 0, 0, 1], https_port));
     let mut died = false;
-    let _ = crate::services::perf::poll_backoff(
+    let ready = crate::services::perf::poll_backoff(
         Duration::from_millis(5),
         Duration::from_millis(25),
         Duration::from_secs(3),
@@ -486,17 +504,28 @@ fn wait_nginx_listen(pid: u32, http_port: u16, log_err: &Path) -> Result<()> {
                 died = true;
                 return Some(());
             }
-            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50))
-                .is_ok()
-                .then_some(())
+            let http_ok =
+                std::net::TcpStream::connect_timeout(&http_addr, Duration::from_millis(50)).is_ok();
+            let https_ok =
+                std::net::TcpStream::connect_timeout(&https_addr, Duration::from_millis(50)).is_ok();
+            (http_ok && https_ok).then_some(())
         },
-    );
+    )
+    .is_some();
     if died {
         let err = std::fs::read_to_string(log_err).unwrap_or_default();
         return Err(DevStackError::Message(format!(
             "Nginx exited during startup.\n--- stderr ---\n{err}"
         )));
     }
+    if !ready {
+        let err = std::fs::read_to_string(log_err).unwrap_or_default();
+        return Err(DevStackError::Message(format!(
+            "Nginx started (pid {pid}) but ports {http_port}/{https_port} never became ready.\n--- stderr ---\n{err}"
+        )));
+    }
+    crate::services::ports::assert_single_owned_listener(http_port, paths, runtime)?;
+    crate::services::ports::assert_single_owned_listener(https_port, paths, runtime)?;
     Ok(())
 }
 

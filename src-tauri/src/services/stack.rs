@@ -163,6 +163,10 @@ pub fn apply_stack_with_progress(
         save_state(&paths.state_file, state)?;
     }
 
+    // Reclaim data-dir orphans before spawning so stale masters cannot pile up
+    // on coexistence ports (8080/8443). Never kills processes outside paths.root.
+    crate::startup::reclaim_orphans(paths);
+
     if !state.installed.contains_key("php") {
         let _ = register_system_php(state, paths);
     }

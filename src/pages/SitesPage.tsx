@@ -27,7 +27,11 @@ import {
   openInFileManager,
 } from "../open";
 import { humanizeError, parsePortBusy } from "../portBusy";
-import { formatSiteUrl } from "../siteUrl";
+import {
+  ensureHttpsSchemeForSslPort,
+  formatSiteUrl,
+  stackSslPorts,
+} from "../siteUrl";
 import { useAppData } from "../store/AppData";
 import type {
   CreateFromTemplateResult,
@@ -119,16 +123,27 @@ export function SitesPage({
   };
 
   const openWithHostsCheck = async (url: string) => {
-    const h = await client.getHostsStatus();
+    const sslPorts = stackSslPorts(stack);
+    let target = ensureHttpsSchemeForSslPort(url, sslPorts);
+    let h = await client.getHostsStatus();
     patchSitesCache({ hosts: h });
     if (!h.ok) {
-      setError(
-        h.message ??
-          "Hosts file is missing DevStack entries. Click Fix hosts, then try again.",
-      );
-      return;
+      try {
+        h = await client.repairHosts();
+        patchSitesCache({ hosts: h });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      if (!h.ok) {
+        setError(
+          h.message ??
+            "Hosts file is missing DevStack entries. Click Fix hosts, then try again.",
+        );
+        return;
+      }
     }
-    await openInBrowser(url);
+    await openInBrowser(target, { sslPorts });
   };
 
   useEffect(() => {
@@ -193,6 +208,21 @@ export function SitesPage({
   ) => {
     setError(null);
     setPatching(true);
+    const current = details.find((d) => d.site.id === siteId)?.site;
+    // Backend always assigns php/node (null = System). Always send the full
+    // intended values so HTTPS/web-server toggles do not clear PHP.
+    const payload = {
+      phpVersion:
+        update.phpVersion !== undefined
+          ? update.phpVersion
+          : (current?.phpVersion ?? null),
+      nodeVersion:
+        update.nodeVersion !== undefined
+          ? update.nodeVersion
+          : (current?.nodeVersion ?? null),
+      https: update.https,
+      webServer: update.webServer,
+    };
     // Optimistic UI — reflect the toggle/select immediately while backend reloads.
     setDetails(
       details.map((d) => {
@@ -207,7 +237,7 @@ export function SitesPage({
       }),
     );
     try {
-      await client.updateSiteEnvironment(siteId, update);
+      await client.updateSiteEnvironment(siteId, payload);
       await refresh();
     } catch (e) {
       setError(humanizeError(e instanceof Error ? e.message : String(e)));
