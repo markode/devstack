@@ -1123,20 +1123,38 @@ export async function mockSetSitePhpIniSliders(
   return mockSetSitePhpIni(siteId, next);
 }
 
+const MOCK_STARTERS: Array<[SiteTemplateInfo["kind"], string, string, string[]]> = [
+  ["empty", "Empty folder", "", ["mkdir"]],
+  ["html", "Blank index.html", "", ["write index.html"]],
+  ["php", "Blank index.php", "", ["write index.php"]],
+  ["park", "Park existing folder", "", ["register parked folder"]],
+  ["wordpress", "WordPress", "", ["wp core install"]],
+  ["woocommerce", "WordPress + WooCommerce", "", ["wp core install", "wp plugin install woocommerce --activate"]],
+  ["laravel", "Laravel", "public", ["composer create-project laravel/laravel <dir>"]],
+  ["nextjs", "Next.js", "out", ["npx create-next-app + build"]],
+  ["react", "React (Vite)", "dist", ["npm create vite -- --template react + build"]],
+  ["vue", "Vue (Vite)", "dist", ["npm create vite -- --template vue + build"]],
+  ["angular", "Angular", "dist", ["npx @angular/cli new + build"]],
+];
+
 export async function mockSiteTemplateKinds(): Promise<SiteTemplateInfo[]> {
   return [
-    ["laravel", "Laravel", "public", ["composer create-project laravel/laravel <dir>"]],
+    ...MOCK_STARTERS,
     ["symfony", "Symfony", "public", ["composer create-project symfony/skeleton <dir>"]],
     ["statamic", "Statamic", "public", ["composer create-project statamic/statamic <dir>"]],
     ["drupal", "Drupal", "web", ["composer create-project drupal/recommended-project <dir>"]],
     ["joomla", "Joomla", "", ["download Joomla full package and unzip"]],
-    ["woocommerce", "WooCommerce", "", ["wp core install", "wp plugin install woocommerce --activate"]],
   ].map(([kind, label, docroot, commands]) => ({
     kind: kind as SiteTemplateInfo["kind"],
     label: label as string,
     docroot: docroot as string,
     commands: commands as string[],
+    starter: MOCK_STARTERS.some((s) => s[0] === kind),
   }));
+}
+
+export async function mockSiteStarterKinds(): Promise<SiteTemplateInfo[]> {
+  return (await mockSiteTemplateKinds()).filter((k) => k.starter);
 }
 
 export async function mockCreateFromTemplate(

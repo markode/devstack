@@ -2774,6 +2774,8 @@ async fn run_v030_features_smoke(
                 php_version: None,
                 database_engine: None,
                 web_server: None,
+                https: Some(true),
+                node_version: None,
             },
             &progress,
             "smoke-tpl",
@@ -2792,6 +2794,55 @@ async fn run_v030_features_smoke(
         state.sites.retain(|s| s.id != "tpl-smoke");
         let _ = std::fs::remove_dir_all(&dir);
         println!("site template scaffold OK soft_failed={}", res.soft_failed);
+    }
+
+    // --- 3b. Every Add-site starter (offline placeholders; network installs in matrix smoke) -
+    {
+        let progress = noop_job_progress();
+        let mut state = ctx.state.lock().await;
+        for kind in site_templates::STARTER_KINDS {
+            let id = format!("starter-{}", kind.id());
+            let dir = ctx.paths.root.join(format!("starter-smoke/{}", kind.id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            state.sites.retain(|s| s.id != id);
+            if *kind == site_templates::TemplateKind::Park {
+                std::fs::create_dir_all(&dir)?;
+                std::fs::write(dir.join("index.html"), b"<h1>park</h1>\n")?;
+            }
+            let res = site_templates::create_from_template_with(
+                &ctx.paths,
+                &mut state,
+                site_templates::CreateFromTemplateRequest {
+                    kind: kind.id().into(),
+                    name: id.clone(),
+                    path: Some(dir.display().to_string()),
+                    php_version: None,
+                    database_engine: None,
+                    web_server: Some(kind.default_web_server().into()),
+                    https: Some(true),
+                    node_version: None,
+                },
+                &progress,
+                &format!("smoke-starter-{}", kind.id()),
+                true,
+            )
+            .await?;
+            assert_eq!(res.site.id, id);
+            assert!(
+                std::path::Path::new(&res.docroot).exists(),
+                "missing docroot for {}",
+                kind.id()
+            );
+            println!(
+                "starter {} OK soft_failed={} url={}",
+                kind.id(),
+                res.soft_failed,
+                res.url
+            );
+            state.sites.retain(|s| s.id != id);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        println!("all Add-site starters (offline) OK");
     }
 
     // --- 6. Site logs ---------------------------------------------------------------------

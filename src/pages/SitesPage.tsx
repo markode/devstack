@@ -5,6 +5,7 @@ import {
   BusyLabel,
   useAsyncJob,
 } from "../components/AsyncModal";
+import { AddSiteModal } from "../components/AddSiteModal";
 import { DeleteSiteModal } from "../components/DeleteSiteModal";
 import { Modal } from "../components/Modal";
 import { PortConflictDialog } from "../components/PortConflictDialog";
@@ -23,7 +24,6 @@ import { SitesStatusBanner } from "../components/SitesStatusBanner";
 import { XdebugHints } from "../components/XdebugHints";
 import {
   browseDatabaseDump,
-  browseFolder,
   openInBrowser,
   openInEditor,
   openInFileManager,
@@ -662,20 +662,18 @@ export function SitesPage({
       {showAddSite ? (
         <AddSiteModal
           phpInstalled={phpInstalled}
+          nodeInstalled={nodeInstalled}
+          savedTemplates={templates}
           onClose={() => setShowAddSite(false)}
-          onSubmit={async (req) => {
-            const site = await client.createSite(
-              req.name,
-              req.path,
-              req.phpVersion,
-              {
-                webServer: req.webServer,
-                https: req.https,
-              },
-            );
+          onCreatedSite={async (siteId) => {
             setShowAddSite(false);
             await refresh();
-            openSite(site.id);
+            openSite(siteId);
+          }}
+          onCreatedFromTemplate={async (result) => {
+            setShowAddSite(false);
+            await refresh();
+            setTemplateResult(result);
           }}
         />
       ) : null}
@@ -787,197 +785,6 @@ function ProgressToast({ progress }: { progress: JobProgress }) {
 
 function runtimeValue(pkg: InstalledPackage): string {
   return pkg.channel || pkg.version;
-}
-
-function AddSiteModal({
-  phpInstalled,
-  onClose,
-  onSubmit,
-}: {
-  phpInstalled: InstalledPackage[];
-  onClose: () => void;
-  onSubmit: (req: {
-    name: string;
-    path: string;
-    phpVersion?: string;
-    webServer: string;
-    https: boolean;
-  }) => Promise<void>;
-}) {
-  const job = useAsyncJob();
-  const [mode, setMode] = useState<"empty" | "link">("empty");
-  const [name, setName] = useState("my-site");
-  const [path, setPath] = useState("~/Sites/my-site");
-  const [php, setPhp] = useState(
-    phpInstalled[0] ? runtimeValue(phpInstalled[0]) : "",
-  );
-  const [webServer, setWebServer] = useState("nginx");
-  const [https, setHttps] = useState(true);
-  const [pickError, setPickError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (mode !== "empty") return;
-    const slug = name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
-    setPath(`~/Sites/${slug || "site"}`);
-  }, [name, mode]);
-
-  const pickFolder = async () => {
-    setPickError(null);
-    try {
-      const folder = await browseFolder({ title: "Link existing site folder" });
-      if (folder) {
-        setPath(folder);
-        setMode("link");
-        if (!name || name === "my-site") {
-          const base = folder.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
-          if (base) setName(base);
-        }
-      }
-    } catch (e) {
-      setPickError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const submitLabel = mode === "link" ? "Link site" : "Create site";
-
-  return (
-    <AsyncModal
-      title="Add site"
-      description="Create an empty PHP site or link a folder you already have."
-      busy={job.busy}
-      progress={job.progress}
-      error={job.error ?? pickError}
-      onClose={() => {
-        if (!job.busy) onClose();
-      }}
-      actions={
-        <>
-          <button
-            type="button"
-            className="btn"
-            disabled={job.busy}
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={job.busy || !name.trim() || !path.trim()}
-            title={
-              !name.trim() || !path.trim()
-                ? "Name and directory are required"
-                : "Create site and sync hosts"
-            }
-            onClick={() =>
-              void job.run(async () => {
-                await onSubmit({
-                  name: name.trim(),
-                  path: path.trim(),
-                  phpVersion: php || undefined,
-                  webServer,
-                  https,
-                });
-              })
-            }
-          >
-            <BusyLabel
-              busy={job.busy}
-              idle={submitLabel}
-              busyText="Creating…"
-              progress={job.progress}
-            />
-          </button>
-        </>
-      }
-    >
-      <div className="field-row" style={{ gap: 8 }}>
-        <button
-          type="button"
-          className={`btn ${mode === "empty" ? "btn-primary" : "btn-install"}`}
-          onClick={() => setMode("empty")}
-        >
-          Empty site
-        </button>
-        <button
-          type="button"
-          className={`btn ${mode === "link" ? "btn-primary" : "btn-install"}`}
-          onClick={() => void pickFolder()}
-        >
-          Link folder…
-        </button>
-      </div>
-      <label className="field">
-        Name
-        <input value={name} onChange={(e) => setName(e.target.value)} />
-      </label>
-      <label className="field">
-        Directory
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            style={{ flex: 1 }}
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-          />
-          <button
-            type="button"
-            className="btn btn-install"
-            title="Browse for a folder"
-            onClick={() => void pickFolder()}
-          >
-            Browse
-          </button>
-        </div>
-      </label>
-      <div className="field-row">
-        <label className="field">
-          PHP
-          {phpInstalled.length === 0 ? (
-            <span className="hint">
-              No PHP installed —{" "}
-              <a href="#/php" onClick={onClose}>
-                install one
-              </a>
-            </span>
-          ) : (
-            <select
-              className="native"
-              value={php}
-              onChange={(e) => setPhp(e.target.value)}
-            >
-              {phpInstalled.map((v) => (
-                <option key={v.version} value={runtimeValue(v)}>
-                  {runtimeValue(v)}
-                </option>
-              ))}
-            </select>
-          )}
-        </label>
-        <label className="field">
-          Web server
-          <select
-            className="native"
-            value={webServer}
-            onChange={(e) => setWebServer(e.target.value)}
-          >
-            <option value="nginx">Nginx</option>
-            <option value="apache">Apache</option>
-          </select>
-        </label>
-      </div>
-      <label className="field" style={{ flexDirection: "row", gap: 8 }}>
-        <input
-          type="checkbox"
-          checked={https}
-          onChange={(e) => setHttps(e.target.checked)}
-        />
-        HTTPS (.test certificate)
-      </label>
-    </AsyncModal>
-  );
 }
 
 function NewWordpressModal({

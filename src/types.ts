@@ -473,18 +473,28 @@ export interface SitePhpIniView {
 }
 
 export type SiteTemplateKind =
+  | "empty"
+  | "html"
+  | "php"
+  | "park"
+  | "wordpress"
+  | "woocommerce"
   | "laravel"
   | "symfony"
   | "statamic"
   | "drupal"
   | "joomla"
-  | "woocommerce";
+  | "nextjs"
+  | "react"
+  | "vue"
+  | "angular";
 
 export interface SiteTemplateInfo {
   kind: SiteTemplateKind;
   label: string;
   docroot: string;
   commands: string[];
+  starter?: boolean;
 }
 
 export interface CreateFromTemplateRequest {
@@ -494,6 +504,8 @@ export interface CreateFromTemplateRequest {
   phpVersion?: string | null;
   databaseEngine?: string | null;
   webServer?: string | null;
+  https?: boolean | null;
+  nodeVersion?: string | null;
 }
 
 export interface TemplateStepResult {

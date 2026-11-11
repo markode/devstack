@@ -1882,6 +1882,14 @@ body.modal-open .content-body {
   margin-bottom: 8px;
 }
 
+.starter-log {
+  margin-top: 12px;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .site-log-list {
   margin-top: 8px;
   max-height: 320px;
