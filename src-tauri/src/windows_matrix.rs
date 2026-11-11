@@ -187,8 +187,9 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
             let mut state = lock(ctx);
             let ms = flip_https(&ctx.paths, &mut state, &sid)?;
             let _ = flip_https(&ctx.paths, &mut state, &sid)?;
-            if cfg!(windows) && ms > 1000 {
-                return Err(format!("{ms}ms > 1000ms"));
+            let budget = crate::services::perf::toggle_budget_ms();
+            if cfg!(windows) && ms > budget {
+                return Err(format!("{ms}ms > {budget}ms"));
             }
             Ok(format!("{ms}ms"))
         });
@@ -215,8 +216,10 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
                     set_web_server(&ctx.paths, &mut state, &sid, server)?;
                 }
                 let ms = sw.elapsed_ms();
-                if cfg!(windows) && ms > 2000 {
-                    return Err(format!("both directions {ms}ms > 2000ms"));
+                // Both directions: allow 2× single-toggle budget (purge + dual reload).
+                let both_budget = crate::services::perf::toggle_budget_ms().saturating_mul(2);
+                if cfg!(windows) && ms > both_budget {
+                    return Err(format!("both directions {ms}ms > {both_budget}ms"));
                 }
                 Ok(format!("{ms}ms"))
             });

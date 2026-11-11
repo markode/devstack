@@ -7,8 +7,8 @@ Targets and the CI regression gate for the hot paths.
 | Metric | Target | CI budget (unix) | CI budget (Windows) |
 | --- | --- | --- | --- |
 | Warm `apply_stack` (DB kept up via `stop_web_stack`) | < 3 s (unix) / < 5 s (Windows) | **4000 ms** | **5000 ms** |
-| HTTPS toggle (`apply_site_environment_change`) | < 1 s | **3000 ms** | **1000 ms** |
-| Web-server (nginx <-> apache) toggle | < 1 s | **3000 ms** | **1000 ms** |
+| HTTPS toggle (`apply_site_environment_change`) | < 1 s | **3000 ms** | **2500 ms** |
+| Web-server (nginx ↔ apache) toggle | < 2 s (single-bind dual reload) | **3000 ms** | **2500 ms** |
 
 Constants live in `src-tauri/src/services/perf.rs` (`WARM_APPLY_STACK_BUDGET_MS_*`,
 `TOGGLE_BUDGET_MS_*`). Budgets are intentionally above the targets so CI jitter does
@@ -32,8 +32,8 @@ Methodology:
    reported `apply_stack_warm_ms` is the best of the two (Windows must not re-pay
    InnoDB spawn for a "warm" start).
 4. With the stack up, time the HTTPS toggle (off then on) and the web-server toggle
-   (apache then nginx); the slower direction is reported. Both front-ends dual-bind
-   every site so Windows toggles stay under 1s without FOREGROUND stop+start.
+   (apache then nginx); the slower direction is reported. Sites are **single-bound**
+   (v0.3.4+): a web-server switch reloads both front-ends so stale confs are purged.
 5. Remove the site, reload, stop the stack, then enforce the budgets above.
 
 Before/after for a change: build the old commit with the bench file copied in

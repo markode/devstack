@@ -8,15 +8,61 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use crate::config::{AppState, Paths, SiteRecord};
 use crate::error::{DevStackError, Result};
 use crate::services::process::{is_running, read_pid, spawn_logged, stop_pid, write_pid};
+
+/// Serialize privileged helper invokes — concurrent `sudo -n` / keychain access
+/// has hung macos-smoke mid-apply (ca/hosts never logged) for the full job timeout.
+fn helper_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Spawn + wait with a hard wall-clock timeout (kill on expiry).
+#[cfg(unix)]
+pub(crate) fn run_command_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| DevStackError::Message(format!("spawn: {e}")))?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| DevStackError::Message(format!("wait: {e}")));
+            }
+            Ok(None) if start.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(DevStackError::Message(format!(
+                    "command timed out after {}s",
+                    timeout.as_secs()
+                )));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(DevStackError::Message(format!("wait: {e}")));
+            }
+        }
+    }
+}
 
 pub const MARKER_BEGIN: &str = "# BEGIN DevStack";
 pub const MARKER_END: &str = "# END DevStack";
@@ -233,6 +279,7 @@ pub fn helper_run(paths: &Paths, args: &[&str]) -> Result<()> {
     if args.is_empty() {
         return Err(DevStackError::Message("helper: missing command".into()));
     }
+    let _guard = helper_lock();
     #[cfg(windows)]
     {
         return helper_run_windows(paths, args);
@@ -255,14 +302,9 @@ pub fn helper_run(paths: &Paths, args: &[&str]) -> Result<()> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn helper_run_linux(paths: &Paths, args: &[&str]) -> Result<()> {
     let script = ensure_helper_script(paths)?;
-    let status = crate::services::process::command("sudo")
-        .arg("-n")
-        .arg(&script)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
+    let mut cmd = crate::services::process::command("sudo");
+    cmd.arg("-n").arg(&script).args(args);
+    let status = run_command_with_timeout(cmd, Duration::from_secs(45));
     match status {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
@@ -283,14 +325,11 @@ fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
     // Never fall through to osascript under CI / non-interactive sessions: the
     // "with administrator privileges" dialog blocks forever with no UI, which is
     // exactly what hung macos-smoke for 35+ minutes after the first stack stop.
-    let sudo = crate::services::process::command("sudo")
-        .arg("-n")
-        .arg(&script)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
+    // Also hard-timeout sudo itself — concurrent sudo/keychain has wedged CI
+    // with no stderr for the full 40m job limit.
+    let mut sudo_cmd = crate::services::process::command("sudo");
+    sudo_cmd.arg("-n").arg(&script).args(args);
+    let sudo = run_command_with_timeout(sudo_cmd, Duration::from_secs(45));
     match &sudo {
         Ok(out) if out.status.success() => return Ok(()),
         Ok(out) => {
@@ -300,7 +339,7 @@ fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
                 args, out.status
             );
         }
-        Err(e) => eprintln!("devstack helper: sudo -n spawn failed for {:?}: {e}", args),
+        Err(e) => eprintln!("devstack helper: sudo -n failed for {:?}: {e}", args),
     }
 
     if macos_skip_osascript() {
@@ -310,7 +349,7 @@ fn helper_run_macos(paths: &Paths, args: &[&str]) -> Result<()> {
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
-            Err(e) => format!("sudo -n spawn error: {e}"),
+            Err(e) => format!("sudo -n error: {e}"),
         };
         return Err(DevStackError::Message(format!(
             "macOS privileged helper unavailable in CI/headless ({detail}). \

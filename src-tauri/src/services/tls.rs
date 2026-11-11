@@ -222,20 +222,29 @@ fn is_ca_in_trust_store_macos(ca: &Path, paths: &Paths) -> bool {
     let Ok(want) = ca_sha256(paths) else {
         return false;
     };
-    let out = crate::services::process::command("security")
-        .args([
-            "find-certificate",
-            "-a",
-            "-c",
-            "DevStack Local CA",
-            "-Z",
-            "/Library/Keychains/System.keychain",
-        ])
-        .output();
+    // Hard timeout: `security find-certificate` has wedged apply_stack ca/hosts
+    // on macos-smoke (no output until the 40m job timeout).
+    let mut cmd = crate::services::process::command("security");
+    cmd.args([
+        "find-certificate",
+        "-a",
+        "-c",
+        "DevStack Local CA",
+        "-Z",
+        "/Library/Keychains/System.keychain",
+    ]);
+    let out = crate::services::dns::run_command_with_timeout(
+        cmd,
+        std::time::Duration::from_secs(15),
+    );
     match out {
         Ok(o) if o.status.success() => {
             let text = String::from_utf8_lossy(&o.stdout).to_ascii_lowercase();
             text.contains(&want) || text.contains("devstack local ca")
+        }
+        Err(e) => {
+            eprintln!("devstack: security find-certificate timed out/failed: {e}");
+            false
         }
         _ => false,
     }

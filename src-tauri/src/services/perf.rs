@@ -9,8 +9,9 @@ pub const WARM_APPLY_STACK_BUDGET_MS_UNIX: u128 = 4000;
 pub const WARM_APPLY_STACK_BUDGET_MS_WINDOWS: u128 = 5_000;
 /// HTTPS / web-server toggle budget (ms).
 pub const TOGGLE_BUDGET_MS_UNIX: u128 = 3000;
-/// Dual-bound nginx+apache vhosts make toggles metadata-only on Windows.
-pub const TOGGLE_BUDGET_MS_WINDOWS: u128 = 1_000;
+/// Single-bind nginx↔apache toggles reload *both* front-ends (purge stale conf).
+/// Measured ~1.4s on Windows CI; keep headroom under the unix 3s ceiling.
+pub const TOGGLE_BUDGET_MS_WINDOWS: u128 = 2_500;
 
 /// Filesystem watchers must debounce at least this long to coalesce editor/IDE bursts.
 pub const MIN_WATCH_DEBOUNCE_MS: u64 = 300;

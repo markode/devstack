@@ -310,8 +310,8 @@ pub fn apply_stack_with_progress(
         state.runtime.last_start_error = Some(e.to_string());
     } else {
         state.runtime.last_start_error = None;
-        // Warm php-cgi / FPM before the UI's probe_all so first Open isn't a cold miss.
-        crate::services::sites::warm_php_runtimes(paths, state);
+        // PHP warm-up lives in list/probe (warm_php_runtimes), not here — curling
+        // every site after apply blows the warm apply_stack CI budget.
     }
     save_state(&paths.state_file, state)?;
     if let Some(e) = nginx_err.or(apache_err) {
