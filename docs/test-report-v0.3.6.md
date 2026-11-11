@@ -3,8 +3,9 @@
 Date: 2026-11-11  
 Branch: `cursor/hotfix-0-3-6-delete-modal-b7b6`  
 PR: https://github.com/markode/devstack/pull/31  
+Head: `9f39389c4f22e0163b04fa5374143d9f27757fbe`
 
-Combines the v0.3.5 Delete-dialog UI hotfix with the Add-site Starter picker in one release.
+Combines the v0.3.5 Delete-dialog UI hotfix with the Add-site Starter picker (plus recommended stacks) in one release.
 
 ## A) Delete modal / labels / red Delete (Windows feedback)
 
@@ -31,9 +32,19 @@ Empty folder · Blank index.html · Blank index.php · Park existing folder · W
 | Recommended stack | `src/starterRecommendations.json` — per-starter web server / PHP / Node / DB from official floors; Recommended badges; override warnings; one-click install or nearest installed compatible |
 | E2E | Offline placeholder for every `STARTER_KINDS` in smoke; Windows matrix loops `ALL_KINDS` with `DEVSTACK_SKIP_TEMPLATE_NETWORK=1`; Vitest covers catalog + prefills/warnings/install CTA |
 
-## CI results
+## CI results (PR #31 @ `9f39389`)
 
-_(filled after green Windows + macOS smoke)_
+| Check | Result | Run |
+|-------|--------|-----|
+| macOS smoke | **PASS** | [43079475070](https://github.com/markode/devstack/actions/runs/43079475070) |
+| Windows HTTPS smoke + matrix | **PASS** (67 pass / 0 fail / 2 skipped) | [43079474772](https://github.com/markode/devstack/actions/runs/43079474772) |
+| Warm apply (Windows) | **4112 ms** | `PERF_BENCH apply_stack_warm_ms=4112` |
+| Warm apply (macOS) | **765 ms** | `PERF_BENCH apply_stack_warm_ms=765` |
+| Delete e2e | **PASS** (Win + mac) | `delete_site(empty-smoke) OK` |
+| All Add-site starters (offline) | **PASS** (Win + mac) | empty/html/php/park/wordpress/woocommerce/laravel/nextjs/react/vue/angular |
+| Matrix templates | **PASS** (15 kinds) | `template.*` including new starters |
+
+`MATRIX DONE pass=67 fail=0 skipped=2 total_ms=59003`
 
 ## Release assets
 
