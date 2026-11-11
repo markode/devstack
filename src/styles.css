@@ -1890,6 +1890,27 @@ body.modal-open .content-body {
   line-height: 1.45;
 }
 
+.field-label-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rec-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--accent, #007aff);
+  background: color-mix(in srgb, var(--accent, #007aff) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #007aff) 28%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
 .site-log-list {
   margin-top: 8px;
   max-height: 320px;

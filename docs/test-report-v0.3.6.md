@@ -28,7 +28,8 @@ Empty folder · Blank index.html · Blank index.php · Park existing folder · W
 | WooCommerce | `wp plugin install woocommerce --activate` |
 | JS frameworks | Scaffold with managed Node, then `npm run build` static output (`dist` / `out`) so `.test` serves immediately |
 | Progress / cancel / rollback | Live job progress + log panel; `cancel_site_template_job`; hard rollback (drop DB + remove folder) on failure |
-| E2E | Offline placeholder for every `STARTER_KINDS` in smoke; Windows matrix loops `ALL_KINDS` with `DEVSTACK_SKIP_TEMPLATE_NETWORK=1`; network installs are smoke-with-retries when CI enables net |
+| Recommended stack | `src/starterRecommendations.json` — per-starter web server / PHP / Node / DB from official floors; Recommended badges; override warnings; one-click install or nearest installed compatible |
+| E2E | Offline placeholder for every `STARTER_KINDS` in smoke; Windows matrix loops `ALL_KINDS` with `DEVSTACK_SKIP_TEMPLATE_NETWORK=1`; Vitest covers catalog + prefills/warnings/install CTA |
 
 ## CI results
 

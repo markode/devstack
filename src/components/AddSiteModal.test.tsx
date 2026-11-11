@@ -11,10 +11,10 @@ vi.mock("../client", () => ({
       starter: true,
     },
     {
-      kind: "html",
-      label: "Blank index.html",
+      kind: "php",
+      label: "Blank index.php",
       docroot: "",
-      commands: ["write index.html"],
+      commands: ["write index.php"],
       starter: true,
     },
     {
@@ -39,6 +39,26 @@ vi.mock("../client", () => ({
       starter: true,
     },
   ]),
+  listInstalled: vi.fn(async (id: string) => {
+    if (id === "mariadb") {
+      return [{ packageId: "mariadb", version: "11.4.0", path: "/db", installedAt: "x" }];
+    }
+    return [];
+  }),
+  listPackageVersions: vi.fn(async (id: string) => ({
+    packageId: id,
+    versions: [
+      { version: id === "node" ? "22.11.0" : "8.3.12", channel: "stable", label: "x", lts: true },
+    ],
+    fromCache: true,
+    refreshing: false,
+  })),
+  installPackage: vi.fn(async (packageId: string, version: string) => ({
+    packageId,
+    version,
+    path: `/${packageId}`,
+    installedAt: "now",
+  })),
   createSiteFromTemplate: vi.fn(async (req: { kind: string; name: string }) => ({
     site: {
       id: "demo",
@@ -71,48 +91,90 @@ import { AddSiteModal } from "./AddSiteModal";
 afterEach(() => {
   cleanup();
   document.body.classList.remove("modal-open");
+  vi.clearAllMocks();
 });
 
-describe("AddSiteModal starters", () => {
-  it("lists starters and creates via the template engine", async () => {
+const phpInstalled = [
+  { packageId: "php", version: "8.2.28", path: "/php", installedAt: "x" },
+  { packageId: "php", version: "8.1.0", path: "/php", installedAt: "x" },
+];
+const nodeInstalled = [
+  { packageId: "node", version: "20.18.0", path: "/node", installedAt: "x" },
+];
+
+describe("AddSiteModal recommended stack", () => {
+  it("prefills WordPress with Apache + MariaDB and shows Recommended badges", async () => {
+    render(
+      <AddSiteModal
+        phpInstalled={phpInstalled}
+        nodeInstalled={nodeInstalled}
+        savedTemplates={[]}
+        onClose={() => undefined}
+        onCreatedFromTemplate={async () => undefined}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("starter-wordpress"));
+
+    await waitFor(() =>
+      expect((screen.getByTestId("select-webserver") as HTMLSelectElement).value).toBe(
+        "apache",
+      ),
+    );
+    expect((screen.getByTestId("select-database") as HTMLSelectElement).value).toBe(
+      "mariadb",
+    );
+    // 8.2 is nearest compatible when 8.3 recommended is missing.
+    expect((screen.getByTestId("select-php") as HTMLSelectElement).value).toBe("8.2.28");
+    expect(screen.getByTestId("php-fallback-note").textContent).toMatch(/recommended 8\.3/);
+    expect(screen.getAllByTestId("recommended-badge").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("install-php-recommended")).toBeTruthy();
+  });
+
+  it("prefills React with Node and no PHP/DB, warns on low Node", async () => {
+    render(
+      <AddSiteModal
+        phpInstalled={phpInstalled}
+        nodeInstalled={[{ packageId: "node", version: "16.20.0", path: "/n", installedAt: "x" }]}
+        savedTemplates={[]}
+        onClose={() => undefined}
+        onCreatedFromTemplate={async () => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("starter-react"));
+    await waitFor(() => expect(screen.getByTestId("select-node")).toBeTruthy());
+    expect(screen.queryByTestId("select-php")).toBeNull();
+    expect(screen.queryByTestId("select-database")).toBeNull();
+    expect(screen.getByTestId("starter-compat-warning").textContent).toMatch(
+      /below the React \(Vite\) minimum/,
+    );
+  });
+
+  it("creates a Laravel site with the prefilled stack", async () => {
     const onCreated = vi.fn(async () => undefined);
     render(
       <AddSiteModal
-        phpInstalled={[{ id: "php", name: "PHP", version: "8.3", path: "/php" } as never]}
-        nodeInstalled={[{ id: "node", name: "Node", version: "22.0.0", path: "/node" } as never]}
-        savedTemplates={[
-          {
-            id: "tpl1",
-            name: "Acme",
-            sourceSiteId: "acme",
-            sourceDomain: "acme.test",
-            sourceUrl: "https://acme.test",
-            framework: "wordpress",
-            createdAt: "2026-01-01",
-            filesArchive: "x.zip",
-            sizeBytes: 1,
-          },
-        ]}
+        phpInstalled={phpInstalled}
+        nodeInstalled={nodeInstalled}
+        savedTemplates={[]}
         onClose={() => undefined}
         onCreatedFromTemplate={onCreated}
       />,
     );
-
-    expect(await screen.findByTestId("starter-html")).toBeTruthy();
-    expect(screen.getByTestId("starter-wordpress")).toBeTruthy();
-    expect(screen.getByTestId("starter-laravel")).toBeTruthy();
-    expect(screen.getByTestId("starter-react")).toBeTruthy();
-    expect(screen.getByTestId("starter-saved-tpl1")).toBeTruthy();
-
-    fireEvent.click(screen.getByTestId("starter-html"));
+    fireEvent.click(await screen.findByTestId("starter-laravel"));
     fireEvent.change(screen.getByTestId("add-site-name"), {
-      target: { value: "Landing" },
+      target: { value: "Shop" },
     });
     fireEvent.click(screen.getByTestId("add-site-submit"));
-
     await waitFor(() => expect(client.createSiteFromTemplate).toHaveBeenCalled());
     expect(client.createSiteFromTemplate).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "html", name: "Landing" }),
+      expect.objectContaining({
+        kind: "laravel",
+        name: "Shop",
+        webServer: "nginx",
+        databaseEngine: "mariadb",
+        phpVersion: "8.2.28",
+      }),
     );
     await waitFor(() => expect(onCreated).toHaveBeenCalled());
   });
