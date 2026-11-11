@@ -35,6 +35,7 @@ pub mod vhost_ext;
 pub mod site_logs;
 pub mod site_php_ini;
 pub mod site_templates;
+pub mod job_cancel;
 pub mod tld;
 pub mod xdebug_site;
 

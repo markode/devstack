@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
+import { Modal } from "../components/Modal";
 import * as client from "../client";
 import { humanizeError } from "../portBusy";
 import type {
@@ -251,97 +252,210 @@ export function HostingPage() {
       ) : null}
 
       {editing ? (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal-card" style={{ maxWidth: 560 }}>
-            <h3>{editing.id ? "Edit connection" : "New connection"}</h3>
-            <label className="field">
-              Name
-              <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
-            </label>
-            <div className="field-row">
-              <label className="field">
-                Host
-                <input value={editing.host} onChange={(e) => setEditing({ ...editing, host: e.target.value })} />
-              </label>
-              <label className="field" style={{ maxWidth: 90 }}>
-                Port
-                <input type="number" value={editing.port} onChange={(e) => setEditing({ ...editing, port: Number(e.target.value) })} />
-              </label>
-              <label className="field">
-                User
-                <input value={editing.user} onChange={(e) => setEditing({ ...editing, user: e.target.value })} />
-              </label>
-            </div>
-            <div className="field-row">
-              <label className="field">
-                Auth
-                <select className="native" value={editing.auth} onChange={(e) => setEditing({ ...editing, auth: e.target.value as "key" | "password" })}>
-                  <option value="key">SSH key / agent</option>
-                  <option value="password">Password (OS keychain)</option>
-                </select>
-              </label>
-              {editing.auth === "key" ? (
-                <label className="field">
-                  Key file (optional)
-                  <input value={editing.keyPath ?? ""} onChange={(e) => setEditing({ ...editing, keyPath: e.target.value })} />
-                </label>
-              ) : (
-                <label className="field">
-                  Password {editing.hasPassword ? "(stored — leave empty to keep)" : ""}
-                  <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-                </label>
-              )}
-            </div>
-            <label className="field">
-              Remote folder
-              <input value={editing.remotePath} onChange={(e) => setEditing({ ...editing, remotePath: e.target.value })} />
-            </label>
-            <div className="field-row">
-              <label className="field">
-                Remote site URL
-                <input placeholder="https://example.com" value={editing.remoteUrl ?? ""} onChange={(e) => setEditing({ ...editing, remoteUrl: e.target.value })} />
-              </label>
-              <label className="field">
-                Local site
-                <select className="native" value={editing.siteId ?? ""} onChange={(e) => setEditing({ ...editing, siteId: e.target.value })}>
-                  <option value="">— none —</option>
-                  {sites.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <label className="field">
-              Excludes (one per line)
-              <textarea rows={4} value={excludeText} placeholder=".git/&#10;node_modules/&#10;*.log" onChange={(e) => setExcludeText(e.target.value)} style={{ fontFamily: "var(--mono)", fontSize: 12 }} />
-            </label>
-            <div className="field-row">
-              <label className="field">
-                Remote DB name
-                <input value={editing.remoteDb?.name ?? ""} onChange={(e) => setEditing({ ...editing, remoteDb: { host: editing.remoteDb?.host ?? "", user: editing.remoteDb?.user ?? "", name: e.target.value } })} />
-              </label>
-              <label className="field">
-                DB user
-                <input value={editing.remoteDb?.user ?? ""} onChange={(e) => setEditing({ ...editing, remoteDb: { host: editing.remoteDb?.host ?? "", name: editing.remoteDb?.name ?? "", user: e.target.value } })} />
-              </label>
-              <label className="field">
-                DB password
-                <input type="password" value={dbPassword} onChange={(e) => setDbPassword(e.target.value)} />
-              </label>
-            </div>
-            <div className="modal-actions">
-              <button type="button" className="btn btn-install" onClick={() => setEditing(null)}>
-                Cancel
-              </button>
-              <button type="button" className="btn btn-primary" disabled={busy || !editing.name || !editing.host || !editing.user} onClick={() => void save()}>
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
+        <HostingEditModal
+          editing={editing}
+          setEditing={setEditing}
+          password={password}
+          setPassword={setPassword}
+          excludeText={excludeText}
+          setExcludeText={setExcludeText}
+          dbPassword={dbPassword}
+          setDbPassword={setDbPassword}
+          sites={sites}
+          busy={busy}
+          onSave={() => void save()}
+          onCancel={() => setEditing(null)}
+        />
       ) : null}
     </div>
+  );
+}
+
+function HostingEditModal({
+  editing,
+  setEditing,
+  password,
+  setPassword,
+  excludeText,
+  setExcludeText,
+  dbPassword,
+  setDbPassword,
+  sites,
+  busy,
+  onSave,
+  onCancel,
+}: {
+  editing: HostingProfile;
+  setEditing: (p: HostingProfile) => void;
+  password: string;
+  setPassword: (v: string) => void;
+  excludeText: string;
+  setExcludeText: (v: string) => void;
+  dbPassword: string;
+  setDbPassword: (v: string) => void;
+  sites: SiteRecord[];
+  busy: boolean;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const titleId = useId();
+  return (
+    <Modal
+      onClose={onCancel}
+      busy={busy}
+      labelledBy={titleId}
+      wide
+      initialFocus="[data-autofocus]"
+    >
+      <h3 id={titleId}>{editing.id ? "Edit connection" : "New connection"}</h3>
+      <label className="field">
+        Name
+        <input
+          data-autofocus
+          value={editing.name}
+          onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+        />
+      </label>
+      <div className="field-row">
+        <label className="field">
+          Host
+          <input value={editing.host} onChange={(e) => setEditing({ ...editing, host: e.target.value })} />
+        </label>
+        <label className="field" style={{ maxWidth: 90 }}>
+          Port
+          <input
+            type="number"
+            value={editing.port}
+            onChange={(e) => setEditing({ ...editing, port: Number(e.target.value) })}
+          />
+        </label>
+        <label className="field">
+          User
+          <input value={editing.user} onChange={(e) => setEditing({ ...editing, user: e.target.value })} />
+        </label>
+      </div>
+      <div className="field-row">
+        <label className="field">
+          Auth
+          <select
+            className="native"
+            value={editing.auth}
+            onChange={(e) =>
+              setEditing({ ...editing, auth: e.target.value as "key" | "password" })
+            }
+          >
+            <option value="key">SSH key / agent</option>
+            <option value="password">Password (OS keychain)</option>
+          </select>
+        </label>
+        {editing.auth === "key" ? (
+          <label className="field">
+            Key file (optional)
+            <input
+              value={editing.keyPath ?? ""}
+              onChange={(e) => setEditing({ ...editing, keyPath: e.target.value })}
+            />
+          </label>
+        ) : (
+          <label className="field">
+            Password {editing.hasPassword ? "(stored — leave empty to keep)" : ""}
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          </label>
+        )}
+      </div>
+      <label className="field">
+        Remote folder
+        <input
+          value={editing.remotePath}
+          onChange={(e) => setEditing({ ...editing, remotePath: e.target.value })}
+        />
+      </label>
+      <div className="field-row">
+        <label className="field">
+          Remote site URL
+          <input
+            placeholder="https://example.com"
+            value={editing.remoteUrl ?? ""}
+            onChange={(e) => setEditing({ ...editing, remoteUrl: e.target.value })}
+          />
+        </label>
+        <label className="field">
+          Local site
+          <select
+            className="native"
+            value={editing.siteId ?? ""}
+            onChange={(e) => setEditing({ ...editing, siteId: e.target.value })}
+          >
+            <option value="">— none —</option>
+            {sites.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <label className="field">
+        Excludes (one per line)
+        <textarea
+          rows={4}
+          value={excludeText}
+          placeholder={".git/\nnode_modules/\n*.log"}
+          onChange={(e) => setExcludeText(e.target.value)}
+          style={{ fontFamily: "var(--mono)", fontSize: 12 }}
+        />
+      </label>
+      <div className="field-row">
+        <label className="field">
+          Remote DB name
+          <input
+            value={editing.remoteDb?.name ?? ""}
+            onChange={(e) =>
+              setEditing({
+                ...editing,
+                remoteDb: {
+                  host: editing.remoteDb?.host ?? "",
+                  user: editing.remoteDb?.user ?? "",
+                  name: e.target.value,
+                },
+              })
+            }
+          />
+        </label>
+        <label className="field">
+          DB user
+          <input
+            value={editing.remoteDb?.user ?? ""}
+            onChange={(e) =>
+              setEditing({
+                ...editing,
+                remoteDb: {
+                  host: editing.remoteDb?.host ?? "",
+                  name: editing.remoteDb?.name ?? "",
+                  user: e.target.value,
+                },
+              })
+            }
+          />
+        </label>
+        <label className="field">
+          DB password
+          <input type="password" value={dbPassword} onChange={(e) => setDbPassword(e.target.value)} />
+        </label>
+      </div>
+      <div className="modal-actions">
+        <button type="button" className="btn btn-install" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={busy || !editing.name || !editing.host || !editing.user}
+          onClick={onSave}
+        >
+          Save
+        </button>
+      </div>
+    </Modal>
   );
 }

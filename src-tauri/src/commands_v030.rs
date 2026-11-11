@@ -82,6 +82,17 @@ pub async fn list_site_template_kinds() -> Result<Vec<TemplateInfo>> {
 }
 
 #[tauri::command]
+pub async fn list_site_starter_kinds() -> Result<Vec<TemplateInfo>> {
+    Ok(crate::services::site_templates::list_starter_kinds())
+}
+
+#[tauri::command]
+pub async fn cancel_site_template_job() -> Result<()> {
+    crate::services::job_cancel::request(crate::services::site_templates::TEMPLATE_JOB_ID);
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn create_site_from_template(
     app: AppHandle,
     ctx: Ctx<'_>,
@@ -94,7 +105,7 @@ pub async fn create_site_from_template(
         &mut state,
         request,
         &progress,
-        "site-template",
+        crate::services::site_templates::TEMPLATE_JOB_ID,
     )
     .await?;
     save_state(&ctx.paths.state_file, &state)?;

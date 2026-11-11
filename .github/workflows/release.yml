@@ -227,7 +227,7 @@ jobs:
           DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-release-e2e
           DEVSTACK_RESET_SITES: "1"
           DEVSTACK_MATRIX_JSON: ${{ runner.temp }}/windows-matrix.json
-          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.5.md
+          DEVSTACK_MATRIX_MD: ${{ github.workspace }}/docs/test-report-v0.3.6.md
           LZMA_API_STATIC: "1"
           LIBZ_SYS_STATIC: "1"
           OPENSSL_STATIC: "1"
@@ -246,8 +246,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-feature-matrix-release-v0.3.5
+          name: windows-feature-matrix-release-v0.3.6
           path: |
             ${{ runner.temp }}/windows-matrix.json
-            docs/test-report-v0.3.5.md
+            docs/test-report-v0.3.6.md
           if-no-files-found: warn

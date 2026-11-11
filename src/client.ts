@@ -710,6 +710,16 @@ export async function listSiteTemplateKinds(): Promise<SiteTemplateInfo[]> {
   return api.listSiteTemplateKinds();
 }
 
+export async function listSiteStarterKinds(): Promise<SiteTemplateInfo[]> {
+  if (useMock()) return mock.mockSiteStarterKinds();
+  return api.listSiteStarterKinds();
+}
+
+export async function cancelSiteTemplateJob(): Promise<void> {
+  if (useMock()) return;
+  return api.cancelSiteTemplateJob();
+}
+
 export async function createSiteFromTemplate(
   request: CreateFromTemplateRequest,
 ): Promise<CreateFromTemplateResult> {

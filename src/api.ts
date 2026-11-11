@@ -695,6 +695,14 @@ export async function listSiteTemplateKinds(): Promise<SiteTemplateInfo[]> {
   return invoke<SiteTemplateInfo[]>("list_site_template_kinds");
 }
 
+export async function listSiteStarterKinds(): Promise<SiteTemplateInfo[]> {
+  return invoke<SiteTemplateInfo[]>("list_site_starter_kinds");
+}
+
+export async function cancelSiteTemplateJob(): Promise<void> {
+  return invoke<void>("cancel_site_template_job");
+}
+
 export async function createSiteFromTemplate(
   request: CreateFromTemplateRequest,
 ): Promise<CreateFromTemplateResult> {

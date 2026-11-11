@@ -1,0 +1,223 @@
+{
+  "$schemaComment": "Official-ish stack recommendations per Add-site starter. Update when framework minimums change. Versions are major.minor (PHP/Node) or engine ids (mariadb/mysql).",
+  "updated": "2026-11-11",
+  "sources": {
+    "wordpress": "https://wordpress.org/about/requirements/",
+    "woocommerce": "https://woocommerce.com/document/server-requirements/",
+    "laravel": "https://laravel.com/docs/12.x/deployment#server-requirements",
+    "nextjs": "https://nextjs.org/docs/app/getting-started/installation",
+    "vite": "https://vite.dev/guide/",
+    "angular": "https://angular.dev/reference/versions"
+  },
+  "starters": {
+    "empty": {
+      "label": "Empty folder",
+      "webServer": "nginx",
+      "php": null,
+      "node": null,
+      "database": null,
+      "notes": "No runtime required — add an index later."
+    },
+    "html": {
+      "label": "Blank index.html",
+      "webServer": "nginx",
+      "php": null,
+      "node": null,
+      "database": null,
+      "notes": "Static file; Nginx is the lightest front-end."
+    },
+    "php": {
+      "label": "Blank index.php",
+      "webServer": "nginx",
+      "php": {
+        "recommended": "8.4",
+        "minimum": "8.1",
+        "preferLatest": true
+      },
+      "node": null,
+      "database": null,
+      "notes": "Blank PHP site — latest managed PHP on Nginx."
+    },
+    "park": {
+      "label": "Park existing folder",
+      "webServer": "nginx",
+      "php": {
+        "recommended": "8.3",
+        "minimum": "7.4",
+        "preferLatest": true
+      },
+      "node": null,
+      "database": null,
+      "notes": "Parked apps vary; PHP is optional and prefilled only when installed."
+    },
+    "wordpress": {
+      "label": "WordPress",
+      "frameworkVersion": "6.x",
+      "webServer": "apache",
+      "php": {
+        "recommended": "8.3",
+        "minimum": "8.1",
+        "preferLatest": true
+      },
+      "node": null,
+      "database": {
+        "recommended": "mariadb",
+        "alternatives": ["mysql"],
+        "minimumMaria": "10.5",
+        "minimumMysql": "8.0"
+      },
+      "notes": "Apache for .htaccess / pretty permalinks; latest PHP WordPress supports; MariaDB."
+    },
+    "woocommerce": {
+      "label": "WordPress + WooCommerce",
+      "frameworkVersion": "WP 6.x + Woo 9.x",
+      "webServer": "apache",
+      "php": {
+        "recommended": "8.3",
+        "minimum": "8.1",
+        "preferLatest": true
+      },
+      "node": null,
+      "database": {
+        "recommended": "mariadb",
+        "alternatives": ["mysql"],
+        "minimumMaria": "10.5",
+        "minimumMysql": "8.0"
+      },
+      "notes": "Same stack as WordPress; WooCommerce needs Apache permalinks."
+    },
+    "laravel": {
+      "label": "Laravel",
+      "frameworkVersion": "12.x",
+      "webServer": "nginx",
+      "php": {
+        "recommended": "8.4",
+        "minimum": "8.2",
+        "preferLatest": true
+      },
+      "node": null,
+      "database": {
+        "recommended": "mariadb",
+        "alternatives": ["mysql"],
+        "minimumMaria": "10.6",
+        "minimumMysql": "8.0"
+      },
+      "notes": "Laravel 12 requires PHP 8.2+; Nginx + MariaDB/MySQL."
+    },
+    "symfony": {
+      "label": "Symfony",
+      "frameworkVersion": "7.x",
+      "webServer": "nginx",
+      "php": {
+        "recommended": "8.3",
+        "minimum": "8.2",
+        "preferLatest": true
+      },
+      "node": null,
+      "database": {
+        "recommended": "mariadb",
+        "alternatives": ["mysql"]
+      },
+      "notes": "Symfony 7 requires PHP 8.2+."
+    },
+    "statamic": {
+      "label": "Statamic",
+      "webServer": "nginx",
+      "php": {
+        "recommended": "8.3",
+        "minimum": "8.2",
+        "preferLatest": true
+      },
+      "node": null,
+      "database": {
+        "recommended": "mariadb",
+        "alternatives": ["mysql"]
+      },
+      "notes": "Statamic tracks Laravel's PHP floor."
+    },
+    "drupal": {
+      "label": "Drupal",
+      "frameworkVersion": "11.x",
+      "webServer": "nginx",
+      "php": {
+        "recommended": "8.3",
+        "minimum": "8.3",
+        "preferLatest": true
+      },
+      "node": null,
+      "database": {
+        "recommended": "mariadb",
+        "alternatives": ["mysql"]
+      },
+      "notes": "Drupal 11 requires PHP 8.3+."
+    },
+    "joomla": {
+      "label": "Joomla",
+      "frameworkVersion": "5.x",
+      "webServer": "apache",
+      "php": {
+        "recommended": "8.3",
+        "minimum": "8.1",
+        "preferLatest": true
+      },
+      "node": null,
+      "database": {
+        "recommended": "mariadb",
+        "alternatives": ["mysql"]
+      },
+      "notes": "Joomla 5 works well on Apache with MariaDB."
+    },
+    "nextjs": {
+      "label": "Next.js",
+      "frameworkVersion": "15.x",
+      "webServer": "nginx",
+      "php": null,
+      "node": {
+        "recommended": "22",
+        "minimum": "18.18",
+        "preferLts": true
+      },
+      "database": null,
+      "notes": "Next.js 15 — Node 18.18+; prefer current Node LTS (22)."
+    },
+    "react": {
+      "label": "React (Vite)",
+      "frameworkVersion": "Vite 6",
+      "webServer": "nginx",
+      "php": null,
+      "node": {
+        "recommended": "22",
+        "minimum": "18",
+        "preferLts": true
+      },
+      "database": null,
+      "notes": "Vite React — Node 18+; prefer Node LTS."
+    },
+    "vue": {
+      "label": "Vue (Vite)",
+      "frameworkVersion": "Vite 6",
+      "webServer": "nginx",
+      "php": null,
+      "node": {
+        "recommended": "22",
+        "minimum": "18",
+        "preferLts": true
+      },
+      "database": null,
+      "notes": "Vite Vue — Node 18+; prefer Node LTS."
+    },
+    "angular": {
+      "label": "Angular",
+      "frameworkVersion": "19.x",
+      "webServer": "nginx",
+      "php": null,
+      "node": {
+        "recommended": "22",
+        "minimum": "18.19",
+        "preferLts": true
+      },
+      "database": null,
+      "notes": "Angular 19 — Node 18.19+ / 20.11+ / 22.x."
+    }
+  }
+}

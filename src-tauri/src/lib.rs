@@ -379,6 +379,8 @@ pub fn run() {
             commands_v030::set_site_php_ini,
             commands_v030::set_site_php_ini_sliders,
             commands_v030::list_site_template_kinds,
+            commands_v030::list_site_starter_kinds,
+            commands_v030::cancel_site_template_job,
             commands_v030::create_site_from_template,
             commands_v030::hosting_tools_status,
             commands_v030::hosting_list_profiles,

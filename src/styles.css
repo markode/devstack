@@ -662,14 +662,38 @@ select.native {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: var(--danger-bg);
-  color: var(--danger);
+  background: var(--danger);
+  color: #fff;
   border: 0;
   border-radius: var(--radius-sm);
   padding: 12px;
   font-weight: 600;
   font-size: 13px;
   cursor: pointer;
+}
+
+.danger-btn:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.danger-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-danger-solid {
+  background: var(--danger);
+  color: #fff;
+  border: 0;
+}
+
+.btn-danger-solid:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.btn-danger-solid:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .badge {
@@ -914,7 +938,8 @@ select.native {
 }
 
 .site-detail {
-  animation: page-in 280ms ease both;
+  /* Opacity-only: transform would trap position:fixed descendants. */
+  animation: modal-in 280ms ease both;
 }
 
 .site-detail-bar {
@@ -955,24 +980,92 @@ select.native {
   vertical-align: middle;
 }
 
+/* Portaled under document.body — never nest inside transformed / scroll panes. */
 .modal-backdrop {
   position: fixed;
   inset: 0;
   background: rgba(20, 20, 24, 0.42);
   display: grid;
   place-items: center;
-  z-index: 40;
+  z-index: 1000;
   padding: 24px;
+}
+
+body.modal-open .content-body {
+  overflow: hidden !important;
 }
 
 .modal-card {
   width: min(520px, 100%);
+  max-height: min(90vh, 100%);
+  overflow: auto;
   background: var(--card);
   border: 1px solid var(--card-border);
   border-radius: 16px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.18);
   padding: 20px 22px;
-  animation: page-in 220ms ease both;
+  /* Opacity-only enter — avoid transform so fixed children stay viewport-relative. */
+  animation: modal-in 180ms ease both;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.modal-check-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 12px;
+  padding: 10px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.modal-check-row:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.modal-check-row.is-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.modal-check-row input[type="checkbox"] {
+  margin-top: 3px;
+  flex: 0 0 auto;
+}
+
+.modal-check-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.modal-check-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+.modal-check-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.modal-check-desc .mono,
+.modal-check-desc code {
+  font-family: var(--mono);
+  font-size: 12px;
 }
 
 .modal-card h3 {
@@ -1787,6 +1880,35 @@ select.native {
   flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 8px;
+}
+
+.starter-log {
+  margin-top: 12px;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.field-label-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rec-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--accent, #007aff);
+  background: color-mix(in srgb, var(--accent, #007aff) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #007aff) 28%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
 }
 
 .site-log-list {

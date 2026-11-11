@@ -241,6 +241,12 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
             let progress = noop_job_progress();
             let path = ctx.paths.root.join(format!("sites/matrix-{}", kind.id()));
             let _ = fs::remove_dir_all(&path);
+            // Park registers an existing folder; other kinds create it.
+            if *kind == site_templates::TemplateKind::Park {
+                fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+                fs::write(path.join("index.html"), b"<h1>parked</h1>\n")
+                    .map_err(|e| e.to_string())?;
+            }
             let req = CreateFromTemplateRequest {
                 kind: kind.id().into(),
                 name: format!("matrix-{}", kind.id()),
@@ -248,6 +254,8 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
                 php_version: None,
                 database_engine: None,
                 web_server: Some("nginx".into()),
+                https: Some(true),
+                node_version: None,
             };
             let job = format!("matrix-template-{}", kind.id());
             let result = tauri::async_runtime::block_on(site_templates::create_from_template(
