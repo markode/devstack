@@ -238,6 +238,9 @@ export async function getStackStatus(): Promise<StackStatus> {
   return api.getStackStatus();
 }
 
+/** Coalesce concurrent Start clicks / Strict-mode double invokes into one IPC. */
+let startDevStackInflight: Promise<StackStatus> | null = null;
+
 export async function startDevStack(): Promise<StackStatus> {
   if (useMock())
     return {
@@ -246,7 +249,11 @@ export async function startDevStack(): Promise<StackStatus> {
       apache: true,
       database: true,
     };
-  return api.startDevStack();
+  if (startDevStackInflight) return startDevStackInflight;
+  startDevStackInflight = api.startDevStack().finally(() => {
+    startDevStackInflight = null;
+  });
+  return startDevStackInflight;
 }
 
 export async function stopDevStack(): Promise<StackStatus> {

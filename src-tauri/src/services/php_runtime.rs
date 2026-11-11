@@ -170,6 +170,21 @@ pub fn default_php_version(state: &AppState) -> Option<String> {
         })
 }
 
+/// Fill legacy `php_version: null` sites with [`default_php_version`]. Returns true when changed.
+pub fn migrate_null_php_versions(state: &mut AppState) -> bool {
+    let Some(default) = default_php_version(state) else {
+        return false;
+    };
+    let mut changed = false;
+    for site in &mut state.sites {
+        if site.php_version.is_none() {
+            site.php_version = Some(default.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub fn fpm_listen_addr(paths: &Paths, version: &str) -> String {
     fpm_listen_addr_with_base(paths, version, 9000)
 }

@@ -284,8 +284,62 @@ fn is_errorish_log_line(line: &str) -> bool {
         || l.contains("no listening sockets")
 }
 
+/// Parse a timestamp from an Apache or Nginx error-log line (best-effort).
+fn parse_log_line_time(line: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    // Nginx: `2023/11/08 14:22:01 [error] …`
+    if let Some(head) = line.get(..19) {
+        if head.as_bytes().get(4) == Some(&b'/') {
+            if let Ok(naive) =
+                chrono::NaiveDateTime::parse_from_str(head, "%Y/%m/%d %H:%M:%S")
+            {
+                return Some(chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc));
+            }
+        }
+    }
+    // Apache: `[Wed Nov 08 14:22:01.123456 2023] …` or `[Wed Nov 08 14:22:01 2023]`
+    if let Some(start) = line.find('[') {
+        if let Some(end) = line[start + 1..].find(']') {
+            let inner = &line[start + 1..start + 1 + end];
+            // Drop fractional seconds: `Wed Nov 08 14:22:01.123456 2023` → `…01 2023`
+            let cleaned = if let Some(dot) = inner.find('.') {
+                let after = inner[dot + 1..]
+                    .find(' ')
+                    .map(|i| &inner[dot + 1 + i..])
+                    .unwrap_or("");
+                format!("{}{}", &inner[..dot], after)
+            } else {
+                inner.to_string()
+            };
+            if let Ok(dt) = chrono::DateTime::parse_from_str(
+                &format!("{cleaned} +0000"),
+                "%a %b %d %H:%M:%S %Y %z",
+            ) {
+                return Some(dt.with_timezone(&chrono::Utc));
+            }
+            if let Ok(naive) =
+                chrono::NaiveDateTime::parse_from_str(&cleaned, "%a %b %d %H:%M:%S %Y")
+            {
+                return Some(chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc));
+            }
+        }
+    }
+    None
+}
+
+fn line_is_after_start(line: &str, since: &chrono::DateTime<chrono::Utc>) -> bool {
+    match parse_log_line_time(line) {
+        // Only keep lines we can date to after the current stack start.
+        // Undated / unparseable lines are treated as stale (never attach Nov-08
+        // mailpit noise when the stack just came up).
+        Some(ts) => ts >= *since,
+        None => false,
+    }
+}
+
 /// Fresh, non-benign log lines since `last_start_at` (best-effort).
 fn fresh_error_log_excerpt(paths: &Paths, apache: bool, since: Option<&str>) -> Option<String> {
+    let since_dt = since.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc));
     let candidates = if apache {
         vec![
             paths.logs.join("apache.err"),
@@ -302,10 +356,15 @@ fn fresh_error_log_excerpt(paths: &Paths, apache: bool, since: Option<&str>) -> 
             continue;
         };
         let mut lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
-        if let Some(since) = since {
-            // Keep lines that appear after the start marker / timestamp substring when present.
+        if let Some(since_dt) = since_dt.as_ref() {
+            lines.retain(|l| line_is_after_start(l, since_dt));
+        } else if let Some(since) = since {
+            // Legacy fallback: keep lines after an embedded start marker.
             if let Some(idx) = lines.iter().rposition(|l| l.contains(since)) {
                 lines = lines.split_off(idx.saturating_add(1));
+            } else {
+                // No marker and no parseable since → refuse stale tails.
+                lines.clear();
             }
         }
         let errors: Vec<&str> = lines
@@ -344,7 +403,32 @@ fn humanize_start_failure(server: &str, raw: &str) -> String {
 /// Marker embedded in the branded empty-site placeholder HTML.
 pub const EMPTY_SITE_MARKER: &str = "<!-- devstack-empty-site -->";
 
-const EMPTY_SITE_HTML: &str = r#"<!DOCTYPE html>
+const EMPTY_SITE_LOGO_DATA_URI: &str =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAUl0lEQVR42uVdu64sVxGt3dP3ZXORrIsEgUEEBOQQ8AGQ8QX+AUIgRiJA8BkkxIiIh0RChPwDZNgSksESYAQG29e+95wppmeme/ajnnvvnod9zOGeefd0rapaq6r27hHe+DXCtf2E6X8huX34p7zvdDOQ93f/wfkfJO9PHsvvu74zDeNNGT7YDR4Ob9bN6ItRKTBOj4eTdQOejm02/Hw81waE8eoMrxk9VBg7HL2RMh4wnhsiDw70axCxfJwCQzi9d3IbP+sAMBieNXoItKE5AwflNhKgCwJAsmPQwBAOVj/dvhIgjLdk+MLoDoNPz5lOduBzxmLk+bnFUzAUz13Akx3bHhAhMjykt2fjXxoIZwdAcqIoIGQnkjJ6gMAaWwJDMJCC+TmLobL3iYFBAiKLDgkQotvz6y8dEcZLeb3L8ILRJWXAEkY08AVIc3nyXigAIgNDniaW28d0kKSGYxqa//7UAGD50kR4z0O9aPggKwCzFDQ+HkoSUAAjBgRL/uKogEfIHL/bEiGi558zGoxn93qv4a9ACsYEL/nczPAUGHIVEMNqiQgZOTxnNBhXNz7l9ZGxvYaXjEoqA0EKLtIsJ32ov2+SywXWn3g1QGLQ6X0LshhORDWJBoi3A4A45FtAoPEDsyqoUAYkeQxKjcArAYXwTpHFOC0s0SCEVVLCeLaQT3l9kD383FLQIwElopd8NwcQ5tcmkWHllDCubXzV62sMv5IU9EjAuLwrgoEBQgGKSCHk3CBPCT1BMPbO92oEcMjBAggVTSKXFLRIwKhUnBSCYjBEnswBoZB/UYjPuUEeDXqCYOxufCnfG73+8HS/KugiBTUJCBn5o8AQAhkVOKMWaeEYAUhARCDoQQ7HVYxP5HsxAnjlYLDLPVEZrCEBhcYPF+IL+Xc0+NJBnAHBkcMGEIxrGV8kfYoc1EDgUgWC58e5NfH0QLN9swTMJF9sSEr+aax/AUTMCzqBYFzV+I2coKpB5Kz9sxwiVEpAoeOXG9VD+Lg00AqCcXXjV0jDWjkoKYNcCuaG79EFlFi/Kv8EwielgYQQBnATw/EsxrcQQ2+5WFAFNVIwkYC5ShC6gCT5M8o/VQFQvEAAQY06GH32D6whVeM7iKHICQiOUCUFkSgRx1Qgk4FcF5Ac/zLKP1EBGEEwH3stCMbajl6N8U3E0FIutnq/NiYm5H1KBpJdQCPrFwkf0EaWCJ8aEYwIGK2hn8vrbuN7OUGDKmiVggmpyuv8kA52sB3AGQjH1+SGjSOAl/CxEQHspHCsyftshW4tYuhQBaLBs44gOfJtlICq/MvKvGwEgDbCV4ABfKRwNOV9zcDnIIaC4V1SMNginVkChrKeUNQBHGXeGsKXG9/DB0bP/B5F0nIQ9CSGrumhSimo3W+e+4OsBAxymTeuAXQjfBxQBASM5rxPGf0CxNA6NqZ5P1ckKjqBjrm/BAhSmRf6Ez4KKBY+MLpCP2X0CxFDkQwKnk91/vIOoUsChrqmzxqEr4YPjN7Qf2li2GteUFosokpAC+tXmj5rEz6SDxAIGKtCP2X0MxPDrvOCXgloXO1zdsKnpAIqCgxatY8N/cDn/WZiaFAFy/Py29Exxb9kRIt/CS5DvkcA+jYQxwPpc7WuqHRuqAhbPJc6/4Qt+QgQhCoZd2DnJobOVURmKSitB1RYv2fKx0r4WNYPBB9gppqK94DyNYOH+HGPFyevFzGkPCbzsNzLYg+d/8u9PYkexH1xVJg/K49MBS8RjlWajJLOAZW2tHTMpW0O+KPJK5THyVDTSAyHLMKUgAuQTo4FKM8XdR81Es5HCjy4fJrSMG4f0/KPbPrUED5Q2r6Cl5PvkUWBkfX+SqT1Iob3uz+399P9UbUtJl8xKw+xJkrW3mTgtY2IUDt8LDfj8HmMIPnCz16ETyvukKmAknsCERzdA5TB2E1rIIbT8b3ycLP7HWCL8WuXiVE4vU2AgvwHwtihZTuYeBQYFyf8+OUWnr/Y7kGKhPxrBUEMJJeXR6/VosDo9v6WPGQghuMmwHsf3MEPv/06/Pi7X4F/ffgSxkHKT3iGjYHSn7sdKp+9OsJPf/cO/OQ378AXXn2wv68b4Yumk0QvVyQe+3j09+haKZsY1140chHDMEeAAz99tju51/rz5MFmb6qF8PWq8GWdSav2dz1+bGePmu5n9ScznGGKDhIxPIJre0Toy3tkIsDlfiZvf7CLVIf0NNcBOhE+YIhfRX6XFr7MxzRqup80MlOBM0kQjRiGJMEfT/B1eX6gFrCci/A5vfx0f4SN6MYgerGi9/noALboQBHDntu7nQkMzRU+pdJqlePy34Ecfh24rlo9N7ARSFE5zAWcqzf+KTzF5WANBFVpM39eqEnb5d+DdQK46kM8JWUIRS/gJiJAa4UvVJw/o1S32G5gPbSGGyhNCPHxUMj4G8oBOgg07uONoGoqMdhves1QbeCg9NwrosOpHh9uKwJAWzdPW+NQk6LzXM+l1MHyYlMkAOiC3HB78Z8snlkIn6yE+EEYkyMyf+evHUzhw4CsmtTBR4LbAUIAUAdbxRJ5Dg7KYytTscVhBy101+YWC2J5OXgrxg9pK9kodT0OEoLB4YxpgLLzYBqgdIYVs35lJ3bpLVqu8roGFV3QKk4l2cmYBihAjNLCTw0cpr13vSch8ONLnp9tBX68Fefp6cPuRZthKgvvuz6A87zAVA7ennYF9TRquOqe1tiRJn+oz94334JlehbA7OHS/JlJt3a67Mc52gcvdn2KDz6+hyfjsOtZbCEeF5v+fbQ5gMM0xGno3hXNHGOakvoJozv/Kx7eIiuhw9Vcprf5cNej//6v3oH/fbLdGYANY0eghN3z7+Gbr78CP/rOl/aRQwPP5njcb3zjGXzrq5+Dh5uwnwdY1gvsHn5xh/CDX/4F/vrvF/vGkbbJY9IIEjaryM+9GiGk1VCBaQdb8r8nRHvlSnUZ4IiAu51n/uGtD3azBHc74wynMAzREMnxn51t4D/P733f5zAXAl9+7eH+l/v5+hefwFv//Bgejxu4ozzY0K/vYWQqRZARwLqurko5WAsWHYpA01t8/vEGpqh88L5smij25uNc16sPB/dnTCDYEnl2iiLT595tZ/AvMbw+1zcYWYoeo3t3jTXAQQ5ztpPA+90X3GCIiBgWUSjg4blYCbQNNbmLUSQLxPo8pYff28giV9I4lxkcoR84epUB2MUjAZKR8bBi7SFUaHNPmjVHWcY+g/sbdPxwDhyh49AGNYiargtYEHGB0mGFkTtfG2HoQfK6giMwF2as288uqStwi0mWXv7a3m9QU640XC2zKQDgOgqgCRyddi8nIwCRJlYqFdKqpgfXMhqZ4hhsBMBiMYUCDuO+feZw18kSIevXU8vOwtE481DneeK+YuTQ4Twodoij6+AhayQ4HMhbM6qwKYDowhUDqLDSDEKoMDIaSbhyztgUikwE4LZHt3pnLTjW9D3W00K86LNP7aFmxZHFyJIhrUZmm24hZBHAmpfQ/uU0cJCPdQaFvLFFNtJ1DjA6jNyaLrXvNYBnsSTUdQaD8Qv11YGGVc3xEvKVL9Ane2vbyeD2RbCoqXF17XMGW9d8UO+iU8eMcNafoSqXSshG4QtaeSKufJbxtPMHInaoOTScw9DuIEW5F+1pYrCceMsJonO5bhBye/aeBsfsBMXGPzwI8z8XSQEKOKTXueyiAaDVyKQhJSOLFT9c5aQvQEhAcOEgjMBftVRh86bIjPypnc7H0MvISOtG/jE0SprGEICZ8RMQ4MH193fhGRO94ZyRIEZ7jcUaVQaTtzoOuNXI2M37j/+HeDr+CATLf2vyADRGtBXAYU05gy0k20OWyciIZ6XW8ThWHAFygKwT35GIwo7PtIKjMuUMa4Vks5FxPQWA88nHEgTL7/GErgHKPABYPkMCh01xoQs4w9pGtnyh/KCxk/GPfySsH2ePP0sEsHl0k8PUpE7MAYDrGdmCzCLqYL8IkLP+BQgZB1gLBAhG8IPM1k32Qb99BpcExPrw40st7SE5HLZvgtMmj1Hix3gEAKPHakBG/SJkWwqe7pPOIwrgsCoAp/OOuQHjCyJQO7DNM+vkQH6+b65ycPNeusnedh1cEY+bS02/yRU8Qnnp8Gkq+MVufPfuHptHz/J1A+NxUQggmsK/x8l6EfGxysjccxQjk8DK/8Y+Zf/XnmwOX3BTdoVio00LQ3YLe+DpIz8d+mQHnOcvEXJczbuc/e39T+DBcNhNLDawGv6hDRweKT5WeXL0PI+RC2+Prp+TvmfbIOjTRxv47fe+luylGKSLhOEJKJYlZdM2cZN3//zN9+Bnv393v2nkPoLgqf483X5/t+Dk8YOBXDsghn+nCqsGxwQAjyeL3ktcg9c67JEuhWpvzc4LQ9b++Wi3Vey0q+m0DuDldlvIzTGcFo7knrxEAQc3yL3YTNAF0I2ecC0alwEGm+uzfWwXu3di5O4oUjFVPQWNKcSPm5l2Qqo0sGxMWQzMhX8Pybaqg1HzSkuKqMr1geMLURm307qA1ST9cWlYyf4Frxe83+PZJjlpqDkMPRGV5yTtixY1etJVrvcHF3fH8ruicN4skUDhBqw9nMphqM0pajiqaQ6dzudZhjR6DHksGYs6j0g4kub9HbmBhRwOFg+u+dB44sZEghC7dgPPEgEwGighTjYZ+pEAiDE6kOe6MvzPxzJUs05PGNMOLL8PbwgETLcxN7o4lgYG7uAETBFRGMMMVbrTKGlMUYB8/c3QgGikDMW8z0U6tk5vbBpVcQMUUoAJfY4ul+b5at66GTIIRXjnPJvyXmuqNBV/HLJyaCUY5igAOjvGKJ/eAhdYvB7pjiNHDK3nxhodrMRS7gbWVqccj2up4CoG5SsnbKiZAw8xrD5vzuhMk0D01ae5PGZCsnZCEG8KBJTXx9HMSgy9kVN8HO3cYKS2JosrgKbqnnBfUgKmGkHR8w+7g4ZjaD283VRi37p2Dc1bvqHjWEdYjmlyne0S/pFWAtFJp6KCVjl0R10PN1uuGqbU8HMgkLV8pq8/Xz0zBwl5rfsQ4ooKPBwPT57/XX2NmuO95mN6tDl0+ri5QyDuZ0FSkTK93k/dP0rGPbhher17djZAAgfRK+CeM7VRnz4e4Bdv/h3++PZ/90Mdw4KjeFUvsbdQCKYmDxohw8nR6VinbeDe3u0B+HS/HR2qxhcjhIEYVkUCQ6QYxU7e/KfWz5dSABUhZjDlz8FD3JhO7p//8Rz+9O5H0VXDQnqlruzKoUDsBRgAGncfj1cPpW3Gacjj0S4STL/bLZ1nm4yvFY1aVVl+7WBtHMyVApCOGuTlUbOIMJ3g3cVY9yf2ycMhMXJhYOaCCsDtDCq5PCrddGKdwTbiKpT+rzG+mRjWqjN2JrDBy0UDC4RPBsHun/sshB/DUTzbl4Z9ZICA5tWy2ux9fvJJr28wvqeb6G0oUVXfwdTGNYYZE5ExngByCTcjsQojREu/0jUA0aIQwPRvcs3A6bwkRZ/8c7NjRGotQiU3ULuJVuXA2GdUp3qU+8hUADbCp0cCWPbSXWQiplugz8QwBsFJUWQeHeI2LharcLXCCrUOv1zUgvTfvYgh9i0pD2Ir2FncEXOV8YsmCzizxZxcyZXzTio6QLwQBJn7iHIvF2Xy45AKQV2JIXQoKZNbxAieLxI+kHM8d2HlPBIsjwMdDZKNko9/J8uesdz+pcu6P6QnaiROQP7dixii3m62rDAa1KkfFIiRseOloZ58HIR8C2XuzZsySY5H5iQJu4okfCH39vwziQWmxT4EKxNDK1+zbRKVe7BQ3ImrpE25PrsUCpfnZ+/GaCOLOQrEF2HIlQDrKdY+PKCtPy95vbFi2IsYsrLQtEsYlnvUt1T4zCCALCUApJdkhxQUSWqAjPyFuk0pvVLQJQdhZW6AvvUDo3XBRlG9yx7TKnwUCBajIqYXSpjz/LEJFINluRBC9MUTjpBcDCLw299IV/EyrrDVVAE3/byG8b2h37ZPoFDcWZ3wUREASiDkJ9YtAaPlYVVSsFYOrkUMwZHuTBtFUoYGggcYKnyIqXfHBuZqAEmOj16TACEqFxbGDQG0XTJQWT+nGt2rCtasGGLD8nB1baCxpWsmfFGIJ1OCIP9iohdfaGkVCcgBCPl9ETg5yHGCrsTQEPrdW8W2VPhiw3IhnksJHBA41j+Dit0tMzginjJvL4V9l9fD+kWj9r2CGc+2ED72cajI+RzrjwxPSkDPvKFXCkoNIsJT1zS+d5xudFfDWglfFuITXkDk/Dl6xF+cYv0x42+RgN2kYI3XQ7+i0ToAcIKgIHxKmTdp+kAW6oFXAc0SsEEKspU5SQ5eifHrt4s39/UJLgA84YtBE4d1LTWoEjADBrX0feE2YBu3Fr3dEO5FgzcQw/MAAGAVwifJPwoIZgmo7cClykBg98GnUoVGDk1efwbjN18woivhU+QfBYRWCUgVktxSUJCD1dNDZzJ+lyuGVBM+oszrln8UGDgJGBz76KF95y2yBuA1vFIu1rjBRQGwHIiX8EFZ3TPJP64DyOyvT4GieeNpKxBa5eDKxu97zSCB8JHNHIv8M7J+VgI2Xp7OJAUBVDkoGb6phXxVAMhAEHs3pedN8k+b+zNKQK42AAHoK5mg8yocnnnBGjlIrTC6SgBEB2rp/OXXuM/LuRLr58DgkoCER8dDKdrJdklBSwQwEsPrBgDDC6Rp3oSNS7X+bLKHqwfUSECo6Qg6m0TW0C9Fh5sBgJQSkgFOTv7lhZ1QDnwWYHBKwGT8zOphTinYSw7eJgCYlEDO+UmDHoa5P1UC5kvdYu8D9BnbYPSecvC2AUCkBLP8m9cCGuf+VAmI7TJQ3Kq9Yl5QKxd/agCQfHmr/Isv+GCY++spAU377zV0Bi1t5E8fALi0wABBZP1IX+eQlYCg7B1PLY1rlYKGTuGlDH9ZAGQnhwNCsdqHIHjJTuPMIGg8DBqnELa0DQ1SsEEOfuYAoAHBMvdHncS8LmCVgOeQgpf2+KsEQHFinHN/tV3ApgtaolwqvnbDzz//ByYukm7HAIFqAAAAAElFTkSuQmCC";
+
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Branded empty-site `index.html` with inline app logo + absolute folder path.
+pub fn empty_site_placeholder_html(absolute_path: &Path) -> String {
+    let path_disp = absolute_path.display().to_string();
+    let path_esc = html_escape(&path_disp);
+    let path_json =
+        serde_json::to_string(&path_disp).unwrap_or_else(|_| format!("\"{path_esc}\""));
+    format!(
+        r##"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -352,29 +436,97 @@ const EMPTY_SITE_HTML: &str = r#"<!DOCTYPE html>
   <title>DevStack — empty site</title>
   <!-- devstack-empty-site -->
   <style>
-    :root { color-scheme: light; }
-    body {
+    :root {{ color-scheme: light; }}
+    body {{
       margin: 0; min-height: 100vh; display: grid; place-items: center;
       font-family: "Segoe UI", system-ui, sans-serif;
       background: linear-gradient(160deg, #0f172a 0%, #1e293b 45%, #0ea5e9 160%);
       color: #e2e8f0;
-    }
-    main { text-align: center; padding: 2rem; max-width: 28rem; }
-    h1 { font-size: 1.35rem; font-weight: 650; margin: 0 0 0.5rem; letter-spacing: -0.02em; }
-    p { margin: 0; opacity: 0.78; line-height: 1.45; font-size: 0.95rem; }
-    .brand { font-size: 0.75rem; letter-spacing: 0.14em; text-transform: uppercase;
-      opacity: 0.55; margin-bottom: 1rem; }
+    }}
+    main {{ text-align: center; padding: 2rem; max-width: 34rem; }}
+    .lockup {{
+      display: inline-flex; align-items: center; gap: 0.7rem;
+      margin: 0 auto 1.25rem;
+    }}
+    .lockup img {{
+      width: 40px; height: 40px; border-radius: 10px;
+      box-shadow: 0 4px 18px rgba(14, 165, 233, 0.35);
+    }}
+    .lockup span {{
+      font-weight: 650; font-size: 1.05rem; letter-spacing: -0.02em;
+    }}
+    h1 {{ font-size: 1.35rem; font-weight: 650; margin: 0 0 0.5rem; letter-spacing: -0.02em; }}
+    p {{ margin: 0; opacity: 0.78; line-height: 1.45; font-size: 0.95rem; }}
+    .path-row {{
+      margin-top: 1.1rem; display: flex; flex-wrap: wrap; align-items: stretch;
+      justify-content: center; gap: 0.45rem;
+    }}
+    .path-row code {{
+      flex: 1 1 12rem; max-width: 100%;
+      font-family: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+      font-size: 0.78rem; line-height: 1.35; text-align: left;
+      background: rgba(15, 23, 42, 0.55); color: #e2e8f0;
+      border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 8px;
+      padding: 0.55rem 0.7rem; user-select: all; overflow-wrap: anywhere;
+    }}
+    .path-row button {{
+      border: 1px solid rgba(148, 163, 184, 0.35); background: rgba(30, 41, 59, 0.9);
+      color: #e2e8f0; border-radius: 8px; padding: 0.45rem 0.75rem;
+      font: inherit; font-size: 0.8rem; cursor: pointer;
+    }}
+    .path-row button:hover {{ background: rgba(51, 65, 85, 0.95); }}
   </style>
 </head>
 <body>
   <main>
-    <div class="brand">DevStack</div>
+    <div class="lockup">
+      <img src="{logo}" width="40" height="40" alt="DevStack" />
+      <span>DevStack</span>
+    </div>
     <h1>No index file yet</h1>
     <p>Drop an <code>index.php</code> or <code>index.html</code> into this site folder to get started.</p>
+    <div class="path-row">
+      <code id="site-path">{path}</code>
+      <button type="button" id="copy-path" title="Copy path">Copy</button>
+    </div>
   </main>
+  <script>
+    (function () {{
+      var path = {path_json};
+      var btn = document.getElementById("copy-path");
+      if (!btn) return;
+      btn.addEventListener("click", function () {{
+        var done = function () {{
+          btn.textContent = "Copied";
+          setTimeout(function () {{ btn.textContent = "Copy"; }}, 1200);
+        }};
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+          navigator.clipboard.writeText(path).then(done).catch(function () {{
+            try {{
+              var t = document.createElement("textarea");
+              t.value = path; document.body.appendChild(t); t.select();
+              document.execCommand("copy"); document.body.removeChild(t); done();
+            }} catch (e) {{}}
+          }});
+        }} else {{
+          try {{
+            var t = document.createElement("textarea");
+            t.value = path; document.body.appendChild(t); t.select();
+            document.execCommand("copy"); document.body.removeChild(t); done();
+          }} catch (e) {{}}
+        }}
+      }});
+    }})();
+  </script>
 </body>
 </html>
-"#;
+"##,
+        logo = EMPTY_SITE_LOGO_DATA_URI,
+        path = path_esc,
+        path_json = path_json,
+    )
+}
+
 
 fn has_index_file(docroot: &Path) -> bool {
     docroot.join("index.php").exists()
@@ -422,16 +574,24 @@ pub fn is_empty_site_placeholder(docroot: &Path) -> bool {
     raw.contains(EMPTY_SITE_MARKER)
 }
 
-/// If `docroot` exists and has no index file, write a branded static placeholder.
+/// If `docroot` exists and has no index (or only our placeholder), write/update the branded page.
 pub fn ensure_site_placeholder(docroot: &Path) -> Result<()> {
     let root = expand_home(docroot);
     if !root.is_dir() {
         return Ok(());
     }
-    if has_index_file(&root) {
+    let index = root.join("index.html");
+    let only_ours = index.exists()
+        && !root.join("index.php").exists()
+        && !root.join("index.htm").exists()
+        && fs::read_to_string(&index)
+            .map(|s| s.contains(EMPTY_SITE_MARKER))
+            .unwrap_or(false);
+    if has_index_file(&root) && !only_ours {
         return Ok(());
     }
-    fs::write(root.join("index.html"), EMPTY_SITE_HTML)?;
+    let abs = dunce::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    fs::write(index, empty_site_placeholder_html(&abs))?;
     Ok(())
 }
 
@@ -456,7 +616,29 @@ fn host_of_url(url: &str) -> Option<String> {
     }
 }
 
-fn http_probe(host: &str, port: u16, https: bool) -> ProbeResult {
+fn probe_looks_transient(probe: &ProbeResult) -> bool {
+    if probe.code == "000" || probe.code.is_empty() {
+        return true;
+    }
+    let err = probe.error.as_deref().unwrap_or("").to_ascii_lowercase();
+    err.contains("timed out")
+        || err.contains("timeout")
+        || err.contains("operation timed out")
+        || err.contains("error code 28")
+}
+
+/// True when the effective URL is WordPress's installer (not a generic timeout).
+pub fn is_wordpress_install_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let path = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .and_then(|rest| rest.find('/').map(|i| &rest[i..]))
+        .unwrap_or("/");
+    path.contains("wp-admin/install.php") || path.contains("/install.php")
+}
+
+fn http_probe_once(host: &str, port: u16, https: bool, max_time_secs: &str) -> ProbeResult {
     let url = if https {
         format!("https://{host}:{port}/")
     } else {
@@ -471,7 +653,7 @@ fn http_probe(host: &str, port: u16, https: bool) -> ProbeResult {
             "--max-redirs",
             "5",
             "--max-time",
-            "3",
+            max_time_secs,
             "--resolve",
             &format!("{host}:{port}:127.0.0.1"),
             "-o",
@@ -486,11 +668,7 @@ fn http_probe(host: &str, port: u16, https: bool) -> ProbeResult {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let mut parts = stdout.splitn(2, '\t');
         let code = parts.next().unwrap_or("").trim().to_string();
-        let final_url = parts
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let final_url = parts.next().unwrap_or("").trim().to_string();
         let final_url = if final_url.is_empty() {
             url.clone()
         } else {
@@ -508,6 +686,7 @@ fn http_probe(host: &str, port: u16, https: bool) -> ProbeResult {
                 }),
             };
         }
+        // 2xx / 3xx / 4xx = reachable (app responded).
         let ok = code.starts_with('2') || code.starts_with('3') || code.starts_with('4');
         if ok {
             return ProbeResult {
@@ -579,7 +758,42 @@ fn http_probe(host: &str, port: u16, https: bool) -> ProbeResult {
     }
 }
 
+fn http_probe(host: &str, port: u16, https: bool) -> ProbeResult {
+    let first = http_probe_once(host, port, https, "10");
+    if first.ok || !probe_looks_transient(&first) {
+        return first;
+    }
+    // One retry on timeout / HTTP 000 — cold php-cgi often needs a second hit.
+    http_probe_once(host, port, https, "10")
+}
+
+/// Hit each site's Open URL once so php-cgi / FPM workers are warm before probing.
+pub fn warm_php_runtimes(paths: &Paths, state: &AppState) {
+    let _ = paths;
+    for site in &state.sites {
+        let (port, https) = site_listen_port(site, state);
+        // Short warm curl — failures are fine; probe_all will report properly.
+        let _ = http_probe_once(&site.domain, port, https, "5");
+    }
+}
+
+/// Fill `php_version: null` with the installed default and report whether state changed.
+pub fn migrate_null_php_versions(state: &mut AppState) -> bool {
+    crate::services::php_runtime::migrate_null_php_versions(state)
+}
+
+fn php_missing_hint(state: &AppState, site: &SiteRecord) -> Option<String> {
+    let ver = site.php_version.as_deref()?;
+    if crate::config::find_installed(state, "php", ver).is_some() {
+        return None;
+    }
+    Some(format!("PHP {ver} not installed"))
+}
+
 fn php_fcgi_hint(paths: &Paths, state: &AppState, site: &SiteRecord) -> Option<String> {
+    if let Some(missing) = php_missing_hint(state, site) {
+        return Some(missing);
+    }
     if !crate::services::httpd::site_uses_apache(site) {
         return None;
     }
@@ -607,6 +821,10 @@ fn php_fcgi_hint(paths: &Paths, state: &AppState, site: &SiteRecord) -> Option<S
             "PHP/FCGI for {ver} does not appear to be listening ({listen})"
         ))
     }
+}
+
+fn php_probe_hint(paths: &Paths, state: &AppState, site: &SiteRecord) -> Option<String> {
+    php_fcgi_hint(paths, state, site).or_else(|| php_missing_hint(state, site))
 }
 
 fn format_probe_failure(
@@ -772,7 +990,20 @@ pub fn probe_site_reachability(
 
     let probe = http_probe(&details.site.domain, port, https);
     if !probe.ok {
-        let php_hint = php_fcgi_hint(paths, state, &details.site);
+        // WP installer redirect can also surface as a non-ok code on some setups.
+        if is_wordpress_install_url(&probe.final_url) {
+            details.site.status = "warning".into();
+            return SiteReachability {
+                state: "warning".into(),
+                message: Some("WordPress not installed".into()),
+                log_excerpt: None,
+                tcp_ok: true,
+                http_ok: false,
+                probed_url,
+                probed_port: port,
+            };
+        }
+        let php_hint = php_probe_hint(paths, state, &details.site);
         details.site.status = "warning".into();
         return SiteReachability {
             state: "warning".into(),
@@ -789,12 +1020,40 @@ pub fn probe_site_reachability(
         };
     }
 
+    // WordPress landed on the installer — reachable, but not a working site yet.
+    if is_wordpress_install_url(&probe.final_url) {
+        details.site.status = "warning".into();
+        return SiteReachability {
+            state: "warning".into(),
+            message: Some("WordPress not installed".into()),
+            log_excerpt: None,
+            tcp_ok: true,
+            http_ok: true,
+            probed_url,
+            probed_port: port,
+        };
+    }
+
     // Empty branded placeholder → warning (not "Running").
     if empty_placeholder {
         details.site.status = "warning".into();
         return SiteReachability {
             state: "warning".into(),
             message: Some("No index file".into()),
+            log_excerpt: None,
+            tcp_ok: true,
+            http_ok: true,
+            probed_url,
+            probed_port: port,
+        };
+    }
+
+    // Soft warning when a missing PHP version is configured (site may still serve via fallback).
+    if let Some(hint) = php_missing_hint(state, &details.site) {
+        details.site.status = "warning".into();
+        return SiteReachability {
+            state: "warning".into(),
+            message: Some(hint),
             log_excerpt: None,
             tcp_ok: true,
             http_ok: true,
@@ -967,8 +1226,23 @@ mod tests {
         ensure_site_placeholder(&dir).unwrap();
         let html = fs::read_to_string(dir.join("index.html")).unwrap();
         assert!(html.contains(EMPTY_SITE_MARKER));
+        assert!(html.contains("data:image/png;base64,"));
+        assert!(html.contains("alt=\"DevStack\""));
+        let abs = dunce::canonicalize(&dir).unwrap();
+        assert!(html.contains(&html_escape(&abs.display().to_string())));
         assert!(is_empty_site_placeholder(&dir));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_site_html_escapes_path() {
+        let p = PathBuf::from(r#"C:\Users\Marcin\Sites\acme & <dash>"#);
+        let html = empty_site_placeholder_html(&p);
+        assert!(
+            html.contains(r#"<code id="site-path">C:\Users\Marcin\Sites\acme &amp; &lt;dash&gt;</code>"#)
+        );
+        // Clipboard payload is a JS string (JSON-escaped), not raw HTML text nodes.
+        assert!(html.contains(r#"var path = "C:\\Users\\Marcin\\Sites\\acme & <dash>";"#));
     }
 
     #[test]
@@ -997,5 +1271,68 @@ mod tests {
             Some("blog.test".into())
         );
         assert_eq!(host_of_url("http://LOCAL.TEST/"), Some("local.test".into()));
+    }
+
+    #[test]
+    fn wordpress_install_url_detection() {
+        assert!(is_wordpress_install_url(
+            "https://blog.test:8444/wp-admin/install.php"
+        ));
+        assert!(is_wordpress_install_url(
+            "http://blog.test/wp-admin/install.php?step=1"
+        ));
+        assert!(is_wordpress_install_url("https://blog.test/install.php"));
+        assert!(!is_wordpress_install_url("https://blog.test/wp-admin/"));
+        assert!(!is_wordpress_install_url("https://blog.test/"));
+    }
+
+    #[test]
+    fn migrate_null_php_sets_default_and_persists_shape() {
+        let mut state = AppState::default();
+        state.stack.php_version = Some("8.4".into());
+        state.sites.push(SiteRecord {
+            id: "parked".into(),
+            name: "parked".into(),
+            path: PathBuf::from("/tmp/parked"),
+            domain: "parked.test".into(),
+            php_version: None,
+            node_version: None,
+            https: true,
+            web_server: Some("nginx".into()),
+            framework: None,
+            database_engine: None,
+            database_name: None,
+            database_user: None,
+            database_password: None,
+            status: "stopped".into(),
+            is_template: false,
+            parked: true,
+            xdebug: false,
+            tld: "test".into(),
+            aliases: Vec::new(),
+            wildcard: false,
+        });
+        assert!(migrate_null_php_versions(&mut state));
+        assert_eq!(state.sites[0].php_version.as_deref(), Some("8.4"));
+        assert!(!migrate_null_php_versions(&mut state));
+    }
+
+    #[test]
+    fn fresh_log_excerpt_ignores_pre_start_lines() {
+        let dir = temp_dir("log-fresh");
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        fs::create_dir_all(paths.logs.join("nginx")).unwrap();
+        let log = paths.logs.join("nginx/error.log");
+        fs::write(
+            &log,
+            "2023/11/08 10:00:00 [error] mailpit upstream timed out\n\
+             2026/11/11 12:00:05 [error] connect() failed\n",
+        )
+        .unwrap();
+        let since = "2026-11-11T12:00:00Z";
+        let excerpt = fresh_error_log_excerpt(&paths, false, Some(since)).unwrap();
+        assert!(excerpt.contains("connect() failed"));
+        assert!(!excerpt.contains("mailpit"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

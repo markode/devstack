@@ -68,6 +68,7 @@ beforeEach(() => {
   currentStack = baseStack;
   progressHandler = null;
   finishStart = null;
+  vi.clearAllMocks();
 });
 afterEach(cleanup);
 
@@ -109,6 +110,34 @@ describe("SitesPage", () => {
     });
     expect(await screen.findByTestId("stack-phase-nginx")).toBeTruthy();
 
+    await act(async () => {
+      finishStart?.();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("stack-banner").getAttribute("data-state")).toBe(
+        "running",
+      ),
+    );
+  });
+
+  it("ignores a second Start click while start is in flight", async () => {
+    const client = await import("../client");
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("stack-banner").getAttribute("data-state")).toBe(
+        "stopped",
+      ),
+    );
+    const start = screen.getByRole("button", { name: "Start" });
+    fireEvent.click(start);
+    fireEvent.click(start);
+    fireEvent.click(start);
+    await waitFor(() =>
+      expect(screen.getByTestId("stack-banner").getAttribute("data-state")).toBe(
+        "starting",
+      ),
+    );
+    expect(client.startDevStack).toHaveBeenCalledTimes(1);
     await act(async () => {
       finishStart?.();
     });

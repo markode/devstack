@@ -4,11 +4,36 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./api";
-import { ensureHttpsSchemeForSslPort } from "./siteUrl";
+import {
+  ensureHttpsSchemeForSslPort,
+  formatSiteUrl,
+  stackSslPorts,
+} from "./siteUrl";
+import type { SiteRecord, StackStatus } from "./types";
 
 function errMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+type UrlSite = Pick<SiteRecord, "domain" | "https" | "webServer">;
+type UrlPorts = Pick<
+  StackStatus,
+  "httpPort" | "httpsPort" | "apacheHttpPort" | "apacheHttpsPort"
+>;
+
+/**
+ * Single Open helper for SiteTile / SitesPage detail.
+ * Always builds the URL with `formatSiteUrl` (http when https=false with the
+ * correct apache/nginx listen port). `ensureHttpsSchemeForSslPort` only rewrites
+ * http→https when the listen port is a known SSL port — never remaps
+ * http://host:8088 onto 8444.
+ */
+export function siteOpenUrl(
+  site: UrlSite,
+  stack?: Partial<UrlPorts> | null,
+): string {
+  return formatSiteUrl(site, stack);
 }
 
 /** Open http(s) in the system browser. */
@@ -29,6 +54,16 @@ export async function openInBrowser(
   } catch (e) {
     throw new Error(`Could not open browser: ${errMessage(e)}`);
   }
+}
+
+/** Open a site via `formatSiteUrl` + optional SSL-scheme safety net. */
+export async function openSiteInBrowser(
+  site: UrlSite,
+  stack?: Partial<UrlPorts> | null,
+): Promise<string> {
+  const url = siteOpenUrl(site, stack);
+  await openInBrowser(url, { sslPorts: stackSslPorts(stack) });
+  return url;
 }
 
 /** Open a folder or file via Rust (explorer/open) — never "Not allowed". */

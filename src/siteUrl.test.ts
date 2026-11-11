@@ -33,6 +33,30 @@ describe("formatSiteUrl", () => {
     );
   });
 
+  it("keeps apache http on :8088 and never remaps to :8444", () => {
+    const stack = {
+      httpPort: 8080,
+      httpsPort: 8443,
+      apacheHttpPort: 8088,
+      apacheHttpsPort: 8444,
+    };
+    const apacheHttp = {
+      domain: "test.test",
+      https: false,
+      webServer: "apache",
+    };
+    const apacheHttps = { ...apacheHttp, https: true };
+    expect(formatSiteUrl(apacheHttp, stack)).toBe("http://test.test:8088");
+    expect(formatSiteUrl(apacheHttps, stack)).toBe("https://test.test:8444");
+    // Safety net must not rewrite a plain HTTP listen port onto SSL.
+    expect(
+      ensureHttpsSchemeForSslPort("http://test.test:8088", stackSslPorts(stack)),
+    ).toBe("http://test.test:8088");
+    expect(
+      ensureHttpsSchemeForSslPort("http://test.test:8444", stackSslPorts(stack)),
+    ).toBe("https://test.test:8444");
+  });
+
   it("falls back to defaults when the stack is unknown", () => {
     expect(formatSiteUrl(site, null)).toBe("https://blog.test");
     expect(

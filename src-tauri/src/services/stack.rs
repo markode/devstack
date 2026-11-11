@@ -142,6 +142,10 @@ pub fn apply_stack_with_progress(
     let total_sw = crate::services::perf::Stopwatch::start();
     stack_phase(progress, "ports", "Checking ports…");
     refresh_site_metadata(state);
+    if crate::services::sites::migrate_null_php_versions(state) {
+        let _ = save_state(&paths.state_file, state);
+    }
+    crate::services::vhost_ext::purge_stale_vhost_confs(paths, state);
 
     state.runtime.stack_intentionally_stopped = false;
     state.runtime.last_start_at = Some(chrono::Utc::now().to_rfc3339());
@@ -226,6 +230,8 @@ pub fn apply_stack_with_progress(
         match start_dns(paths, state, state.stack.dns_port) {
             Ok(()) => {}
             Err(e) => {
+                // Expected on some Windows setups after exhausting candidates —
+                // warn (not error) so the Logs badge does not increment.
                 crate::applog::warn(
                     "dns",
                     &format!("{e} — continuing with hosts-file resolution only"),
@@ -304,6 +310,8 @@ pub fn apply_stack_with_progress(
         state.runtime.last_start_error = Some(e.to_string());
     } else {
         state.runtime.last_start_error = None;
+        // PHP warm-up lives in list/probe (warm_php_runtimes), not here — curling
+        // every site after apply blows the warm apply_stack CI budget.
     }
     save_state(&paths.state_file, state)?;
     if let Some(e) = nginx_err.or(apache_err) {
@@ -490,19 +498,27 @@ pub fn apply_site_environment_change(
     }
 
     if now_apache != was_apache {
-        // Dual-bound vhosts: both front-ends already serve every site. Ensure the
-        // destination is up, then rewrite WP URLs — no Windows FOREGROUND stop+start.
+        // Sites are single-bound: start/reload the destination and reload the
+        // previous front-end so its stale vhost conf is purged.
+        crate::services::vhost_ext::purge_stale_vhost_confs(paths, state);
         if now_apache {
             if state.runtime.apache_pid.filter(|p| is_running(*p)).is_none() {
                 start_apache(paths, state)?;
             } else {
-                // Config already has this site; fingerprint no-op on Windows.
                 let _ = reload_apache(paths, state);
             }
-        } else if state.runtime.nginx_pid.filter(|p| is_running(*p)).is_none() {
-            start_nginx(paths, state)?;
+            if state.runtime.nginx_pid.filter(|p| is_running(*p)).is_some() {
+                let _ = reload_nginx(paths, state);
+            }
         } else {
-            let _ = reload_nginx(paths, state);
+            if state.runtime.nginx_pid.filter(|p| is_running(*p)).is_none() {
+                start_nginx(paths, state)?;
+            } else {
+                let _ = reload_nginx(paths, state);
+            }
+            if state.runtime.apache_pid.filter(|p| is_running(*p)).is_some() {
+                let _ = reload_apache(paths, state);
+            }
         }
         rewrite_wp_urls_for_server_switch(paths, state, &site, was_apache, now_apache)?;
         refresh_site_process_status(state);

@@ -44,6 +44,7 @@ const details: SiteDetails = {
 
 const handlers = () => ({
   onOpenDetail: vi.fn(),
+  onOpen: vi.fn(),
   onOpenUrl: vi.fn(),
   onFolder: vi.fn(),
   onTerminal: vi.fn(),
@@ -82,7 +83,7 @@ describe("SiteTile", () => {
       <SiteTile details={details} stack={stack} phpOptions={["8.4"]} {...h} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Open" }));
-    expect(h.onOpenUrl).toHaveBeenCalledWith("https://blog.test:8443");
+    expect(h.onOpen).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Folder" }));
     fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
     fireEvent.click(screen.getByRole("button", { name: "Database" }));
@@ -96,6 +97,57 @@ describe("SiteTile", () => {
     expect(h.onOpenDetail).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("site-tile-blog"));
     expect(h.onOpenDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows Install when WordPress is not installed", () => {
+    const h = handlers();
+    const emptyWp: SiteDetails = {
+      ...details,
+      site: { ...details.site, https: false, webServer: "apache" },
+      reachability: {
+        state: "warning",
+        message: "WordPress not installed",
+        tcpOk: true,
+        httpOk: true,
+        probedUrl: "http://blog.test:8088",
+        probedPort: 8088,
+      },
+    };
+    render(
+      <SiteTile details={emptyWp} stack={stack} phpOptions={["8.4"]} {...h} />,
+    );
+    expect(screen.getByTestId("site-tile-reachability").textContent).toContain(
+      "WordPress not installed",
+    );
+    fireEvent.click(screen.getByTestId("site-tile-wp-install"));
+    expect(h.onOpenUrl).toHaveBeenCalledWith(
+      "http://blog.test:8088/wp-admin/install.php",
+    );
+  });
+
+  it("surfaces PHP-not-installed reachability messages", () => {
+    const phpMissing: SiteDetails = {
+      ...details,
+      reachability: {
+        state: "warning",
+        message: "PHP 8.4 is not installed in DevStack",
+        tcpOk: true,
+        httpOk: false,
+        probedUrl: "https://blog.test:8443",
+        probedPort: 8443,
+      },
+    };
+    render(
+      <SiteTile
+        details={phpMissing}
+        stack={stack}
+        phpOptions={["8.4"]}
+        {...handlers()}
+      />,
+    );
+    expect(screen.getByTestId("site-tile-reachability").textContent).toContain(
+      "PHP 8.4 is not installed",
+    );
   });
 
   it("expands logs", async () => {

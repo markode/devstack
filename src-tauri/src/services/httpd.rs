@@ -59,11 +59,18 @@ fn php_for_site<'a>(
         .php_version
         .clone()
         .or_else(|| state.stack.php_version.clone())
-        .or_else(|| runtimes.first().map(|(v, _)| v.clone()))?;
-    runtimes
-        .iter()
-        .find(|(v, r)| *v == want || r.version == want || r.version.starts_with(&want))
-        .map(|(_, r)| r)
+        .or_else(|| runtimes.first().map(|(v, _)| v.clone()));
+    if let Some(want) = want.as_ref() {
+        if let Some(rt) = runtimes
+            .iter()
+            .find(|(v, r)| *v == *want || r.version == *want || r.version.starts_with(want))
+            .map(|(_, r)| r)
+        {
+            return Some(rt);
+        }
+    }
+    // Requested PHP missing — fall back to any installed runtime so the site still serves.
+    runtimes.first().map(|(_, r)| r)
 }
 
 fn fcgi_target(runtime: &PhpRuntime) -> String {
@@ -117,18 +124,28 @@ pub fn render_stack(
     fs::create_dir_all(paths.logs.join("apache"))?;
     fs::create_dir_all(paths.apache.join("tmp"))?;
 
+    // Drop nginx-only / deleted site leftovers before rewriting Apache vhosts.
+    crate::services::vhost_ext::purge_stale_vhost_confs(paths, state);
     if sites_dir.exists() {
         for entry in fs::read_dir(&sites_dir)? {
-            let _ = fs::remove_file(entry?.path());
+            let path = entry?.path();
+            // Full rewrite below — clear prior confs so nothing stale survives.
+            if path.extension().and_then(|e| e.to_str()) == Some("conf") {
+                let _ = fs::remove_file(&path);
+            }
         }
     }
 
     let http_port = state.stack.apache_http_port;
     let https_port = state.stack.apache_https_port;
 
-    // Dual-bind every site (see nginx render_stack). web_server preference only
-    // affects Open URL / status; both front-ends stay ready for instant toggles.
-    for site in &state.sites {
+    // Neutral default first so the first custom site is never the catch-all on
+    // :apache_http_port / :apache_https_port (avoids nginx sites' old Redirect
+    // vhosts hijacking localhost Open).
+    write_default_vhost(paths, &sites_dir, http_port, https_port)?;
+
+    // Only Apache-preferred sites — nginx sites must not leave Redirect vhosts here.
+    for site in state.sites.iter().filter(|s| site_uses_apache(s)) {
         write_vhost(paths, state, site, php_runtimes, &sites_dir, http_port, https_port)?;
     }
 
@@ -286,6 +303,62 @@ fn nix_geteuid() -> u32 {
     }
 }
 
+fn write_default_vhost(
+    paths: &Paths,
+    sites_dir: &Path,
+    http_port: u16,
+    https_port: u16,
+) -> Result<()> {
+    let docroot = paths.apache.join("default-docroot");
+    fs::create_dir_all(&docroot)?;
+    let root = crate::paths_util::conf_path(&docroot);
+    let mut body = format!(
+        r#"<VirtualHost 127.0.0.1:{http_port}>
+  ServerName localhost
+  DocumentRoot "{root}"
+  <Directory "{root}">
+    Require all denied
+  </Directory>
+  ErrorDocument 404 "DevStack: no site matched this Host header.\n"
+  ErrorLog "{err}"
+  CustomLog "{access}" common
+</VirtualHost>
+"#,
+        root = root,
+        err = crate::paths_util::conf_path(&paths.logs.join("apache/default-error.log")),
+        access = crate::paths_util::conf_path(&paths.logs.join("apache/default-access.log")),
+    );
+    // HTTPS catch-all so unmatched Host on the SSL port never hits a site vhost.
+    if let Ok(certs) = crate::services::tls::ensure_site_cert(paths, "localhost") {
+        body.push_str(&format!(
+            r#"
+<VirtualHost 127.0.0.1:{https_port}>
+  ServerName localhost
+  DocumentRoot "{root}"
+  SSLEngine on
+  SSLCertificateFile "{cert}"
+  SSLCertificateKeyFile "{key}"
+  <Directory "{root}">
+    Require all denied
+  </Directory>
+  ErrorDocument 404 "DevStack: no site matched this Host header.\n"
+  ErrorLog "{err}"
+  CustomLog "{access}" common
+</VirtualHost>
+"#,
+            root = root,
+            cert = crate::paths_util::conf_path(&certs.site_cert),
+            key = crate::paths_util::conf_path(&certs.site_key),
+            err = crate::paths_util::conf_path(&paths.logs.join("apache/default-ssl-error.log")),
+            access = crate::paths_util::conf_path(
+                &paths.logs.join("apache/default-ssl-access.log"),
+            ),
+        ));
+    }
+    fs::write(sites_dir.join("00-default.conf"), body)?;
+    Ok(())
+}
+
 /// PHP proxy directives for a vhost.
 ///
 /// Windows php-cgi needs a real filesystem `SCRIPT_FILENAME`:
@@ -345,7 +418,7 @@ fn write_vhost(
         format!(
             r#"<VirtualHost 127.0.0.1:{http_port}>
   ServerName {domain}
-{aliases}  Redirect permanent / {dest}/
+{aliases}  Redirect / {dest}/
   ErrorLog "{err}"
   CustomLog "{access}" common
 </VirtualHost>
@@ -459,6 +532,7 @@ struct StartApacheOpts {
 }
 
 pub fn start_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
+    crate::services::vhost_ext::purge_stale_vhost_confs(paths, state);
     start_apache_inner(
         paths,
         state,
@@ -684,6 +758,7 @@ fn apache_fingerprint_matches(paths: &Paths, pid: u32) -> bool {
 }
 
 pub fn reload_apache(paths: &Paths, state: &mut AppState) -> Result<()> {
+    crate::services::vhost_ext::purge_stale_vhost_confs(paths, state);
     let mut runtimes = Vec::new();
     for ver in collect_php_versions(state) {
         if let Ok(rt) = resolve_php(paths, state, &ver) {
@@ -758,6 +833,7 @@ pub fn apache_site_url(state: &AppState, site: &SiteRecord) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AppState, Paths, SiteRecord};
     use crate::services::php_runtime::PhpRuntime;
     use std::path::PathBuf;
 
@@ -822,5 +898,75 @@ mod tests {
             is_system: false,
         };
         assert_eq!(fcgi_target(&rt), "unix:/tmp/php.sock|fcgi://localhost/");
+    }
+
+    #[test]
+    fn https_redirect_is_temporary_not_permanent() {
+        let dir = std::env::temp_dir().join(format!("devstack-apache-302-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        // Minimal fake apache tree so apache_root resolves.
+        let apache_pkg = dir.join("packages/apache/2.4");
+        fs::create_dir_all(apache_pkg.join("modules")).unwrap();
+        fs::write(apache_pkg.join("httpd.exe"), b"").unwrap();
+        fs::write(apache_pkg.join("httpd"), b"").unwrap();
+        let site_path = dir.join("sites/blog");
+        fs::create_dir_all(&site_path).unwrap();
+        let mut state = AppState::default();
+        state.stack.apache_version = Some("2.4".into());
+        crate::config::mark_installed(
+            &mut state,
+            "apache",
+            crate::config::InstalledRecord {
+                version: "2.4".into(),
+                path: apache_pkg,
+                channel: None,
+                installed_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .unwrap();
+        state.sites.push(SiteRecord {
+            id: "blog".into(),
+            name: "blog".into(),
+            path: site_path,
+            domain: "blog.test".into(),
+            php_version: Some("8.3".into()),
+            node_version: None,
+            https: true,
+            web_server: Some("apache".into()),
+            framework: None,
+            database_engine: None,
+            database_name: None,
+            database_user: None,
+            database_password: None,
+            status: "stopped".into(),
+            is_template: false,
+            parked: false,
+            xdebug: false,
+            tld: "test".into(),
+            aliases: Vec::new(),
+            wildcard: false,
+        });
+        let rt = PhpRuntime {
+            version: "8.3".into(),
+            root: PathBuf::from("."),
+            php_bin: PathBuf::from("php"),
+            fpm_bin: None,
+            cgi_bin: None,
+            listen: "127.0.0.1:9083".into(),
+            is_system: false,
+        };
+        let _ = render_stack(&paths, &state, &[("8.3".into(), rt)]);
+        let vhost = fs::read_to_string(paths.apache_sites_dir().join("blog.conf")).unwrap_or_default();
+        assert!(
+            vhost.contains("Redirect / "),
+            "expected temporary Redirect, got:\n{vhost}"
+        );
+        assert!(
+            !vhost.contains("Redirect permanent"),
+            "301 Redirect permanent caches in browsers:\n{vhost}"
+        );
+        assert!(paths.apache_sites_dir().join("00-default.conf").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

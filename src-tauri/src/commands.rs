@@ -246,6 +246,7 @@ pub async fn get_sites(ctx: State<'_, Arc<AppCtx>>) -> Result<Vec<SiteRecord>> {
     let mut state = ctx.state.lock().await;
     ensure_welcome_site(&ctx.paths, &mut state);
     refresh_site_metadata(&mut state);
+    let _ = crate::services::sites::migrate_null_php_versions(&mut state);
     save_state(&ctx.paths.state_file, &state)?;
     let mut sites = state.sites.clone();
     for s in &mut sites {
@@ -273,6 +274,10 @@ async fn list_site_details_inner(
     let mut state = ctx.state.lock().await;
     ensure_welcome_site(&ctx.paths, &mut state);
     refresh_site_metadata(&mut state);
+    let mut dirty = crate::services::sites::migrate_null_php_versions(&mut state);
+    if probe {
+        crate::services::sites::warm_php_runtimes(&ctx.paths, &state);
+    }
     let sites: Vec<_> = state.sites.clone();
     let mut details = Vec::with_capacity(sites.len());
     for s in sites {
@@ -287,6 +292,9 @@ async fn list_site_details_inner(
         details.push(d);
     }
     if probe {
+        dirty = true;
+    }
+    if dirty {
         save_state(&ctx.paths.state_file, &state)?;
     }
     Ok(details)
@@ -1122,6 +1130,7 @@ pub fn bootstrap_ctx(data_root: std::path::PathBuf) -> Result<AppCtx> {
     let mut state = load_state(&paths.state_file)?;
     crate::applog::set_redact_secrets(state.developer.redact_secrets);
     ensure_welcome_site(&paths, &mut state);
+    let _ = crate::services::sites::migrate_null_php_versions(&mut state);
     // Keep bootstrap fast: php.ini regeneration, Databases/ layout and hosts sync
     // run on the background launch thread in lib.rs (never on the window path).
     save_state(&paths.state_file, &state)?;

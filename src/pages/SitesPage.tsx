@@ -25,13 +25,10 @@ import {
   openInBrowser,
   openInEditor,
   openInFileManager,
+  siteOpenUrl,
 } from "../open";
 import { humanizeError, parsePortBusy } from "../portBusy";
-import {
-  ensureHttpsSchemeForSslPort,
-  formatSiteUrl,
-  stackSslPorts,
-} from "../siteUrl";
+import { stackSslPorts } from "../siteUrl";
 import { useAppData } from "../store/AppData";
 import type {
   CreateFromTemplateResult,
@@ -40,6 +37,7 @@ import type {
   JobProgress,
   PortCheckResult,
   SiteDetails,
+  SiteRecord,
   StackStatus,
 } from "../types";
 
@@ -122,9 +120,9 @@ export function SitesPage({
     }
   };
 
+  /** Open an arbitrary URL (credentials modal, install.php, …). */
   const openWithHostsCheck = async (url: string) => {
     const sslPorts = stackSslPorts(stack);
-    let target = ensureHttpsSchemeForSslPort(url, sslPorts);
     let h = await client.getHostsStatus();
     patchSitesCache({ hosts: h });
     if (!h.ok) {
@@ -143,7 +141,13 @@ export function SitesPage({
         return;
       }
     }
-    await openInBrowser(target, { sslPorts });
+    // Scheme rewrite only for known SSL ports — never remaps :8088 → :8444.
+    await openInBrowser(url, { sslPorts });
+  };
+
+  /** Single Open path for tile + detail — always `formatSiteUrl(site, stack)`. */
+  const openSiteWithHostsCheck = async (site: SiteRecord) => {
+    await openWithHostsCheck(siteOpenUrl(site, stack));
   };
 
   useEffect(() => {
@@ -250,7 +254,7 @@ export function SitesPage({
   const stackRunning = Boolean(stack?.nginx || stack?.apache);
 
   const toggleStack = async () => {
-    if (stackOpInflight.current || busy) return;
+    if (stackOpInflight.current) return;
     stackOpInflight.current = true;
     setBusy(true);
     setError(null);
@@ -266,7 +270,8 @@ export function SitesPage({
         setStack(await client.stopDevStack());
       } else {
         // Auto-separates busy ports — do not block on a preflight modal, and
-        // never open a browser from Start stack.
+        // never open a browser from Start stack. client.startDevStack coalesces
+        // concurrent invokes onto one shared promise.
         setStack(await client.startDevStack());
       }
       await refresh();
@@ -329,9 +334,13 @@ export function SitesPage({
   };
 
   const resolvePortConflict = async (mode: "suggested" | "coexistence") => {
-    if (!portConflict) return;
+    if (!portConflict || stackOpInflight.current) return;
+    stackOpInflight.current = true;
     setBusy(true);
     setError(null);
+    startingRef.current = true;
+    setStartPhases([]);
+    setStarting(true);
     try {
       if (mode === "coexistence") {
         await client.setCoexistenceMode(true);
@@ -351,6 +360,10 @@ export function SitesPage({
         setError(humanizeError(msg));
       }
     } finally {
+      stackOpInflight.current = false;
+      startingRef.current = false;
+      setStarting(false);
+      setStartPhases([]);
       setBusy(false);
     }
   };
@@ -408,7 +421,7 @@ export function SitesPage({
               await client.restoreSiteDatabase(selected.site.id, path);
             })
           }
-          onOpenInBrowser={(url) => void openWithHostsCheck(url)}
+          onOpenInBrowser={() => void openSiteWithHostsCheck(selected.site)}
           onFixHosts={() => void repairHosts()}
           onToast={setError}
           onXdebug={(on) => void toggleXdebug(selected.site.id, on)}
@@ -496,7 +509,7 @@ export function SitesPage({
           starting={starting}
           phases={startPhases}
           stack={stack}
-          busy={busy}
+          busy={busy || starting || stackOpInflight.current}
           onStart={() => void toggleStack()}
           onStop={() => void toggleStack()}
         />
@@ -602,6 +615,7 @@ export function SitesPage({
               phpOptions={phpInstalled.map((p) => runtimeValue(p))}
               busy={busy || patching}
               onOpenDetail={() => openSite(d.site.id)}
+              onOpen={() => void openSiteWithHostsCheck(d.site)}
               onOpenUrl={(url) => void openWithHostsCheck(url)}
               onFolder={() =>
                 void openInFileManager(d.absolutePath).catch((e) =>
@@ -1360,7 +1374,7 @@ function SiteDetail({
   onDuplicate: () => void;
   onBackup: () => void;
   onRestore: (path: string) => void;
-  onOpenInBrowser: (url: string) => void;
+  onOpenInBrowser: () => void;
   onFixHosts: () => void;
   onToast: (message: string | null) => void;
   onXdebug: (enabled: boolean) => void;
@@ -1369,7 +1383,7 @@ function SiteDetail({
   onMobilePreview: () => void;
 }) {
   const site = details.site;
-  const siteUrl = formatSiteUrl(site, stack);
+  const siteUrl = siteOpenUrl(site, stack);
   const [restorePath, setRestorePath] = useState("");
   const [importPath, setImportPath] = useState("");
   const [srFrom, setSrFrom] = useState("");
@@ -1438,12 +1452,25 @@ function SiteDetail({
           <button
             type="button"
             className="btn btn-primary"
-            onClick={() => onOpenInBrowser(siteUrl)}
+            onClick={() => onOpenInBrowser()}
           >
             Open in browser
           </button>
         </div>
       </div>
+
+      {details.reachability?.message &&
+      (details.reachability.state === "error" ||
+        details.reachability.state === "warning") ? (
+        <div
+          className="error-banner"
+          role="status"
+          data-testid="site-detail-reachability"
+          style={{ marginBottom: 12 }}
+        >
+          {details.reachability.message}
+        </div>
+      ) : null}
 
       <div className="site-detail-grid">
         <div className="panel-card settings-list">
@@ -1667,7 +1694,7 @@ function SiteDetail({
               <label>
                 Site URL
                 <span className="hint">
-                  Sync WordPress siteurl/home to {site.https ? details.httpsUrl : details.url}
+                  Sync WordPress siteurl/home to {siteUrl}
                 </span>
               </label>
               <button
