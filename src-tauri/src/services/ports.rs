@@ -1391,8 +1391,13 @@ pub fn assert_single_owned_listener(
     {
         const MAX_OWNED_LISTENERS: usize = 8;
         if owned_pids.len() > MAX_OWNED_LISTENERS {
-            // Reclaim data-dir orphans once more, then re-check.
-            crate::startup::reclaim_orphans(paths);
+            // Reclaim nginx/httpd orphans once more (keep live runtime PIDs), then re-check.
+            let keep = owned_runtime_pids_with_files(paths, runtime);
+            crate::startup::reclaim_orphans_for_names(
+                paths,
+                &["nginx.exe", "httpd.exe"],
+                &keep,
+            );
             let left = listening_pids_on_port(port);
             let still_owned: Vec<u32> = left
                 .into_iter()

@@ -87,11 +87,14 @@ pub fn spawn_watchdog() {
 /// whose executable path or command line clearly references `paths.root`;
 /// never touches foreign WAMP.
 pub fn reclaim_orphans(paths: &Paths) {
-    reclaim_orphans_for_names(paths, ORPHAN_PROCESS_NAMES);
+    reclaim_orphans_for_names(paths, ORPHAN_PROCESS_NAMES, &[]);
 }
 
 /// Like [`reclaim_orphans`], but limited to the given image names (e.g. `nginx.exe`).
-pub fn reclaim_orphans_for_names(paths: &Paths, names: &[&str]) {
+///
+/// `keep_pids` are never killed — pass live runtime PIDs so warm `apply_stack`
+/// does not tear down MariaDB/PHP that `stop_web_stack` intentionally left up.
+pub fn reclaim_orphans_for_names(paths: &Paths, names: &[&str], keep_pids: &[u32]) {
     let root = paths.root.to_string_lossy().to_string();
     if root.is_empty() || names.is_empty() {
         return;
@@ -102,11 +105,11 @@ pub fn reclaim_orphans_for_names(paths: &Paths, names: &[&str]) {
     );
     #[cfg(windows)]
     {
-        reclaim_orphans_windows(&root, names);
+        reclaim_orphans_windows(&root, names, keep_pids);
     }
     #[cfg(not(windows))]
     {
-        let _ = (root, names);
+        let _ = (root, names, keep_pids);
     }
 }
 
@@ -233,7 +236,7 @@ fn parse_csv_loose(line: &str) -> Vec<String> {
 }
 
 #[cfg(windows)]
-fn reclaim_orphans_windows(root: &str, names: &[&str]) {
+fn reclaim_orphans_windows(root: &str, names: &[&str], keep_pids: &[u32]) {
     use crate::services::process::{is_running, stop_pid};
 
     let text = match scan_windows_processes(names) {
@@ -246,6 +249,9 @@ fn reclaim_orphans_windows(root: &str, names: &[&str]) {
     let pids = orphan_pids_from_scan_text(&text, root);
     let mut killed = 0usize;
     for pid in pids {
+        if keep_pids.contains(&pid) {
+            continue;
+        }
         if !is_running(pid) {
             continue;
         }

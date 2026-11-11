@@ -425,8 +425,10 @@ pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
             return reload_nginx(paths, state);
         }
     }
-    // Kill stale DevStack nginx masters left by prior runs (never touches WAMP).
-    crate::startup::reclaim_orphans_for_names(paths, &["nginx.exe", "php-cgi.exe"]);
+    // Kill stale DevStack nginx masters left by prior runs (never touches WAMP /
+    // live PHP workers that warm apply intentionally keeps).
+    let keep: Vec<u32> = state.runtime.php_pids.values().copied().collect();
+    crate::startup::reclaim_orphans_for_names(paths, &["nginx.exe"], &keep);
     crate::services::ports::ensure_ports_free(&state.stack, "nginx")?;
 
     let versions = collect_php_versions(state);

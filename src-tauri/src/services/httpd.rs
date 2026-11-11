@@ -475,8 +475,9 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
             return reload_apache(paths, state);
         }
     }
-    // Kill stale DevStack httpd left by prior runs (never touches WAMP).
-    crate::startup::reclaim_orphans_for_names(paths, &["httpd.exe", "php-cgi.exe"]);
+    // Kill stale DevStack httpd left by prior runs (never touches WAMP / live PHP).
+    let keep: Vec<u32> = state.runtime.php_pids.values().copied().collect();
+    crate::startup::reclaim_orphans_for_names(paths, &["httpd.exe"], &keep);
     // Reclaim a stale FOREGROUND httpd left from a prior crash / DETACHED spawn.
     if let Some(old) = read_pid(&paths.pid_file("apache")) {
         let _ = stop_pid(old);
