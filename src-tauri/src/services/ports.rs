@@ -1187,6 +1187,256 @@ pub fn auto_separate_busy_ports(
     }
 }
 
+/// Parse `netstat -ano`-style text for all LISTENING PIDs on `port`.
+pub fn listening_pids_from_netstat(text: &str, port: u16) -> Vec<u32> {
+    let port_s = port.to_string();
+    let mut pids = Vec::new();
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        if !lower.contains("listen") {
+            continue;
+        }
+        let cols: Vec<_> = line.split_whitespace().collect();
+        if cols.len() < 4 {
+            continue;
+        }
+        // Local address is typically column 1: 0.0.0.0:8080 / [::]:8080
+        let local = cols[1];
+        let local_port = local
+            .rsplit_once(':')
+            .map(|(_, p)| p.trim_end_matches(']'))
+            .unwrap_or("");
+        if local_port != port_s {
+            continue;
+        }
+        if let Some(pid) = cols.last().and_then(|s| s.parse::<u32>().ok()) {
+            if pid > 0 && !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
+/// All PIDs currently LISTENING on `port` (best-effort).
+pub fn listening_pids_on_port(port: u16) -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        let out = crate::services::process::command("netstat")
+            .args(["-ano"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        return listening_pids_from_netstat(&out, port);
+    }
+    #[cfg(not(windows))]
+    {
+        listening_pids_on_port_unix(port)
+    }
+}
+
+#[cfg(not(windows))]
+fn listening_pids_on_port_unix(port: u16) -> Vec<u32> {
+    let mut pids = Vec::new();
+    let out = crate::services::process::command("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fpc"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            if let Ok(pid) = rest.parse::<u32>() {
+                if pid > 0 && !pids.contains(&pid) {
+                    pids.push(pid);
+                }
+            }
+        }
+    }
+    if pids.is_empty() {
+        if let Ok(raw) = crate::services::process::command("lsof")
+            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&raw.stdout);
+            for line in text.lines().skip(1) {
+                let cols: Vec<_> = line.split_whitespace().collect();
+                if cols.len() >= 2 {
+                    if let Ok(pid) = cols[1].parse::<u32>() {
+                        if pid > 0 && !pids.contains(&pid) {
+                            pids.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pids
+}
+
+fn process_exe_path(pid: u32) -> Option<std::path::PathBuf> {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
+    sys.process(Pid::from_u32(pid))
+        .and_then(|p| p.exe().map(|e| e.to_path_buf()))
+}
+
+fn path_under_data_root(exe: &std::path::Path, root: &std::path::Path) -> bool {
+    let exe_s = dunce::simplified(exe)
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let root_s = dunce::simplified(root)
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let root_s = root_s.trim_end_matches('\\');
+    if root_s.is_empty() {
+        return false;
+    }
+    exe_s == root_s
+        || exe_s
+            .strip_prefix(root_s)
+            .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/'))
+}
+
+fn pid_exe_under_data_root(pid: u32, root: &std::path::Path) -> bool {
+    process_exe_path(pid).is_some_and(|exe| path_under_data_root(&exe, root))
+}
+
+fn pid_name_matches_frontend(pid: u32, runtime: &crate::config::RuntimeState) -> bool {
+    let name = process_exe_path(pid)
+        .and_then(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    if name.is_empty() {
+        return false;
+    }
+    if runtime.nginx_pid.is_some() && name.contains("nginx") {
+        return true;
+    }
+    if runtime.apache_pid.is_some() && (name.contains("httpd") || name.contains("apache")) {
+        return true;
+    }
+    false
+}
+
+/// After nginx/apache reports listening: verify every LISTENING PID on `port`
+/// is DevStack-owned (exe under the data dir, or our recorded master / frontend
+/// name). Never kills foreign processes (WAMP on :80 must survive).
+///
+/// Unix/macOS nginx workers all appear as LISTENING on the shared socket — that
+/// is healthy. Windows SO_REUSEADDR orphan *masters* are reclaimed before start;
+/// here we only fail if a foreign listener remains or the owned count looks like
+/// a leftover pile-up (many independent masters).
+pub fn assert_single_owned_listener(
+    port: u16,
+    paths: &crate::config::Paths,
+    runtime: &crate::config::RuntimeState,
+) -> Result<()> {
+    let owned_runtime = owned_runtime_pids_with_files(paths, runtime);
+    let mut pids = listening_pids_on_port(port);
+    pids.sort_unstable();
+    pids.dedup();
+    if pids.is_empty() {
+        return Err(DevStackError::Message(format!(
+            "port {port} has no LISTENING process after start"
+        )));
+    }
+
+    let mut owned_pids = Vec::new();
+    let mut foreign = Vec::new();
+
+    for pid in pids {
+        let under = pid_exe_under_data_root(pid, &paths.root);
+        let in_runtime = owned_runtime.contains(&pid);
+        let frontend = pid_name_matches_frontend(pid, runtime);
+        if under || in_runtime || frontend {
+            owned_pids.push(pid);
+        } else {
+            foreign.push(pid);
+        }
+    }
+
+    if !foreign.is_empty() {
+        let details: Vec<String> = foreign
+            .iter()
+            .map(|pid| {
+                let name = process_exe_path(*pid)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "unknown".into());
+                format!("pid {pid} ({name})")
+            })
+            .collect();
+        return Err(DevStackError::Message(format!(
+            "port {port} is held by foreign process(es) outside the DevStack data dir: {}. \
+             Refusing to kill them (WAMP/system stacks must survive).",
+            details.join(", ")
+        )));
+    }
+
+    if owned_pids.is_empty() {
+        return Err(DevStackError::Message(format!(
+            "port {port} has listeners but none are DevStack-owned"
+        )));
+    }
+
+    // Windows orphan pile-up: dozens of independent masters (user diag ~20).
+    // Healthy master+workers is typically a handful. Cap only on Windows.
+    #[cfg(windows)]
+    {
+        const MAX_OWNED_LISTENERS: usize = 8;
+        if owned_pids.len() > MAX_OWNED_LISTENERS {
+            // Reclaim nginx/httpd orphans once more (keep live runtime PIDs), then re-check.
+            let keep = owned_runtime_pids_with_files(paths, runtime);
+            crate::startup::reclaim_orphans_for_names(
+                paths,
+                &["nginx.exe", "httpd.exe"],
+                &keep,
+            );
+            let left = listening_pids_on_port(port);
+            let still_owned: Vec<u32> = left
+                .into_iter()
+                .filter(|pid| {
+                    pid_exe_under_data_root(*pid, &paths.root)
+                        || owned_runtime_pids_with_files(paths, runtime).contains(pid)
+                        || pid_name_matches_frontend(*pid, runtime)
+                })
+                .collect();
+            if still_owned.len() > MAX_OWNED_LISTENERS {
+                return Err(DevStackError::Message(format!(
+                    "port {port} still has {} DevStack LISTENING PIDs after reclaim (orphan pile-up?): {:?}",
+                    still_owned.len(),
+                    still_owned
+                )));
+            }
+            if still_owned.is_empty() {
+                return Err(DevStackError::Message(format!(
+                    "port {port} has no LISTENING process after orphan reclaim"
+                )));
+            }
+        }
+    }
+
+    let sole = owned_pids[0];
+    let under = pid_exe_under_data_root(sole, &paths.root);
+    let prefer = [runtime.nginx_pid, runtime.apache_pid]
+        .into_iter()
+        .flatten()
+        .find(|p| owned_pids.contains(p));
+    let in_runtime = owned_runtime.contains(&sole) || prefer == Some(sole);
+    if !under && !in_runtime && !pid_name_matches_frontend(sole, runtime) {
+        return Err(DevStackError::Message(format!(
+            "port {port} listener pid={sole} is not DevStack-owned"
+        )));
+    }
+    Ok(())
+}
+
 /// Collect PIDs DevStack currently owns so auto-separate ignores our listeners.
 pub fn owned_runtime_pids(runtime: &crate::config::RuntimeState) -> Vec<u32> {
     let mut pids = Vec::new();
@@ -1258,6 +1508,38 @@ pub fn parse_ports_patch(value: &serde_json::Value) -> Result<PortsConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listening_pids_from_netstat_collects_all_and_ignores_other_ports() {
+        let text = "\
+  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       1111
+  TCP    127.0.0.1:8080         0.0.0.0:0              LISTENING       2222
+  TCP    0.0.0.0:80801          0.0.0.0:0              LISTENING       3333
+  TCP    [::]:8080              [::]:0                 LISTENING       1111
+  TCP    0.0.0.0:80             0.0.0.0:0              LISTENING       4444
+";
+        let pids = listening_pids_from_netstat(text, 8080);
+        assert_eq!(pids, vec![1111, 2222]);
+        assert!(listening_pids_from_netstat(text, 80).contains(&4444));
+        assert!(!listening_pids_from_netstat(text, 80).contains(&1111));
+    }
+
+    #[test]
+    fn path_under_data_root_prefix_only() {
+        let root = std::path::Path::new(r"C:\Users\me\AppData\Local\DevStack");
+        assert!(path_under_data_root(
+            std::path::Path::new(r"C:\Users\me\AppData\Local\DevStack\packages\nginx\nginx.exe"),
+            root
+        ));
+        assert!(!path_under_data_root(
+            std::path::Path::new(r"C:\wamp64\bin\apache\httpd.exe"),
+            root
+        ));
+        assert!(!path_under_data_root(
+            std::path::Path::new(r"C:\Users\me\AppData\Local\DevStackEvil\nginx.exe"),
+            root
+        ));
+    }
 
     #[test]
     fn format_url_omits_default_ports() {

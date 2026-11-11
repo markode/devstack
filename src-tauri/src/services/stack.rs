@@ -163,6 +163,15 @@ pub fn apply_stack_with_progress(
         save_state(&paths.state_file, state)?;
     }
 
+    // Reclaim stale *web* masters only — never mysqld/php that warm apply keeps up.
+    // keep_pids protects any live runtime PIDs still tracked after stop_web_stack.
+    let keep = owned_runtime_pids_with_files(paths, &state.runtime);
+    crate::startup::reclaim_orphans_for_names(
+        paths,
+        &["nginx.exe", "httpd.exe"],
+        &keep,
+    );
+
     if !state.installed.contains_key("php") {
         let _ = register_system_php(state, paths);
     }

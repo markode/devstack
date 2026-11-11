@@ -1,31 +1,24 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
-static STACK_OP_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// Serializes start/stop/apply so concurrent invocations wait instead of both
+/// spawning nginx (orphan pile-up). Tokio mutex so the guard is `Send` across
+/// `.await` points in these async command handlers.
+static STACK_OP_LOCK: Mutex<()> = Mutex::const_new(());
 
-struct StackOpGuard;
-impl StackOpGuard {
-    fn try_acquire() -> Result<Self> {
-        if STACK_OP_IN_FLIGHT
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Err(crate::error::DevStackError::Message(
-                "A start/stop stack operation is already in progress".into(),
-            ));
-        }
-        Ok(Self)
+async fn acquire_stack_op(op: &str) -> MutexGuard<'static, ()> {
+    // Prefer waiting over hard-error so a double-click start serializes.
+    if STACK_OP_LOCK.try_lock().is_err() {
+        crate::applog::info(
+            "stack",
+            format!("{op}: another stack op in flight — waiting for lock"),
+        );
     }
-}
-impl Drop for StackOpGuard {
-    fn drop(&mut self) {
-        STACK_OP_IN_FLIGHT.store(false, Ordering::SeqCst);
-    }
+    STACK_OP_LOCK.lock().await
 }
 
 use crate::config::{
@@ -428,12 +421,9 @@ pub async fn update_site_environment(
         .iter_mut()
         .find(|s| s.id == site_id)
         .ok_or_else(|| crate::error::DevStackError::Message(format!("site not found: {site_id}")))?;
-    if php_version.is_some() {
-        site.php_version = php_version;
-    }
-    if node_version.is_some() {
-        site.node_version = node_version;
-    }
+    // Frontend always sends the intended PHP/Node values (including null = System).
+    site.php_version = php_version;
+    site.node_version = node_version;
     if let Some(h) = https {
         site.https = h;
     }
@@ -495,8 +485,8 @@ pub async fn get_stack_status(ctx: State<'_, Arc<AppCtx>>) -> Result<StackStatus
 }
 
 pub async fn run_start_stack(app: &AppHandle, ctx: &Arc<AppCtx>) -> Result<StackStatus> {
+    let _guard = acquire_stack_op("start_dev_stack").await;
     crate::applog::command_call("start_dev_stack", "{}");
-    let _guard = StackOpGuard::try_acquire()?;
     let progress = job_progress_emitter(app.clone());
     let mut state = ctx.state.lock().await;
     let res = start_stack_with_progress(&ctx.paths, &mut state, &progress);
@@ -516,8 +506,8 @@ pub async fn run_start_stack(app: &AppHandle, ctx: &Arc<AppCtx>) -> Result<Stack
 }
 
 pub async fn run_stop_stack(app: &AppHandle, ctx: &Arc<AppCtx>) -> Result<StackStatus> {
+    let _guard = acquire_stack_op("stop_dev_stack").await;
     crate::applog::command_call("stop_dev_stack", "{}");
-    let _guard = StackOpGuard::try_acquire()?;
     let mut state = ctx.state.lock().await;
     // Restore WordPress URLs while the DB is still up; never block the stop on it.
     let _ = crate::services::mobile_preview::stop(&ctx.paths, &mut state);
@@ -532,6 +522,7 @@ pub async fn run_stop_stack(app: &AppHandle, ctx: &Arc<AppCtx>) -> Result<StackS
 }
 
 pub async fn run_apply_stack(app: &AppHandle, ctx: &Arc<AppCtx>) -> Result<StackStatus> {
+    let _guard = acquire_stack_op("apply_dev_stack").await;
     crate::applog::command_call("apply_dev_stack", "{}");
     let progress = job_progress_emitter(app.clone());
     let mut state = ctx.state.lock().await;
@@ -1365,7 +1356,12 @@ pub async fn sync_parked_now(app: Option<&AppHandle>, ctx: &Arc<AppCtx>) -> Resu
     let changed = added > 0 || before.len() != state.sites.len();
     if changed {
         save_state(&ctx.paths.state_file, &state)?;
-        let _ = dns::sync_hosts_if_needed(&ctx.paths, &state);
+        // Auto-repair hosts (one UAC prompt on Windows) when parked/add changes domains.
+        if added > 0 {
+            let _ = dns::ensure_hosts_if_needed(&ctx.paths, &state);
+        } else {
+            let _ = dns::sync_hosts_if_needed(&ctx.paths, &state);
+        }
         let _ = reload_sites(&ctx.paths, &mut state);
     }
     let sites = state.sites.clone();

@@ -341,8 +341,122 @@ fn humanize_start_failure(server: &str, raw: &str) -> String {
     format!("{server} failed to start")
 }
 
-fn http_probe_ok(host: &str, port: u16, https: bool) -> bool {
-    // Prefer curl when available (handles TLS + Host). Fall back to raw HTTP.
+/// Marker embedded in the branded empty-site placeholder HTML.
+pub const EMPTY_SITE_MARKER: &str = "<!-- devstack-empty-site -->";
+
+const EMPTY_SITE_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DevStack — empty site</title>
+  <!-- devstack-empty-site -->
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: linear-gradient(160deg, #0f172a 0%, #1e293b 45%, #0ea5e9 160%);
+      color: #e2e8f0;
+    }
+    main { text-align: center; padding: 2rem; max-width: 28rem; }
+    h1 { font-size: 1.35rem; font-weight: 650; margin: 0 0 0.5rem; letter-spacing: -0.02em; }
+    p { margin: 0; opacity: 0.78; line-height: 1.45; font-size: 0.95rem; }
+    .brand { font-size: 0.75rem; letter-spacing: 0.14em; text-transform: uppercase;
+      opacity: 0.55; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">DevStack</div>
+    <h1>No index file yet</h1>
+    <p>Drop an <code>index.php</code> or <code>index.html</code> into this site folder to get started.</p>
+  </main>
+</body>
+</html>
+"#;
+
+fn has_index_file(docroot: &Path) -> bool {
+    docroot.join("index.php").exists()
+        || docroot.join("index.html").exists()
+        || docroot.join("index.htm").exists()
+}
+
+fn has_real_app_files(docroot: &Path) -> bool {
+    let root = expand_home(docroot);
+    let project = project_root_for_docroot(&root);
+    const SIGNALS: &[&str] = &[
+        "wp-config.php",
+        "wp-config-sample.php",
+        "composer.json",
+        "package.json",
+        "artisan",
+        "Gemfile",
+        "manage.py",
+        "Cargo.toml",
+        "go.mod",
+        "web.config",
+    ];
+    SIGNALS
+        .iter()
+        .any(|f| root.join(f).exists() || project.join(f).exists())
+}
+
+/// True when the docroot is only our branded empty-site placeholder (no real app).
+pub fn is_empty_site_placeholder(docroot: &Path) -> bool {
+    let root = expand_home(docroot);
+    if !root.is_dir() {
+        return false;
+    }
+    let (framework, _) = detect_framework(&root);
+    if framework != "other" || has_real_app_files(&root) {
+        return false;
+    }
+    if root.join("index.php").exists() || root.join("index.htm").exists() {
+        return false;
+    }
+    let index = root.join("index.html");
+    let Ok(raw) = fs::read_to_string(&index) else {
+        return false;
+    };
+    raw.contains(EMPTY_SITE_MARKER)
+}
+
+/// If `docroot` exists and has no index file, write a branded static placeholder.
+pub fn ensure_site_placeholder(docroot: &Path) -> Result<()> {
+    let root = expand_home(docroot);
+    if !root.is_dir() {
+        return Ok(());
+    }
+    if has_index_file(&root) {
+        return Ok(());
+    }
+    fs::write(root.join("index.html"), EMPTY_SITE_HTML)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct ProbeResult {
+    pub ok: bool,
+    pub code: String,
+    pub final_url: String,
+    pub error: Option<String>,
+}
+
+fn host_of_url(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    let host = hostport.split(':').next().unwrap_or(hostport);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+fn http_probe(host: &str, port: u16, https: bool) -> ProbeResult {
     let url = if https {
         format!("https://{host}:{port}/")
     } else {
@@ -353,46 +467,180 @@ fn http_probe_ok(host: &str, port: u16, https: bool) -> bool {
         .args([
             "-k",
             "-sS",
+            "-L",
+            "--max-redirs",
+            "5",
             "--max-time",
-            "1",
+            "3",
             "--resolve",
             &format!("{host}:{port}:127.0.0.1"),
             "-o",
             if cfg!(windows) { "NUL" } else { "/dev/null" },
             "-w",
-            "%{http_code}",
+            "%{http_code}\t%{url_effective}",
             &url,
         ])
         .output()
     {
-        let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if code.starts_with('2') || code.starts_with('3') {
-            return true;
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let mut parts = stdout.splitn(2, '\t');
+        let code = parts.next().unwrap_or("").trim().to_string();
+        let final_url = parts
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let final_url = if final_url.is_empty() {
+            url.clone()
+        } else {
+            final_url
+        };
+        if code.is_empty() {
+            return ProbeResult {
+                ok: false,
+                code: "000".into(),
+                final_url,
+                error: Some(if stderr.is_empty() {
+                    "empty response".into()
+                } else {
+                    stderr
+                }),
+            };
         }
-        // 4xx still means the server answered — treat as reachable for status.
-        if code.starts_with('4') {
-            return true;
+        let ok = code.starts_with('2') || code.starts_with('3') || code.starts_with('4');
+        if ok {
+            return ProbeResult {
+                ok: true,
+                code,
+                final_url,
+                error: None,
+            };
         }
+        let reason = if code == "000" {
+            if stderr.is_empty() {
+                "connection failed".into()
+            } else {
+                stderr
+            }
+        } else if !stderr.is_empty() {
+            stderr
+        } else {
+            format!("HTTP {code}")
+        };
+        return ProbeResult {
+            ok: false,
+            code,
+            final_url,
+            error: Some(reason),
+        };
     }
     if https {
-        return false;
+        return ProbeResult {
+            ok: false,
+            code: "000".into(),
+            final_url: url,
+            error: Some("connection failed".into()),
+        };
     }
-    // Raw HTTP GET fallback.
+    // Raw HTTP GET fallback (no redirect following).
     let Ok(mut stream) =
         TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(400))
     else {
-        return false;
+        return ProbeResult {
+            ok: false,
+            code: "000".into(),
+            final_url: url,
+            error: Some("connection failed".into()),
+        };
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
-    let req = format!(
-        "GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    );
+    let req = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     if stream.write_all(req.as_bytes()).is_err() {
-        return false;
+        return ProbeResult {
+            ok: false,
+            code: "000".into(),
+            final_url: url,
+            error: Some("connection failed".into()),
+        };
     }
     let mut buf = [0u8; 64];
-    matches!(stream.read(&mut buf), Ok(n) if n > 0)
+    let ok = matches!(stream.read(&mut buf), Ok(n) if n > 0);
+    ProbeResult {
+        ok,
+        code: if ok { "200".into() } else { "000".into() },
+        final_url: url,
+        error: if ok {
+            None
+        } else {
+            Some("empty response".into())
+        },
+    }
+}
+
+fn php_fcgi_hint(paths: &Paths, state: &AppState, site: &SiteRecord) -> Option<String> {
+    if !crate::services::httpd::site_uses_apache(site) {
+        return None;
+    }
+    let ver = site
+        .php_version
+        .clone()
+        .or_else(|| crate::services::php_runtime::default_php_version(state))?;
+    let listen =
+        crate::services::php_runtime::fpm_listen_addr_with_base(paths, &ver, state.stack.php_fpm_port);
+    let ready = if let Some(sock) = listen.strip_prefix("unix:") {
+        Path::new(sock).exists()
+    } else {
+        listen
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|addr| {
+                TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok()
+            })
+            .unwrap_or(false)
+    };
+    if ready {
+        None
+    } else {
+        Some(format!(
+            "PHP/FCGI for {ver} does not appear to be listening ({listen})"
+        ))
+    }
+}
+
+fn format_probe_failure(
+    probe: &ProbeResult,
+    probed_url: &str,
+    php_hint: Option<String>,
+) -> String {
+    let mut msg = if probe.code == "000" || probe.code.is_empty() {
+        format!(
+            "HTTP 000 ({})",
+            probe.error.as_deref().unwrap_or("connection failed")
+        )
+    } else if let Some(err) = probe.error.as_deref() {
+        if err.starts_with("HTTP ") {
+            err.to_string()
+        } else {
+            format!("HTTP {} ({err})", probe.code)
+        }
+    } else {
+        format!("HTTP {}", probe.code)
+    };
+    if !probe.final_url.is_empty() && probe.final_url != probed_url {
+        if let (Some(expected), Some(actual)) =
+            (host_of_url(probed_url), host_of_url(&probe.final_url))
+        {
+            if expected != actual {
+                msg = format!("redirected to {}", probe.final_url);
+            }
+        }
+    }
+    if let Some(hint) = php_hint {
+        msg = format!("{msg}; {hint}");
+    }
+    msg
 }
 
 /// TCP-connect the site's listen port and HTTP-probe the actual Open URL.
@@ -518,14 +766,17 @@ pub fn probe_site_reachability(
         };
     }
 
-    let http_ok = http_probe_ok(&details.site.domain, port, https);
-    if !http_ok {
+    // Ensure empty docroots have a static index before probing.
+    let _ = ensure_site_placeholder(&details.absolute_path);
+    let empty_placeholder = is_empty_site_placeholder(&details.absolute_path);
+
+    let probe = http_probe(&details.site.domain, port, https);
+    if !probe.ok {
+        let php_hint = php_fcgi_hint(paths, state, &details.site);
         details.site.status = "warning".into();
         return SiteReachability {
             state: "warning".into(),
-            message: Some(format!(
-                "Port :{port} is open but {probed_url} did not return a valid HTTP response"
-            )),
+            message: Some(format_probe_failure(&probe, &probed_url, php_hint)),
             log_excerpt: fresh_error_log_excerpt(
                 paths,
                 apache,
@@ -536,6 +787,38 @@ pub fn probe_site_reachability(
             probed_url,
             probed_port: port,
         };
+    }
+
+    // Empty branded placeholder → warning (not "Running").
+    if empty_placeholder {
+        details.site.status = "warning".into();
+        return SiteReachability {
+            state: "warning".into(),
+            message: Some("No index file".into()),
+            log_excerpt: None,
+            tcp_ok: true,
+            http_ok: true,
+            probed_url,
+            probed_port: port,
+        };
+    }
+
+    // Surfaced redirect host mismatch (e.g. WordPress siteurl) as a soft warning.
+    if let (Some(expected), Some(actual)) =
+        (host_of_url(&probed_url), host_of_url(&probe.final_url))
+    {
+        if expected != actual {
+            details.site.status = "warning".into();
+            return SiteReachability {
+                state: "warning".into(),
+                message: Some(format!("redirected to {}", probe.final_url)),
+                log_excerpt: None,
+                tcp_ok: true,
+                http_ok: true,
+                probed_url,
+                probed_port: port,
+            };
+        }
     }
 
     details.site.status = "running".into();
@@ -605,6 +888,8 @@ pub fn create_site(
     php_version: Option<String>,
 ) -> Result<SiteRecord> {
     let id = slugify(name);
+    let php_version =
+        php_version.or_else(|| crate::services::php_runtime::default_php_version(state));
     let mut site = SiteRecord {
         id: id.clone(),
         name: name.to_string(),
@@ -640,9 +925,7 @@ pub fn create_site(
     if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
         s.path = abs.clone();
     }
-    if !abs.join("index.php").exists() && !abs.join("index.html").exists() {
-        fs::write(abs.join("index.php"), "<?php phpinfo();")?;
-    }
+    ensure_site_placeholder(&abs)?;
     Ok(site)
 }
 
@@ -660,4 +943,59 @@ pub fn delete_site(paths: &Paths, state: &mut AppState, site_id: &str) -> Result
     let _ = fs::remove_file(nginx_conf);
     let _ = fs::remove_file(apache_conf);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("devstack-{label}-{n}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn ensure_placeholder_writes_marker_when_empty() {
+        let dir = temp_dir("empty-site");
+        ensure_site_placeholder(&dir).unwrap();
+        let html = fs::read_to_string(dir.join("index.html")).unwrap();
+        assert!(html.contains(EMPTY_SITE_MARKER));
+        assert!(is_empty_site_placeholder(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_placeholder_skips_existing_index() {
+        let dir = temp_dir("has-index");
+        fs::write(dir.join("index.php"), "<?php echo 1;").unwrap();
+        ensure_site_placeholder(&dir).unwrap();
+        assert!(!dir.join("index.html").exists());
+        assert!(!is_empty_site_placeholder(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn placeholder_false_when_app_files_present() {
+        let dir = temp_dir("wp-empty");
+        ensure_site_placeholder(&dir).unwrap();
+        fs::write(dir.join("wp-config.php"), "<?php").unwrap();
+        assert!(!is_empty_site_placeholder(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_of_url_parses_schemes() {
+        assert_eq!(
+            host_of_url("https://blog.test:8443/wp-admin"),
+            Some("blog.test".into())
+        );
+        assert_eq!(host_of_url("http://LOCAL.TEST/"), Some("local.test".into()));
+    }
 }

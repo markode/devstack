@@ -16,6 +16,11 @@ pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 pub const DETACHED_PROCESS: u32 = 0x0000_0008;
 
+/// Process-wide Windows job object with `KILL_ON_JOB_CLOSE` so DevStack children
+/// die when the app exits (prevents orphan nginx/httpd pile-up).
+#[cfg(windows)]
+static DEVSTACK_JOB: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+
 /// Apply Windows creation flags so helper/server processes never flash a cmd window.
 pub fn no_window(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
@@ -181,6 +186,7 @@ pub fn spawn_logged_env(
         );
         DevStackError::Message(format!("failed to spawn {}: {e}", program.display()))
     })?;
+    assign_child_to_job_object(&child);
     let pid = child.id();
     let source = crate::applog::source_from_log_path(log_err);
     crate::applog::process_spawn(source, program, args, envs, pid);
@@ -188,6 +194,124 @@ pub fn spawn_logged_env(
     crate::applog::tail_file(log_out.to_path_buf(), source);
     crate::applog::tail_file(log_err.to_path_buf(), source);
     Ok(child)
+}
+
+/// Assign a spawned child to the DevStack job object (Windows only; no-op elsewhere).
+pub fn assign_child_to_job_object(_child: &Child) {
+    #[cfg(windows)]
+    {
+        assign_child_to_job_object_windows(_child);
+    }
+}
+
+/// Minimal kernel32 job-object FFI — avoids windows-sys feature gaps
+/// (`CreateJobObjectW` is missing from some `Win32_System_JobObjects` builds).
+#[cfg(windows)]
+mod job_ffi {
+    use std::ffi::c_void;
+    pub type HANDLE = *mut c_void;
+    pub type BOOL = i32;
+
+    #[repr(C)]
+    pub struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        pub per_process_user_time_limit: i64,
+        pub per_job_user_time_limit: i64,
+        pub limit_flags: u32,
+        pub minimum_working_set_size: usize,
+        pub maximum_working_set_size: usize,
+        pub active_process_limit: u32,
+        pub affinity: usize,
+        pub priority_class: u32,
+        pub scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    pub struct IO_COUNTERS {
+        pub read_operation_count: u64,
+        pub write_operation_count: u64,
+        pub other_operation_count: u64,
+        pub read_transfer_count: u64,
+        pub write_transfer_count: u64,
+        pub other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    pub struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        pub basic_limit_information: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+        pub io_info: IO_COUNTERS,
+        pub process_memory_limit: usize,
+        pub job_memory_limit: usize,
+        pub peak_process_memory_used: usize,
+        pub peak_job_memory_used: usize,
+    }
+
+    pub const JobObjectExtendedLimitInformation: i32 = 9;
+    pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn CreateJobObjectW(lp_job_attributes: *const c_void, lp_name: *const u16) -> HANDLE;
+        pub fn AssignProcessToJobObject(h_job: HANDLE, h_process: HANDLE) -> BOOL;
+        pub fn SetInformationJobObject(
+            h_job: HANDLE,
+            job_object_information_class: i32,
+            lp_job_object_information: *const c_void,
+            cb_job_object_information_length: u32,
+        ) -> BOOL;
+        pub fn CloseHandle(h_object: HANDLE) -> BOOL;
+    }
+}
+
+#[cfg(windows)]
+fn assign_child_to_job_object_windows(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use job_ffi::*;
+
+    let job = *DEVSTACK_JOB.get_or_init(|| {
+        // SAFETY: null attrs/name → anonymous job object.
+        let handle: HANDLE = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            crate::applog::warn("process", "CreateJobObjectW failed; orphans may linger on exit");
+            return 0;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: handle is a valid job we just created.
+        let ok: BOOL = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of_val(&info) as u32,
+            )
+        };
+        if ok == 0 {
+            crate::applog::warn(
+                "process",
+                "SetInformationJobObject(KILL_ON_JOB_CLOSE) failed",
+            );
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return 0;
+        }
+        handle as isize
+    });
+    if job == 0 {
+        return;
+    }
+    let process = child.as_raw_handle() as HANDLE;
+    // SAFETY: process is the OS handle of a live Child; job is our process-wide job.
+    let ok: BOOL = unsafe { AssignProcessToJobObject(job as HANDLE, process) };
+    if ok == 0 {
+        crate::applog::warn(
+            "process",
+            format!(
+                "AssignProcessToJobObject failed for pid={} (may already be in a job)",
+                child.id()
+            ),
+        );
+    }
 }
 
 pub fn run_capture(program: &Path, args: &[&str], cwd: Option<&Path>) -> Result<String> {

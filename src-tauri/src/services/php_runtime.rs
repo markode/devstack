@@ -152,6 +152,24 @@ fn detect_php_version(php: &Path) -> Option<String> {
     Some(ver)
 }
 
+/// Preferred PHP version for new sites: stack preference, else first installed package.
+pub fn default_php_version(state: &AppState) -> Option<String> {
+    state
+        .stack
+        .php_version
+        .clone()
+        .or_else(|| {
+            state.installed.get("php").and_then(|v| {
+                v.first().map(|r| {
+                    r.channel
+                        .clone()
+                        .filter(|c| !c.is_empty())
+                        .unwrap_or_else(|| r.version.clone())
+                })
+            })
+        })
+}
+
 pub fn fpm_listen_addr(paths: &Paths, version: &str) -> String {
     fpm_listen_addr_with_base(paths, version, 9000)
 }

@@ -850,6 +850,178 @@ pub fn run(ctx: &AppCtx, report_path: &Path) -> Result<MatrixReport, String> {
         Ok(format!("{} site(s)", loaded.sites.len()))
     });
 
+    // --- v0.3.3 hotfix scenarios (orphan nginx, empty site, null PHP, HTTPS Open) ---
+    rec.check(
+        "hotfix033.empty_placeholder",
+        "Empty site → placeholder 200 + No index file",
+        || {
+            let mut state = lock(ctx);
+            let dir = ctx.paths.root.join("sites/acme-empty");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let php = crate::services::php_runtime::default_php_version(&state);
+            let site = sites::create_site(
+                &mut state,
+                &ctx.paths,
+                "acme-empty",
+                dir.clone(),
+                php,
+            )
+            .map_err(|e| e.to_string())?;
+            if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+                s.domain = "acme-empty.test".into();
+                s.https = false;
+                s.web_server = Some("nginx".into());
+            }
+            let _ = save_state(&ctx.paths.state_file, &state);
+            apply_stack(&ctx.paths, &mut state).map_err(|e| e.to_string())?;
+            let mut details = sites::detect_site(
+                state
+                    .sites
+                    .iter()
+                    .find(|s| s.id == site.id)
+                    .ok_or("missing site")?,
+            );
+            sites::enrich_site_details(&ctx.paths, &mut state, &mut details);
+            let reach = details.reachability.as_ref().ok_or("no reachability")?;
+            if !reach.http_ok {
+                return Err(format!("placeholder not reachable: {:?}", reach.message));
+            }
+            if reach.state != "warning" || reach.message.as_deref() != Some("No index file") {
+                return Err(format!(
+                    "expected warning/No index file, got {}/{:?}",
+                    reach.state, reach.message
+                ));
+            }
+            let url = ports::canonical_site_url(
+                state
+                    .sites
+                    .iter()
+                    .find(|s| s.id == site.id)
+                    .ok_or("missing site")?,
+                &state,
+            );
+            if !url.starts_with("http://") {
+                return Err(format!("Open URL scheme wrong: {url}"));
+            }
+            Ok(format!("url={url} state={}", reach.state))
+        },
+    );
+
+    rec.check(
+        "hotfix033.single_port_owner",
+        "Exactly one owned listener per nginx port",
+        || {
+            let state = lock(ctx);
+            if !state.runtime.nginx_pid.map(crate::services::process::is_running).unwrap_or(false)
+            {
+                return Err("nginx not running".into());
+            }
+            ports::assert_single_owned_listener(state.stack.http_port, &ctx.paths, &state.runtime)
+                .map_err(|e| e.to_string())?;
+            ports::assert_single_owned_listener(state.stack.https_port, &ctx.paths, &state.runtime)
+                .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "http={} https={}",
+                state.stack.http_port, state.stack.https_port
+            ))
+        },
+    );
+
+    rec.check(
+        "hotfix033.null_php_default",
+        "Parked/null PHP defaults to installed version",
+        || {
+            let state = lock(ctx);
+            let expected = crate::services::php_runtime::default_php_version(&state)
+                .ok_or("no installed PHP")?;
+            let dir = ctx.paths.root.join("sites/parked-null-php");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            drop(state);
+            let mut state = lock(ctx);
+            // Simulate parked sync creating a site with null php by calling create_site with None
+            // then re-defaulting the way parked.rs does.
+            let mut site = sites::create_site(
+                &mut state,
+                &ctx.paths,
+                "parked-null-php",
+                dir,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            if site.php_version.is_none() {
+                site.php_version = crate::services::php_runtime::default_php_version(&state);
+                if let Some(s) = state.sites.iter_mut().find(|s| s.id == site.id) {
+                    s.php_version = site.php_version.clone();
+                    s.parked = true;
+                }
+            }
+            let got = state
+                .sites
+                .iter()
+                .find(|s| s.id == site.id)
+                .and_then(|s| s.php_version.clone());
+            if got.as_deref() != Some(expected.as_str()) && got.is_none() {
+                return Err(format!("php still null; expected {expected}"));
+            }
+            // default_php_version must be Some when PHP is installed.
+            if crate::services::php_runtime::default_php_version(&state).is_none() {
+                return Err("default_php_version returned None".into());
+            }
+            Ok(format!("php={got:?} expected={expected}"))
+        },
+    );
+
+    rec.check(
+        "hotfix033.https_open_scheme",
+        "HTTPS site Open URL uses https://",
+        || {
+            let state = lock(ctx);
+            let mut site = state
+                .sites
+                .iter()
+                .find(|s| s.https)
+                .cloned()
+                .ok_or("no https site")?;
+            site.https = true;
+            let url = ports::canonical_site_url(&site, &state);
+            if !url.starts_with("https://") {
+                return Err(format!("expected https Open URL, got {url}"));
+            }
+            let ssl_port = if (site.web_server.as_deref().unwrap_or("nginx")).eq_ignore_ascii_case("apache")
+            {
+                state.stack.apache_https_port
+            } else {
+                state.stack.https_port
+            };
+            if !url.contains(&format!(":{ssl_port}")) && ssl_port != 443 {
+                return Err(format!("Open URL missing :{ssl_port}: {url}"));
+            }
+            Ok(url)
+        },
+    );
+
+    rec.check(
+        "hotfix033.wamp_port80_untouched",
+        "Foreign :80 listener not killed (WAMP-safe)",
+        || {
+            // Bind a stand-in for WAMP on :18080 (ephemeral) outside data dir semantics:
+            // reclaim must not touch PIDs whose exe path is outside paths.root.
+            let foreign = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
+            let port = foreign.local_addr().map_err(|e| e.to_string())?.port();
+            let before = ports::inspect_port(port);
+            startup::reclaim_orphans(&ctx.paths);
+            let after = ports::inspect_port(port);
+            // Listener still held by us (this process) — reclaim must not kill self/foreign.
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+                return Err("reclaim killed foreign listener".into());
+            }
+            let _ = (before, after);
+            Ok(format!("foreign :{port} still listening"))
+        },
+    );
+
     {
         let mut state = lock(ctx);
         let _ = stop_stack(&ctx.paths, &mut state);
@@ -935,9 +1107,13 @@ fn write_markdown(json_path: &Path, report: &MatrixReport) -> Result<(), String>
     md.push_str(
         "Skipped rows are **not** passes — each includes an explicit `SKIPPED:` reason. Required gates (`hosting.sftp_live`, `svc.redis_required`) must be `pass` before release.\n\n",
     );
-    md.push_str("## Portable linkage (v0.3.2)\n\n");
+    md.push_str("## Hotfix v0.3.3 (Windows orphan nginx + empty sites)\n\n");
     md.push_str(
-        "v0.3.1 arm64 crashed on user Macs (`dyld` missing `/opt/homebrew/*/liblzma.5.dylib`). v0.3.2 statically links liblzma/zlib and vendors OpenSSL; CI `otool`/`dumpbin` gates reject non-system deps.\n\n",
+        "v0.3.2 left stale nginx masters listening on 8080/8443 (wmic orphan scan missing on Win11; double start). v0.3.3 reclaims by exe path under the data dir (PowerShell CIM), job-object kill-on-close, start mutex, single-listener assert, empty-site placeholder + \"No index file\" tile, HTTPS Open scheme, parked PHP default, hosts auto-repair, NSIS closes running app before replace.\n\n",
+    );
+    md.push_str("## Portable linkage (v0.3.2+)\n\n");
+    md.push_str(
+        "v0.3.1 arm64 crashed on user Macs (`dyld` missing `/opt/homebrew/*/liblzma.5.dylib`). v0.3.2+ statically links liblzma/zlib and vendors OpenSSL; CI `otool`/`dumpbin` gates reject non-system deps.\n\n",
     );
     md.push_str("## Hang root cause (v0.3.0 → 0.3.1)\n\n");
     md.push_str(

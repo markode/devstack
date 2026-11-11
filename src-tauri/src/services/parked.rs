@@ -12,7 +12,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::config::{slugify, AppState, Paths, SiteRecord};
 use crate::error::{DevStackError, Result};
 use crate::paths_util::expand_home;
-use crate::services::sites::detect_site;
+use crate::services::php_runtime::default_php_version;
+use crate::services::sites::{detect_site, ensure_site_placeholder};
 
 pub fn slug_for_folder(name: &str) -> String {
     slugify(name)
@@ -101,7 +102,7 @@ pub fn sync_parked_sites(_paths: &Paths, state: &mut AppState) -> Result<usize> 
             name: name.clone(),
             path: path.clone(),
             domain: domain.clone(),
-            php_version: state.stack.php_version.clone(),
+            php_version: default_php_version(state),
             node_version: None,
             https: true,
             web_server: Some("nginx".into()),
@@ -122,6 +123,7 @@ pub fn sync_parked_sites(_paths: &Paths, state: &mut AppState) -> Result<usize> 
         site.framework = Some(details.framework);
         site.database_name = details.database_name;
         site.database_user = details.database_user;
+        let _ = ensure_site_placeholder(&path);
         taken_ids.insert(id);
         taken_domains.insert(domain);
         state.sites.push(site);
@@ -232,6 +234,7 @@ mod tests {
 
         let paths = Paths::from_root(root.join("data")).unwrap();
         let mut state = AppState::default();
+        state.stack.php_version = Some("8.4".into());
         state.sites_settings.parked_dirs = vec![parked.clone()];
         state.sites.push(SiteRecord {
             id: "manual".into(),
@@ -260,6 +263,11 @@ mod tests {
         assert_eq!(added, 1);
         let beta = state.sites.iter().find(|s| s.parked).unwrap();
         assert_eq!(beta.domain, "beta-site.test");
+        assert_eq!(beta.php_version.as_deref(), Some("8.4"));
+        assert!(parked
+            .join("Beta Site")
+            .join("index.html")
+            .exists());
         assert_eq!(sync_parked_sites(&paths, &mut state).unwrap(), 0);
 
         std::fs::remove_dir_all(parked.join("Beta Site")).unwrap();

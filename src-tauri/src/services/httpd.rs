@@ -332,6 +332,7 @@ fn write_vhost(
     https_port: u16,
 ) -> Result<()> {
     let docroot = expand_home(&site.path);
+    let _ = crate::services::sites::ensure_site_placeholder(&docroot);
     let Some(runtime) = php_for_site(site, runtimes, state) else {
         return Ok(());
     };
@@ -474,6 +475,9 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
             return reload_apache(paths, state);
         }
     }
+    // Kill stale DevStack httpd left by prior runs (never touches WAMP / live PHP).
+    let keep: Vec<u32> = state.runtime.php_pids.values().copied().collect();
+    crate::startup::reclaim_orphans_for_names(paths, &["httpd.exe"], &keep);
     // Reclaim a stale FOREGROUND httpd left from a prior crash / DETACHED spawn.
     if let Some(old) = read_pid(&paths.pid_file("apache")) {
         let _ = stop_pid(old);
@@ -548,12 +552,14 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
     std::mem::forget(child);
     write_pid(&paths.pid_file("apache"), pid)?;
 
-    // Wait until the process is still alive and accepts TCP on the HTTPS port.
+    // Wait until the process is still alive and accepts TCP on both listen ports.
     // Do NOT use bind()-fails-as-ready: Windows SO_REUSEADDR lets bind succeed
     // while httpd is already listening, which false-negatived readiness.
     // Keep the poll budget tight so site setting toggles stay under ~2s.
+    let http_port = state.stack.apache_http_port;
     let https_port = state.stack.apache_https_port;
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], https_port));
+    let http_addr = std::net::SocketAddr::from(([127, 0, 0, 1], http_port));
+    let https_addr = std::net::SocketAddr::from(([127, 0, 0, 1], https_port));
     let mut died = false;
     // 5ms → 25ms backoff; 3s ceiling covers Windows mpm_winnt's extra warm-up beat.
     let ready = crate::services::perf::poll_backoff(
@@ -565,9 +571,17 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
                 died = true;
                 return Some(());
             }
-            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100))
-                .is_ok()
-                .then_some(())
+            let http_ok = std::net::TcpStream::connect_timeout(
+                &http_addr,
+                std::time::Duration::from_millis(100),
+            )
+            .is_ok();
+            let https_ok = std::net::TcpStream::connect_timeout(
+                &https_addr,
+                std::time::Duration::from_millis(100),
+            )
+            .is_ok();
+            (http_ok && https_ok).then_some(())
         },
     )
     .is_some();
@@ -582,12 +596,13 @@ fn start_apache_inner(paths: &Paths, state: &mut AppState, opts: StartApacheOpts
         let err = fs::read_to_string(paths.logs.join("apache.err")).unwrap_or_default();
         let log = fs::read_to_string(paths.logs.join("apache/error.log")).unwrap_or_default();
         return Err(DevStackError::Message(format!(
-            "Apache started (pid {pid}) but port {https_port} never became ready.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
+            "Apache started (pid {pid}) but ports {http_port}/{https_port} never became ready.\n--- apache.err ---\n{err}\n--- error.log ---\n{log}"
         )));
     }
-    record_apache_fingerprint(paths, pid);
-
     state.runtime.apache_pid = Some(pid);
+    crate::services::ports::assert_single_owned_listener(http_port, paths, &state.runtime)?;
+    crate::services::ports::assert_single_owned_listener(https_port, paths, &state.runtime)?;
+    record_apache_fingerprint(paths, pid);
     for site in state.sites.iter_mut().filter(|s| site_uses_apache(s)) {
         site.status = "running".into();
     }

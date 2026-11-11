@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { formatSiteHost, formatSiteUrl } from "./siteUrl";
+import {
+  ensureHttpsSchemeForSslPort,
+  formatSiteHost,
+  formatSiteUrl,
+  stackSslPorts,
+} from "./siteUrl";
 
 const site = { domain: "blog.test", https: true, webServer: "nginx" };
 
@@ -46,5 +51,27 @@ describe("formatSiteUrl", () => {
 
   it("formats a scheme-less host", () => {
     expect(formatSiteHost(site, { httpsPort: 8443 })).toBe("blog.test:8443");
+  });
+
+  it("forces https when the listen port is an SSL port", () => {
+    // Safety net: http + SSL port must never open as plain HTTP.
+    expect(
+      ensureHttpsSchemeForSslPort("http://blog.test:8443", [443, 8443, 8444]),
+    ).toBe("https://blog.test:8443");
+    expect(
+      ensureHttpsSchemeForSslPort("http://blog.test:443/path", [443, 8443]),
+    ).toBe("https://blog.test/path");
+    expect(
+      ensureHttpsSchemeForSslPort("http://blog.test:8080", [443, 8443]),
+    ).toBe("http://blog.test:8080");
+    expect(
+      ensureHttpsSchemeForSslPort("https://blog.test:8443", [443, 8443]),
+    ).toBe("https://blog.test:8443");
+  });
+
+  it("exposes stack SSL ports including 443", () => {
+    expect(stackSslPorts({ httpsPort: 8443, apacheHttpsPort: 8444 })).toEqual([
+      443, 8443, 8444,
+    ]);
   });
 });
