@@ -971,6 +971,93 @@ pub fn ensure_hosts_if_needed(paths: &Paths, state: &AppState) -> Result<HostsSt
     Ok(check_hosts_status(paths, state))
 }
 
+/// True when we can bind UDP 127.0.0.1:port (Hyper-V excluded ranges fail here).
+pub fn udp_port_bindable(port: u16) -> bool {
+    UdpSocket::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Best-effort parse of `netsh … excludedportrange` (Windows Hyper-V reservations).
+fn windows_excluded_udp_ranges() -> Vec<(u16, u16)> {
+    #[cfg(windows)]
+    {
+        let out = crate::services::process::command("netsh")
+            .args([
+                "interface",
+                "ipv4",
+                "show",
+                "excludedportrange",
+                "protocol=udp",
+            ])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        parse_excluded_port_ranges(&out)
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+fn parse_excluded_port_ranges(netsh_out: &str) -> Vec<(u16, u16)> {
+    let mut ranges = Vec::new();
+    for line in netsh_out.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let Ok(start) = parts[0].parse::<u16>() else {
+            continue;
+        };
+        let Ok(end) = parts[1].parse::<u16>() else {
+            continue;
+        };
+        if start > 0 && end >= start {
+            ranges.push((start, end));
+        }
+    }
+    ranges
+}
+
+fn port_in_excluded_ranges(port: u16, ranges: &[(u16, u16)]) -> bool {
+    ranges.iter().any(|(a, b)| port >= *a && port <= *b)
+}
+
+/// Pick a free UDP DNS port, preferring `preferred` then known candidates.
+pub fn pick_dns_port(preferred: u16) -> u16 {
+    let excluded = windows_excluded_udp_ranges();
+    let mut candidates = vec![preferred];
+    candidates.extend(
+        crate::services::ports::candidate_ports_for("dns", preferred)
+            .into_iter()
+            .filter(|p| *p != preferred),
+    );
+    // Extra walk when Hyper-V has carved large ranges out of the low 5xxx space.
+    for p in [5357, 5358, 5359, 5454, 5553, 15354, 25353] {
+        if !candidates.contains(&p) {
+            candidates.push(p);
+        }
+    }
+    for p in candidates {
+        if port_in_excluded_ranges(p, &excluded) {
+            continue;
+        }
+        if udp_port_bindable(p) {
+            return p;
+        }
+    }
+    // Last resort: scan upward.
+    let mut p = preferred.saturating_add(1).max(1024);
+    for _ in 0..400 {
+        if !port_in_excluded_ranges(p, &excluded) && udp_port_bindable(p) {
+            return p;
+        }
+        p = p.saturating_add(1);
+    }
+    preferred
+}
+
 /// Start a tiny UDP DNS that answers `*.test` / `*.test.` with 127.0.0.1.
 pub fn start_dns(paths: &Paths, state: &mut AppState, port: u16) -> Result<()> {
     if let Some(pid) = state.runtime.dns_pid {
@@ -982,10 +1069,23 @@ pub fn start_dns(paths: &Paths, state: &mut AppState, port: u16) -> Result<()> {
     let log_out = paths.logs.join("dns.out");
     let log_err = paths.logs.join("dns.err");
 
+    // Windows 10013 / Hyper-V excluded ranges: probe UDP bind and remapped before spawn.
+    let chosen = pick_dns_port(port);
+    if chosen != port {
+        // Expected fallback — warn (not error) so the Logs badge stays clean.
+        crate::applog::warn(
+            "dns",
+            format!(
+                "DNS port {port} unavailable (bind denied or excluded); using {chosen}"
+            ),
+        );
+        state.stack.dns_port = chosen;
+    }
+
     let exe = std::env::current_exe().unwrap_or_else(|_| Path::new("devstack").to_path_buf());
     let child = spawn_logged(
         &exe,
-        &["--devstack-dns", &port.to_string()],
+        &["--devstack-dns", &chosen.to_string()],
         None,
         &log_out,
         &log_err,
@@ -994,18 +1094,25 @@ pub fn start_dns(paths: &Paths, state: &mut AppState, port: u16) -> Result<()> {
         Ok(child) => {
             let pid = child.id();
             std::mem::forget(child);
+            // Brief settle — if bind failed the helper exits immediately.
+            thread::sleep(Duration::from_millis(80));
+            if !is_running(pid) {
+                return Err(DevStackError::Message(format!(
+                    "DNS helper exited after bind on 127.0.0.1:{chosen}"
+                )));
+            }
             write_pid(&pid_path, pid)?;
             state.runtime.dns_pid = Some(pid);
             #[cfg(target_os = "macos")]
             {
-                if let Err(e) = helper_run(paths, &["resolver-macos", &port.to_string()]) {
+                if let Err(e) = helper_run(paths, &["resolver-macos", &chosen.to_string()]) {
                     eprintln!("devstack resolver-macos: {e}");
                 }
             }
             Ok(())
         }
         Err(_) => {
-            start_dns_thread(port)?;
+            start_dns_thread(chosen)?;
             write_pid(&pid_path, std::process::id())?;
             state.runtime.dns_pid = Some(std::process::id());
             Ok(())
@@ -1029,7 +1136,8 @@ pub fn stop_dns(paths: &Paths, state: &mut AppState) -> Result<()> {
 
 fn start_dns_thread(port: u16) -> Result<()> {
     let sock = UdpSocket::bind(("127.0.0.1", port)).map_err(|e| {
-        DevStackError::Message(format!("DNS bind 127.0.0.1:{port} failed: {e}"))
+        let code = e.raw_os_error().unwrap_or(0);
+        DevStackError::Message(format!("DNS bind 127.0.0.1:{port} failed ({code}): {e}"))
     })?;
     sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
     thread::Builder::new()
@@ -1047,6 +1155,8 @@ pub fn run_dns_daemon(port: u16) -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             let code = e.raw_os_error().unwrap_or(0);
+            // Parent start_dns already tried alternatives; keep this message concrete
+            // for dns.err without going through applog (no error badge from the helper).
             return Err(DevStackError::Message(format!(
                 "DNS bind 127.0.0.1:{port} failed ({code}): {e}. Using hosts-file resolution only."
             )));
@@ -1120,6 +1230,26 @@ fn _write_all(mut w: impl Write, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_netsh_excluded_port_ranges() {
+        let sample = r#"
+Protocol tcp Port Exclusion Ranges
+
+Start Port    End Port
+----------    --------
+      5353        5452
+     50000       50059     *
+
+* - Administered port exclusions.
+"#;
+        let ranges = parse_excluded_port_ranges(sample);
+        assert!(ranges.contains(&(5353, 5452)));
+        assert!(ranges.contains(&(50000, 50059)));
+        assert!(port_in_excluded_ranges(5353, &ranges));
+        assert!(port_in_excluded_ranges(5400, &ranges));
+        assert!(!port_in_excluded_ranges(5453, &ranges));
+    }
 
     #[test]
     fn hosts_block_includes_ipv4_and_ipv6() {

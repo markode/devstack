@@ -558,6 +558,9 @@ pub fn load_state(path: &Path) -> Result<AppState> {
     for site in &mut state.sites {
         site.ensure_domain();
     }
+    // Fill legacy `php_version: null` from the installed default when possible.
+    // Callers (bootstrap / list / apply) persist via save_state.
+    let _ = crate::services::php_runtime::migrate_null_php_versions(&mut state);
     Ok(state)
 }
 

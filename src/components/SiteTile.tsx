@@ -1,6 +1,7 @@
 import { useState, type KeyboardEvent, type MouseEvent } from "react";
 import * as client from "../client";
-import { formatSiteHost, formatSiteUrl } from "../siteUrl";
+import { siteOpenUrl } from "../open";
+import { formatSiteHost } from "../siteUrl";
 import type { SiteDetails, StackStatus } from "../types";
 
 const STATE_LABEL: Record<string, string> = {
@@ -14,12 +15,18 @@ export function siteState(d: SiteDetails): string {
   return d.reachability?.state ?? d.site.status ?? "stopped";
 }
 
+/** Match backend reachability copy for empty / incomplete WordPress trees. */
+export function isWordpressNotInstalledMessage(message?: string | null): boolean {
+  return (message ?? "").trim().toLowerCase() === "wordpress not installed";
+}
+
 export function SiteTile({
   details,
   stack,
   phpOptions,
   busy = false,
   onOpenDetail,
+  onOpen,
   onOpenUrl,
   onFolder,
   onTerminal,
@@ -34,7 +41,10 @@ export function SiteTile({
   phpOptions: string[];
   busy?: boolean;
   onOpenDetail: () => void;
-  onOpenUrl: (url: string) => void;
+  /** Primary Open — parent must use `siteOpenUrl` / `formatSiteUrl`. */
+  onOpen: () => void;
+  /** Open an arbitrary URL (e.g. wp-admin/install.php). */
+  onOpenUrl?: (url: string) => void;
   onFolder: () => void;
   onTerminal: () => void;
   onDatabase: () => void;
@@ -57,7 +67,9 @@ export function SiteTile({
           ? "warn"
           : "";
   const server = (site.webServer ?? "nginx").toLowerCase();
-  const url = formatSiteUrl(site, stack);
+  const url = siteOpenUrl(site, stack);
+  const reachMsg = details.reachability?.message ?? null;
+  const wpNeedsInstall = isWordpressNotInstalledMessage(reachMsg);
   const hasDb = Boolean(details.databaseName || details.phpmyadminUrl);
   const stop = (e: MouseEvent) => e.stopPropagation();
 
@@ -115,13 +127,28 @@ export function SiteTile({
         </span>
       </div>
 
-      {details.reachability?.message && state !== "running" ? (
+      {reachMsg && state !== "running" ? (
         <div
           className={`site-tile-note ${
             state === "error" || state === "warning" ? "bad" : ""
           }`}
+          data-testid="site-tile-reachability"
         >
-          {details.reachability.message}
+          <span>{reachMsg}</span>
+          {wpNeedsInstall && onOpenUrl ? (
+            <button
+              type="button"
+              className="btn btn-install site-tile-note-action"
+              data-testid="site-tile-wp-install"
+              title="Open WordPress installer"
+              onClick={(e) => {
+                stop(e);
+                onOpenUrl(`${url.replace(/\/$/, "")}/wp-admin/install.php`);
+              }}
+            >
+              Install
+            </button>
+          ) : null}
         </div>
       ) : null}
 
@@ -175,7 +202,7 @@ export function SiteTile({
       </div>
 
       <div className="site-tile-actions" onClick={stop}>
-        <button type="button" className="btn btn-install" onClick={() => onOpenUrl(url)}>
+        <button type="button" className="btn btn-install" onClick={onOpen}>
           Open
         </button>
         <button type="button" className="btn btn-install" onClick={onFolder}>

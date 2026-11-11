@@ -52,10 +52,15 @@ pub fn render_stack(
     // Some nginx builds also probe `$prefix/logs/error.log` before reading conf.
     fs::create_dir_all(paths.nginx.join("logs"))?;
 
+    // Drop apache-only / deleted site leftovers before rewriting nginx vhosts.
+    crate::services::vhost_ext::purge_stale_vhost_confs(paths, state);
     if sites_dir.exists() {
         for entry in fs::read_dir(&sites_dir)? {
             let entry = entry?;
-            let _ = fs::remove_file(entry.path());
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("conf") {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 
@@ -66,9 +71,12 @@ pub fn render_stack(
     // mailpit/phpMyAdmin proxy blocks.
     write_default_catch_all(&sites_dir, http_port, https_port)?;
 
-    // Write every site into nginx — Apache-preferred sites are dual-bound so a
-    // web-server toggle is a metadata/URL change, not a stop+start on Windows.
-    for site in &state.sites {
+    // Only nginx-preferred sites — apache sites must not leave server blocks here.
+    for site in state
+        .sites
+        .iter()
+        .filter(|s| !crate::services::httpd::site_uses_apache(s))
+    {
         write_site_conf(
             paths,
             state,
@@ -163,11 +171,18 @@ fn php_for_site<'a>(
         .php_version
         .clone()
         .or_else(|| state.stack.php_version.clone())
-        .or_else(|| runtimes.first().map(|(v, _)| v.clone()))?;
-    runtimes
-        .iter()
-        .find(|(v, r)| *v == want || r.version == want || r.version.starts_with(&want))
-        .map(|(_, r)| r)
+        .or_else(|| runtimes.first().map(|(v, _)| v.clone()));
+    if let Some(want) = want.as_ref() {
+        if let Some(rt) = runtimes
+            .iter()
+            .find(|(v, r)| *v == *want || r.version == *want || r.version.starts_with(want))
+            .map(|(_, r)| r)
+        {
+            return Some(rt);
+        }
+    }
+    // Requested PHP missing — fall back to any installed runtime so the site still serves.
+    runtimes.first().map(|(_, r)| r)
 }
 
 fn write_default_catch_all(sites_dir: &Path, http_port: u16, _https_port: u16) -> Result<()> {
@@ -228,7 +243,7 @@ fn write_site_conf(
   listen [::]:{http_port};
   server_name {domain};
 {logs}
-  return 301 {dest}$request_uri;
+  return 302 {dest}$request_uri;
 }}
 "#,
             domain = crate::services::vhost_ext::nginx_server_names(site),
@@ -420,6 +435,7 @@ pub fn collect_php_versions(state: &AppState) -> Vec<String> {
 }
 
 pub fn start_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
+    crate::services::vhost_ext::purge_stale_vhost_confs(paths, state);
     if let Some(pid) = state.runtime.nginx_pid {
         if is_running(pid) {
             return reload_nginx(paths, state);
@@ -532,6 +548,7 @@ fn wait_nginx_listen(
 }
 
 pub fn reload_nginx(paths: &Paths, state: &mut AppState) -> Result<()> {
+    crate::services::vhost_ext::purge_stale_vhost_confs(paths, state);
     let versions = collect_php_versions(state);
     let mut runtimes = Vec::new();
     for (v, res) in start_php_many(paths, state, &versions) {
@@ -621,6 +638,83 @@ mod tests {
             "missing hash bucket bump: {body}"
         );
         assert!(body.contains("server_names_hash_max_size 1024;"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn https_redirect_uses_302_not_301() {
+        let dir = std::env::temp_dir().join(format!("devstack-nginx-302-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        let site_path = dir.join("sites/shop");
+        fs::create_dir_all(&site_path).unwrap();
+        let mut state = AppState::default();
+        state.sites.push(SiteRecord {
+            id: "shop".into(),
+            name: "shop".into(),
+            path: site_path,
+            domain: "shop.test".into(),
+            php_version: None,
+            node_version: None,
+            https: true,
+            web_server: Some("nginx".into()),
+            framework: None,
+            database_engine: None,
+            database_name: None,
+            database_user: None,
+            database_password: None,
+            status: "stopped".into(),
+            is_template: false,
+            parked: false,
+            xdebug: false,
+            tld: "test".into(),
+            aliases: Vec::new(),
+            wildcard: false,
+        });
+        let _ = render_stack(&paths, &state, &[]).unwrap();
+        let vhost = fs::read_to_string(paths.nginx_sites_dir().join("shop.conf")).unwrap();
+        assert!(
+            vhost.contains("return 302 "),
+            "expected temporary redirect, got:\n{vhost}"
+        );
+        assert!(
+            !vhost.contains("return 301 "),
+            "301 caches in browsers — must not be used:\n{vhost}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_skips_apache_preferred_sites() {
+        let dir = std::env::temp_dir().join(format!("devstack-nginx-skip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = Paths::from_root(dir.clone()).unwrap();
+        let mut state = AppState::default();
+        state.sites.push(SiteRecord {
+            id: "blog".into(),
+            name: "blog".into(),
+            path: dir.join("blog"),
+            domain: "blog.test".into(),
+            php_version: None,
+            node_version: None,
+            https: false,
+            web_server: Some("apache".into()),
+            framework: None,
+            database_engine: None,
+            database_name: None,
+            database_user: None,
+            database_password: None,
+            status: "stopped".into(),
+            is_template: false,
+            parked: false,
+            xdebug: false,
+            tld: "test".into(),
+            aliases: Vec::new(),
+            wildcard: false,
+        });
+        let _ = render_stack(&paths, &state, &[]).unwrap();
+        assert!(!paths.nginx_sites_dir().join("blog.conf").exists());
+        assert!(paths.nginx_sites_dir().join("00-default.conf").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }
