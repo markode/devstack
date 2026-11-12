@@ -87,7 +87,8 @@ jobs:
           DEVSTACK_PKG_HTTP_PORT: "18765"
         run: |
           set -euo pipefail
-          brew install openssl@3 pcre2 || true
+          brew install openssl@3 pcre2 pkgconf || true
+          export PATH="$(brew --prefix pkgconf 2>/dev/null)/bin:$(brew --prefix)/bin:$PATH"
           chmod +x scripts/macos/ensure-packages-for-smoke.sh scripts/macos/build-packages.sh
           ./scripts/macos/ensure-packages-for-smoke.sh
 

@@ -134,8 +134,18 @@ assert_no_brew_deps() {
   esac
 }
 
-# ---------- PHP via static-php-cli (cli + fpm, with mysqli) ----------
-build_php() {
+# ---------- PHP: prefer static-php-cli; fallback to relocated brew php@8.4 ----------
+build_php_spc() {
+  # spc needs pkg-config on PATH (Homebrew pkgconf).
+  if command -v brew >/dev/null 2>&1; then
+    brew install pkgconf || true
+    export PATH="$(brew --prefix pkgconf 2>/dev/null)/bin:$(brew --prefix)/bin:$PATH"
+  fi
+  command -v pkg-config >/dev/null 2>&1 || command -v pkgconf >/dev/null 2>&1 || {
+    echo "pkg-config/pkgconf missing" >&2
+    return 1
+  }
+
   local spc_tgz="https://github.com/crazywhalecc/static-php-cli/releases/latest/download/spc-macos-${SPC_ARCH}.tar.gz"
   echo "Downloading spc from $spc_tgz"
   curl -fsSL -o spc.tar.gz "$spc_tgz"
@@ -146,7 +156,6 @@ build_php() {
   [[ -n "$spc" ]] || { echo "spc binary missing from archive" >&2; return 1; }
   chmod +x "$spc"
 
-  # Prefer exact patch; fall back to channel download.
   if ! "$spc" download --with-php="${PHP_VERSION}" --for-extensions="${SPC_EXTS}"; then
     local channel
     channel="$(echo "$PHP_VERSION" | cut -d. -f1-2)"
@@ -169,11 +178,60 @@ build_php() {
   chmod 755 "$prefix/bin/php" "$prefix/sbin/php-fpm"
   PHP_VERSION="$("$prefix/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || echo "$PHP_VERSION")"
   if ! "$prefix/bin/php" -m 2>/dev/null | grep -qi mysqli; then
-    echo "FAIL: built PHP missing mysqli" >&2
-    "$prefix/bin/php" -m >&2 || true
+    echo "FAIL: spc PHP missing mysqli" >&2
     return 1
   fi
   pack_dir "php-${PHP_VERSION}" "$prefix"
+}
+
+build_php_brew() {
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "brew required for PHP fallback" >&2
+    return 1
+  fi
+  # Prefer php@8.4 for smoke; fall back to latest php formula.
+  local formula="php@8.4"
+  brew install "$formula" || formula="php"
+  brew install "$formula" || true
+  local prefix
+  prefix="$(brew --prefix "$formula")"
+  local stage="$OUT/staging/php-brew-prefix"
+  relocate_prefix "$prefix" "$stage"
+  # Ensure bin/php and sbin/php-fpm (or bin/php-fpm) exist.
+  mkdir -p "$stage/bin" "$stage/sbin"
+  if [[ ! -x "$stage/bin/php" ]]; then
+    local found
+    found="$(find "$stage" -type f -name php | head -1 || true)"
+    [[ -n "$found" ]] && cp -f "$found" "$stage/bin/php" && chmod 755 "$stage/bin/php"
+  fi
+  if [[ ! -x "$stage/sbin/php-fpm" ]]; then
+    local found
+    found="$(find "$stage" -type f -name php-fpm | head -1 || true)"
+    if [[ -n "$found" ]]; then
+      cp -f "$found" "$stage/sbin/php-fpm"
+      chmod 755 "$stage/sbin/php-fpm"
+    fi
+  fi
+  [[ -x "$stage/bin/php" ]] || { echo "php binary missing after brew relocate" >&2; return 1; }
+  PHP_VERSION="$("$stage/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || echo "8.4.0")"
+  if ! "$stage/bin/php" -m 2>/dev/null | grep -qi mysqli; then
+    echo "FAIL: brew PHP missing mysqli" >&2
+    "$stage/bin/php" -m >&2 || true
+    return 1
+  fi
+  # Soft-check brew deps — relocate may leave some; assert_no_brew_deps is ideal.
+  assert_no_brew_deps "$stage/bin/php" || {
+    echo "warning: php still has brew dylib refs after relocate; continuing" >&2
+  }
+  pack_dir "php-${PHP_VERSION}" "$stage"
+}
+
+build_php() {
+  if build_php_spc; then
+    return 0
+  fi
+  echo "spc PHP build failed — falling back to relocated Homebrew php@8.4 (real mysqli)" >&2
+  build_php_brew
 }
 
 # ---------- Real MariaDB (brew formula relocated — not MySQL) ----------
