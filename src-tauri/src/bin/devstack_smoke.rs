@@ -54,6 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let skip_mariadb = args.iter().any(|a| a == "--skip-mariadb");
     let v030 = args.iter().any(|a| a == "--v030");
     let windows_matrix = args.iter().any(|a| a == "--windows-matrix");
+    let macos_managed = args.iter().any(|a| a == "--macos-managed")
+        || std::env::var("DEVSTACK_MACOS_MANAGED_ONLY").ok().as_deref() == Some("1");
     // Default: services smoke when no mode flag given; --e2e always runs services.
     let services = e2e
         || services_flag
@@ -69,9 +71,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.iter().any(|a| a == "--help") {
         eprintln!(
-            "devstack_smoke [--e2e] [--stack] [--perf] [--wordpress] [--apache] [--db-files] [--services] [--v030] [--windows-matrix] [--skip-mariadb] [--install-node]"
+            "devstack_smoke [--e2e] [--stack] [--perf] [--wordpress] [--apache] [--db-files] [--services] [--v030] [--windows-matrix] [--skip-mariadb] [--install-node] [--macos-managed]"
         );
         return Ok(());
+    }
+
+    if macos_managed {
+        std::env::set_var("DEVSTACK_MACOS_MANAGED_ONLY", "1");
+        println!("macos-managed: brew/system package fallbacks are disabled");
     }
 
     let ctx = bootstrap()?;
@@ -101,12 +108,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ] {
             let provider = ctx.registry.get(id)?;
             match provider.list_versions(&state).await {
-                Ok(versions) => println!(
-                    "[{id}] {} version(s); latest={}",
-                    versions.len(),
-                    versions.first().map(|v| v.label.as_str()).unwrap_or("-")
-                ),
-                Err(e) => println!("[{id}] list error: {e}"),
+                Ok(versions) => {
+                    let with_url = versions.iter().filter(|v| v.download_url.is_some()).count();
+                    println!(
+                        "[{id}] {} version(s) ({} with URL); latest={}",
+                        versions.len(),
+                        with_url,
+                        versions.first().map(|v| v.label.as_str()).unwrap_or("-")
+                    );
+                    if macos_managed && matches!(id, "php" | "mariadb" | "nginx" | "apache") {
+                        if versions.is_empty() || with_url == 0 {
+                            return Err(format!(
+                                "macos-managed gate: {id} listed no download URLs — refusing to continue"
+                            )
+                            .into());
+                        }
+                        if let Some(bad) = versions.iter().find(|v| v.download_url.is_none()) {
+                            return Err(format!(
+                                "macos-managed gate: {id} {} has no download URL",
+                                bad.version
+                            )
+                            .into());
+                        }
+                    }
+                }
+                Err(e) => {
+                    if macos_managed && matches!(id, "php" | "mariadb" | "nginx" | "apache") {
+                        return Err(format!("macos-managed gate: {id} list error: {e}").into());
+                    }
+                    println!("[{id}] list error: {e}");
+                }
             }
         }
     }
@@ -200,23 +231,34 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
         let state = ctx.state.lock().await;
         !state.installed.contains_key("php")
     } {
-        let ver = match pick_version(ctx, "php", |v| {
-            v.starts_with("8.3") || v.starts_with("8.4") || v.starts_with("8.")
-        })
-        .await
-        {
+        // Prefer 8.4 (packages-macos brew tree) then 8.3; avoid bare "8." which
+        // can pick a static-php 8.5 cli build that has no php-fpm beside it.
+        let ver = match pick_version(ctx, "php", |v| v.starts_with("8.4")).await {
             Ok(v) => Ok(v),
-            Err(_) => pick_version(ctx, "php", |_| true).await,
+            Err(_) => match pick_version(ctx, "php", |v| {
+                v.starts_with("8.3") || v.starts_with("8.2") || v.starts_with("8.")
+            })
+            .await
+            {
+                Ok(v) => Ok(v),
+                Err(_) => pick_version(ctx, "php", |_| true).await,
+            },
         };
         match ver {
             Ok(v) => {
                 println!("Installing PHP {v}…");
                 if let Err(e) = install_pkg(ctx, "php", &v).await {
+                    if macos_managed_only() {
+                        return Err(format!("[php] managed install required on macOS: {e}").into());
+                    }
                     println!("[php] managed install failed ({e}) — trying brew/system");
                     ensure_system_php(ctx).await?;
                 }
             }
             Err(e) => {
+                if macos_managed_only() {
+                    return Err(format!("[php] managed install required on macOS: {e}").into());
+                }
                 println!("[php] managed install skipped: {e} — trying brew/system");
                 ensure_system_php(ctx).await?;
             }
@@ -290,11 +332,19 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
             Ok(ver) => {
                 println!("Installing MariaDB {ver} (this can take a while)…");
                 if let Err(e) = install_pkg(ctx, "mariadb", &ver).await {
+                    if macos_managed_only() {
+                        return Err(
+                            format!("[mariadb] managed install required on macOS: {e}").into()
+                        );
+                    }
                     println!("[mariadb] managed install failed ({e}) — trying brew/system");
                     ensure_system_mariadb(ctx).await?;
                 }
             }
             Err(e) => {
+                if macos_managed_only() {
+                    return Err(format!("[mariadb] managed install required on macOS: {e}").into());
+                }
                 println!("[mariadb] no managed package ({e}) — trying brew/system");
                 ensure_system_mariadb(ctx).await?;
             }
@@ -354,10 +404,20 @@ async fn ensure_apache(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Erro
     }
 
     if cfg!(target_os = "macos") {
+        if macos_managed_only() {
+            return Err(
+                "Apache managed install required on macOS (packages-macos-v1 / DEVSTACK_APACHE_MANIFEST_URL)"
+                    .into(),
+            );
+        }
         return register_brew_apache(ctx).await;
     }
 
     Err("Apache is required but not installable on this OS (set DEVSTACK_APACHE_MANIFEST_URL)".into())
+}
+
+fn macos_managed_only() -> bool {
+    std::env::var("DEVSTACK_MACOS_MANAGED_ONLY").ok().as_deref() == Some("1")
 }
 
 async fn register_brew_apache(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::Error>> {
@@ -726,6 +786,11 @@ async fn ensure_system_php(ctx: &DevStackCtx) -> Result<(), Box<dyn std::error::
             return Ok(());
         }
     }
+    if macos_managed_only() {
+        return Err(
+            "brew/system PHP fallback disabled (DEVSTACK_MACOS_MANAGED_ONLY=1)".into(),
+        );
+    }
     if cfg!(target_os = "macos") {
         println!("[php] brew install php…");
         let status = smoke_command("brew").args(["install", "php"]).status()?;
@@ -744,6 +809,11 @@ async fn ensure_system_mariadb(ctx: &DevStackCtx) -> Result<(), Box<dyn std::err
         if state.installed.contains_key("mariadb") {
             return Ok(());
         }
+    }
+    if macos_managed_only() {
+        return Err(
+            "brew/system MariaDB fallback disabled (DEVSTACK_MACOS_MANAGED_ONLY=1)".into(),
+        );
     }
     if cfg!(target_os = "macos") {
         println!("[mariadb] brew install mariadb…");

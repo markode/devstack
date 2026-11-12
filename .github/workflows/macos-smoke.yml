@@ -1,4 +1,6 @@
-# macOS unit tests + end-to-end stack smoke (PHP + MariaDB + Nginx + sites).
+# macOS unit tests + end-to-end stack smoke (PHP + MariaDB + Nginx + Apache).
+# Brew may exist on the runner for *building* packages, but the app install path
+# must succeed with Homebrew binaries hidden from PATH.
 name: macOS smoke
 
 on:
@@ -11,7 +13,7 @@ on:
 jobs:
   macos-smoke:
     runs-on: macos-latest
-    timeout-minutes: 75
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -51,17 +53,13 @@ jobs:
           OPENSSL_STATIC: "1"
         run: |
           set -euo pipefail
-          # Ensure Homebrew xz is visible during the build so a non-static link
-          # would incorrectly pick it up — then otool must still show no /opt/homebrew.
           brew list xz >/dev/null 2>&1 || brew install xz || true
           cargo build --bin devstack_smoke --release
           ../scripts/check-macos-dylibs.sh ./target/release/devstack_smoke
-          # Also build the real app binary (no bundle) and gate it.
           (cd .. && npm run build && npx tauri build --no-bundle)
           BIN="./target/release/devstack"
           test -x "$BIN"
           ../scripts/check-macos-dylibs.sh "$BIN"
-          # Hide Homebrew xz and require the binary still starts (dyld fail = exit).
           XZ_OPT=""
           if [[ -d /opt/homebrew/opt/xz ]]; then XZ_OPT=/opt/homebrew/opt/xz; fi
           if [[ -d /usr/local/opt/xz ]]; then XZ_OPT=/usr/local/opt/xz; fi
@@ -82,28 +80,75 @@ jobs:
           fi
           echo "OK: release binary alive 3s with Homebrew xz hidden"
 
-      - name: Brew PHP + MariaDB + httpd (managed packages are Windows-first)
-        timeout-minutes: 20
+      - name: Ensure prebuilt packages (release or local build)
+        timeout-minutes: 100
+        env:
+          OUT: ${{ runner.temp }}/devstack-macos-pkgs
+          DEVSTACK_PKG_HTTP_PORT: "18765"
         run: |
           set -euo pipefail
-          brew update
-          brew install php mariadb httpd || brew upgrade php mariadb httpd || true
-          php -v
-          php -m | grep -i mysqli
-          brew --prefix mariadb
-          brew --prefix httpd
-          brew services stop httpd || true
+          brew install openssl@3 pcre2 pkgconf || true
+          export PATH="$(brew --prefix pkgconf 2>/dev/null)/bin:$(brew --prefix)/bin:$PATH"
+          chmod +x scripts/macos/ensure-packages-for-smoke.sh scripts/macos/build-packages.sh
+          ./scripts/macos/ensure-packages-for-smoke.sh
 
-      - name: E2E — install PHP + MariaDB + Nginx, sites, curl, DB round-trip
+      # Build the smoke binary while cargo/brew toolchains are still on PATH.
+      # Homebrew is hidden only for the E2E *run* so installs cannot use brew php.
+      - name: Build devstack_smoke (before hiding Homebrew)
         working-directory: src-tauri
-        timeout-minutes: 40
+        timeout-minutes: 20
         env:
-          DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-e2e
-          DEVSTACK_RESET_SITES: "1"
           LZMA_API_STATIC: "1"
           LIBZ_SYS_STATIC: "1"
           OPENSSL_STATIC: "1"
         run: |
           set -euo pipefail
           cargo build --bin devstack_smoke --release
-          ./target/release/devstack_smoke --e2e
+          test -x ./target/release/devstack_smoke
+
+      - name: Hide Homebrew binaries from PATH
+        run: |
+          set -euo pipefail
+          # Keep system paths; drop Homebrew so the app cannot accidentally use brew php/httpd.
+          NEW_PATH=""
+          IFS=':' read -ra PARTS <<< "$PATH"
+          for p in "${PARTS[@]}"; do
+            case "$p" in
+              /opt/homebrew/*|/usr/local/Cellar/*|/usr/local/opt/*|/home/linuxbrew/*) continue ;;
+              /usr/local/bin|/opt/homebrew/bin|/opt/homebrew/sbin) continue ;;
+            esac
+            if [[ -z "$NEW_PATH" ]]; then NEW_PATH="$p"; else NEW_PATH="$NEW_PATH:$p"; fi
+          done
+          # Apply in this step AND for subsequent steps. GITHUB_ENV alone only
+          # affects later steps, so a command -v brew check would still see brew.
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${NEW_PATH}"
+          echo "PATH=$PATH" >> "$GITHUB_ENV"
+          echo "HOMEBREW_HIDDEN=1" >> "$GITHUB_ENV"
+          hash -r || true
+          if command -v brew >/dev/null 2>&1; then
+            echo "FAIL: brew still on PATH after hide (at $(command -v brew))" >&2
+            echo "PATH=$PATH" >&2
+            exit 1
+          fi
+          if command -v php >/dev/null 2>&1; then
+            echo "warning: system php still visible at $(command -v php)"
+          fi
+          echo "PATH after hide: $PATH"
+
+      - name: E2E — install PHP + MariaDB + Nginx + Apache via app, curl .test:8080
+        working-directory: src-tauri
+        timeout-minutes: 50
+        env:
+          DEVSTACK_DATA_DIR: ${{ runner.temp }}/devstack-e2e
+          DEVSTACK_RESET_SITES: "1"
+          DEVSTACK_MACOS_MANAGED_ONLY: "1"
+          LZMA_API_STATIC: "1"
+          LIBZ_SYS_STATIC: "1"
+          OPENSSL_STATIC: "1"
+        run: |
+          set -euo pipefail
+          # Manifest URLs were exported by ensure-packages-for-smoke.sh
+          test -n "${DEVSTACK_PHP_MANIFEST_URL:-}"
+          test -n "${DEVSTACK_APACHE_MANIFEST_URL:-}"
+          test -x ./target/release/devstack_smoke
+          ./target/release/devstack_smoke --e2e --macos-managed

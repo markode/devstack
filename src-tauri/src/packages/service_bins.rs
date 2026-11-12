@@ -48,7 +48,7 @@ impl ServiceKind {
             Self::Meilisearch => "Typo-tolerant search engine (Laravel Scout, WordPress). HTTP API on :7700.",
             Self::Typesense => "Fast in-memory search engine (Laravel Scout). macOS/Linux builds.",
             Self::Minio => "S3-compatible object storage with web console (community fork — upstream stopped shipping binaries).",
-            Self::Memcached => "In-memory cache. Uses the memcached found on PATH (brew / apt install memcached).",
+            Self::Memcached => "In-memory cache. Prebuilt macOS/Linux packages when published; otherwise uses memcached on PATH (brew/apt optional fallback).",
         }
     }
 
@@ -66,7 +66,7 @@ impl ServiceKind {
             Self::Meilisearch => &["1.15.2", "1.12.8"],
             Self::Typesense => &["29.0", "27.1"],
             Self::Minio => &["2026-10-26T00-00-00Z"],
-            Self::Memcached => &["system"],
+            Self::Memcached => &["1.6.38", "system"],
         }
     }
 
@@ -362,6 +362,117 @@ fn chmod_exec(dir: &Path, names: &[&str]) {
     }
 }
 
+impl ServiceBinProvider {
+    async fn list_memcached(&self) -> Result<Vec<PackageVersion>> {
+        // Prefer prebuilt packages from the combined macOS/Linux manifest.
+        let mut out = Vec::new();
+        let url = std::env::var("DEVSTACK_MEMCACHED_MANIFEST_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                super::macos_defaults::DEFAULT_COMBINED_MANIFEST_URL.to_string()
+            });
+        if let Ok(listed) = self.list_from_combined_manifest(&url, "memcached").await {
+            out.extend(listed);
+        }
+        if let Some((bin, v)) = Self::system_memcached() {
+            out.push(PackageVersion {
+                label: format!("Memcached {v} (system PATH)"),
+                version: format!("system-{v}"),
+                channel: "system".into(),
+                lts: true,
+                // Synthetic URL so Install is clickable; install_memcached handles "system*".
+                download_url: Some(format!("devstack-system://memcached/{v}")),
+                sha256: None,
+                notes: Some(format!("fallback · {}", bin.display())),
+            });
+        }
+        if out.is_empty() {
+            out.push(PackageVersion {
+                label: "Memcached (no prebuilt + not on PATH)".into(),
+                version: "system".into(),
+                channel: "system".into(),
+                lts: true,
+                download_url: None,
+                sha256: None,
+                notes: Some(
+                    "No prebuilt memcached for this OS/arch and none on PATH. \
+                     Install via brew/apt or publish packages-macos-v1 assets."
+                        .into(),
+                ),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn list_from_combined_manifest(
+        &self,
+        url: &str,
+        id: &str,
+    ) -> Result<Vec<PackageVersion>> {
+        #[derive(Deserialize)]
+        struct Manifest {
+            packages: Vec<ManPkg>,
+        }
+        #[derive(Deserialize)]
+        struct ManPkg {
+            #[serde(default)]
+            id: Option<String>,
+            version: String,
+            channel: Option<String>,
+            os: Option<String>,
+            arch: Option<String>,
+            url: String,
+            sha256: Option<String>,
+            notes: Option<String>,
+        }
+        let m: Manifest = self
+            .client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let os = current_os();
+        let arch = current_arch();
+        Ok(m.packages
+            .into_iter()
+            .filter(|p| {
+                p.id
+                    .as_deref()
+                    .map(|i| i.eq_ignore_ascii_case(id))
+                    .unwrap_or(false)
+            })
+            .filter(|p| {
+                let os_ok = p
+                    .os
+                    .as_deref()
+                    .map(|o| {
+                        o.eq_ignore_ascii_case(os)
+                            || (os == "macos" && o.eq_ignore_ascii_case("darwin"))
+                    })
+                    .unwrap_or(true);
+                let arch_ok = p.arch.as_deref().map(|a| {
+                    a == arch
+                        || (arch == "arm64" && matches!(a, "aarch64" | "arm64"))
+                        || (arch == "x64" && matches!(a, "x86_64" | "x64" | "amd64"))
+                }).unwrap_or(true);
+                os_ok && arch_ok
+            })
+            .map(|p| PackageVersion {
+                channel: p.channel.unwrap_or_else(|| p.version.clone()),
+                label: format!("Memcached {}", p.version),
+                version: p.version,
+                lts: true,
+                download_url: Some(p.url),
+                sha256: p.sha256,
+                notes: p.notes,
+            })
+            .collect())
+    }
+}
+
 #[async_trait]
 impl PackageProvider for ServiceBinProvider {
     fn info(&self) -> PackageInfo {
@@ -376,26 +487,7 @@ impl PackageProvider for ServiceBinProvider {
 
     async fn list_versions(&self, _state: &AppState) -> Result<Vec<PackageVersion>> {
         if self.kind == ServiceKind::Memcached {
-            return Ok(match Self::system_memcached() {
-                Some((bin, v)) => vec![PackageVersion {
-                    label: format!("Memcached {v} (system)"),
-                    version: v.clone(),
-                    channel: v,
-                    lts: true,
-                    download_url: None,
-                    sha256: None,
-                    notes: Some(bin.display().to_string()),
-                }],
-                None => vec![PackageVersion {
-                    label: "Memcached (install via brew/apt first)".into(),
-                    version: "system".into(),
-                    channel: "system".into(),
-                    lts: true,
-                    download_url: None,
-                    sha256: None,
-                    notes: Some("memcached not found on PATH".into()),
-                }],
-            });
+            return self.list_memcached().await;
         }
         match self.list_remote().await {
             Ok(v) if !v.is_empty() => Ok(v),
@@ -415,6 +507,52 @@ impl PackageProvider for ServiceBinProvider {
         progress: ProgressFn,
     ) -> Result<InstalledPackage> {
         if self.kind == ServiceKind::Memcached {
+            // Prebuilt download?
+            let versions = self.list_versions(state).await.unwrap_or_default();
+            if let Some(meta) = versions.iter().find(|v| v.version == version || v.channel == version)
+            {
+                if let Some(url) = &meta.download_url {
+                    if url.starts_with("devstack-system://") || version.starts_with("system") {
+                        return self.install_memcached(paths, state, &progress).await;
+                    }
+                    let file_name = url.rsplit('/').next().unwrap_or("memcached.bin").to_string();
+                    let archive = paths.downloads.join(&file_name);
+                    download_and_verify(
+                        &self.client,
+                        url,
+                        &archive,
+                        meta.sha256.as_deref(),
+                        "memcached",
+                        &meta.version,
+                        &progress,
+                    )
+                    .await?;
+                    let dest = paths.package_dir("memcached", &meta.version);
+                    crate::config::remove_dir_if_exists(&dest)?;
+                    fs::create_dir_all(&dest)?;
+                    if file_name.ends_with(".tar.gz")
+                        || file_name.ends_with(".tgz")
+                        || file_name.ends_with(".zip")
+                    {
+                        let kind = ArchiveKind::from_name(&file_name)?;
+                        extract_archive(&archive, &dest, kind, 0)?;
+                    } else {
+                        let target = dest.join("memcached");
+                        fs::copy(&archive, &target)?;
+                        chmod_exec(&dest, &["memcached"]);
+                    }
+                    let _ = fs::remove_file(&archive);
+                    return finish_install(
+                        self.kind,
+                        &meta.version,
+                        meta.channel.as_str(),
+                        dest,
+                        paths,
+                        state,
+                        &progress,
+                    );
+                }
+            }
             return self.install_memcached(paths, state, &progress).await;
         }
         let versions = self.list_versions(state).await?;

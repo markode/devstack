@@ -164,6 +164,77 @@ impl RedisProvider {
         }
         Ok(out)
     }
+
+    async fn list_from_combined_manifest(&self) -> Result<Vec<PackageVersion>> {
+        #[derive(serde::Deserialize)]
+        struct Manifest {
+            packages: Vec<ManPkg>,
+        }
+        #[derive(serde::Deserialize)]
+        struct ManPkg {
+            #[serde(default)]
+            id: Option<String>,
+            version: String,
+            channel: Option<String>,
+            os: Option<String>,
+            arch: Option<String>,
+            url: String,
+            sha256: Option<String>,
+            notes: Option<String>,
+        }
+        let url = std::env::var("DEVSTACK_REDIS_MANIFEST_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                super::macos_defaults::DEFAULT_COMBINED_MANIFEST_URL.to_string()
+            });
+        let m: Manifest = self
+            .client
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let os = current_os();
+        let arch = std::env::consts::ARCH;
+        Ok(m.packages
+            .into_iter()
+            .filter(|p| {
+                p.id
+                    .as_deref()
+                    .map(|i| i.eq_ignore_ascii_case("redis"))
+                    .unwrap_or(false)
+            })
+            .filter(|p| {
+                let os_ok = p
+                    .os
+                    .as_deref()
+                    .map(|o| {
+                        o.eq_ignore_ascii_case(os)
+                            || (os == "macos" && o.eq_ignore_ascii_case("darwin"))
+                    })
+                    .unwrap_or(true);
+                let arch_ok = p.arch.as_deref().map(|a| {
+                    a == arch
+                        || (arch == "aarch64" && matches!(a, "arm64" | "aarch64"))
+                        || (arch == "x86_64" && matches!(a, "x86_64" | "x64" | "amd64"))
+                }).unwrap_or(true);
+                os_ok && arch_ok
+            })
+            .map(|p| PackageVersion {
+                channel: p.channel.unwrap_or_else(|| {
+                    p.version.split('.').take(2).collect::<Vec<_>>().join(".")
+                }),
+                label: format!("Redis {}", p.version),
+                version: p.version,
+                lts: true,
+                download_url: Some(p.url),
+                sha256: p.sha256,
+                notes: p.notes.or_else(|| Some("prebuilt (no local compile)".into())),
+            })
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -180,10 +251,14 @@ impl PackageProvider for RedisProvider {
 
     async fn list_versions(&self, _state: &AppState) -> Result<Vec<PackageVersion>> {
         if current_os() == "windows" {
-            self.list_windows().await
-        } else {
-            self.list_unix().await
+            return self.list_windows().await;
         }
+        if let Ok(prebuilt) = self.list_from_combined_manifest().await {
+            if !prebuilt.is_empty() {
+                return Ok(prebuilt);
+            }
+        }
+        self.list_unix().await
     }
 
     async fn install(
@@ -298,10 +373,41 @@ impl PackageProvider for RedisProvider {
         crate::config::remove_dir_if_exists(&dest)?;
         fs::create_dir_all(&dest)?;
         let kind = ArchiveKind::from_name(&file_name)?;
-        extract_archive(&archive, &dest, kind, if kind == ArchiveKind::Zip { 0 } else { 1 })?;
+        extract_archive(&archive, &dest, kind, if kind == ArchiveKind::Zip { 0 } else { 0 })?;
         let _ = fs::remove_file(&archive);
 
-        if current_os() != "windows" {
+        // Flatten one top-level folder when present.
+        if crate::services::process::find_bin(&dest, &["redis-server", "redis-server.exe"]).is_none()
+        {
+            for entry in fs::read_dir(&dest)?.flatten() {
+                let p = entry.path();
+                if p.is_dir()
+                    && crate::services::process::find_bin(
+                        &p,
+                        &["redis-server", "redis-server.exe"],
+                    )
+                    .is_some()
+                {
+                    for child in fs::read_dir(&p)?.flatten() {
+                        let from = child.path();
+                        let to = dest.join(child.file_name());
+                        if !to.exists() {
+                            let _ = fs::rename(&from, &to);
+                        }
+                    }
+                    let _ = fs::remove_dir_all(&p);
+                    break;
+                }
+            }
+        }
+
+        let already_built = crate::services::process::find_bin(
+            &dest,
+            &["redis-server", "redis-server.exe"],
+        )
+        .is_some();
+
+        if current_os() != "windows" && !already_built {
             progress(ProgressEvent {
                 package_id: "redis".into(),
                 version: meta.version.clone(),

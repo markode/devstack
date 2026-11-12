@@ -8,6 +8,7 @@ import type { PhpExtensionView } from "../types";
 export function PhpPage() {
   const pkg = usePackageVersions("php");
   const [ext, setExt] = useState<PhpExtensionView[]>([]);
+  const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
     void client.listPhpExtensionSettings().then(setExt).catch(() => setExt([]));
@@ -27,7 +28,9 @@ export function PhpPage() {
         title="Available versions"
         description="Install, update, and manage PHP runtimes used by your sites."
       />
-      {pkg.error ? <div className="error-banner">{pkg.error}</div> : null}
+      {pkg.error || localError ? (
+        <div className="error-banner">{pkg.error ?? localError}</div>
+      ) : null}
       {pkg.loading && pkg.versions.length === 0 ? (
         <div className="loading">Loading versions…</div>
       ) : (
@@ -40,8 +43,12 @@ export function PhpPage() {
             installed={pkg.installed}
             busyKey={pkg.busyKey}
             progress={pkg.progress}
-            onInstall={pkg.install}
+            onInstall={(version) => {
+              setLocalError(null);
+              void pkg.install(version);
+            }}
             onUninstall={pkg.uninstall}
+            onUnavailable={(message) => setLocalError(message)}
           />
         </>
       )}

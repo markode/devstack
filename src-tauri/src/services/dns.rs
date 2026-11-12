@@ -110,6 +110,39 @@ case "$cmd" in
       update-ca-certificates || true
     fi
     ;;
+  hosts-and-trust-ca)
+    # One elevation: rewrite /etc/hosts then trust the CA.
+    # Args: <ca-path> [domain...]
+    ca="${1:-}"
+    shift || true
+    marker_begin="# BEGIN DevStack"
+    marker_end="# END DevStack"
+    hosts_file="/etc/hosts"
+    tmp="$(mktemp)"
+    awk -v b="$marker_begin" -v e="$marker_end" '
+      $0==b {skip=1; next}
+      $0==e {skip=0; next}
+      !skip {print}
+    ' "$hosts_file" > "$tmp"
+    {
+      echo "$marker_begin"
+      for d in "$@"; do
+        echo "127.0.0.1 $d"
+        echo "::1 $d"
+      done
+      echo "$marker_end"
+    } >> "$tmp"
+    cat "$tmp" > "$hosts_file"
+    rm -f "$tmp"
+    if [[ -n "$ca" && -f "$ca" ]]; then
+      if [[ "$(uname -s)" == "Darwin" ]]; then
+        security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$ca"
+      elif [[ -d /usr/local/share/ca-certificates ]]; then
+        cp "$ca" /usr/local/share/ca-certificates/devstack-root.crt
+        update-ca-certificates || true
+      fi
+    fi
+    ;;
   *)
     echo "unknown helper command: $cmd" >&2
     exit 2
@@ -874,20 +907,34 @@ pub fn sync_hosts_and_trust_ca(paths: &Paths, state: &AppState) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        if !hosts_ok {
-            sync_hosts(paths, state)?;
+        // One elevated helper prompt for hosts + CA together (macOS osascript /
+        // Linux sudo). Avoids two sequential password dialogs on first Start.
+        if crate::services::tls::is_ca_trust_deferred(paths) && hosts_ok {
+            return Ok(());
         }
-        if !ca_ok && !crate::services::tls::is_ca_trust_deferred(paths) {
-            match crate::services::tls::trust_ca_via_helper(paths) {
-                Ok(()) => {}
-                Err(e) => {
-                    // Defer so we do not re-prompt sudo/osascript on every apply.
-                    let _ = crate::services::tls::mark_ca_trust_deferred(paths);
-                    eprintln!("devstack: CA trust deferred: {e}");
+        let domains = site_domains(&state.sites);
+        let ca_s = ca.display().to_string();
+        let mut args: Vec<&str> = vec!["hosts-and-trust-ca", ca_s.as_str()];
+        let owned = domains.clone();
+        for d in &owned {
+            args.push(d.as_str());
+        }
+        match helper_run(paths, &args) {
+            Ok(()) => {
+                crate::services::tls::clear_ca_trust_deferred(paths);
+                Ok(())
+            }
+            Err(e) => {
+                let _ = crate::services::tls::mark_ca_trust_deferred(paths);
+                eprintln!("devstack: hosts/CA elevation deferred: {e}");
+                // Still try hosts-only without CA if hosts are missing and we
+                // somehow have passwordless sudo — best-effort, ignore errors.
+                if !hosts_ok {
+                    let _ = sync_hosts(paths, state);
                 }
+                Ok(())
             }
         }
-        Ok(())
     }
 }
 

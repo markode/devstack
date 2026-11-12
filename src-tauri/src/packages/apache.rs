@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 
+use super::macos_defaults::{arch_aliases, os_aliases, DEFAULT_COMBINED_MANIFEST_URL};
 use super::{
     default_uninstall, now_iso, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
 };
@@ -38,6 +39,13 @@ impl ApacheProvider {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| state.apache_manifest_url.clone())
+            .or_else(|| {
+                // Baked default for macOS/Linux — packages-macos-v1 release.
+                match current_os() {
+                    "macos" | "linux" => Some(DEFAULT_COMBINED_MANIFEST_URL.to_string()),
+                    _ => None,
+                }
+            })
     }
 
     async fn list_windows_lounge(&self) -> Result<Vec<PackageVersion>> {
@@ -126,6 +134,8 @@ impl ApacheProvider {
         }
         #[derive(Deserialize)]
         struct ManPkg {
+            #[serde(default)]
+            id: Option<String>,
             version: String,
             channel: Option<String>,
             os: Option<String>,
@@ -143,24 +153,25 @@ impl ApacheProvider {
             .json()
             .await?;
         let os = current_os();
-        let arch = std::env::consts::ARCH;
-        let arch_ok = |a: &str| {
-            a == arch
-                || (arch == "x86_64" && matches!(a, "x64" | "amd64" | "x86_64" | "win64"))
-                || (arch == "aarch64" && matches!(a, "arm64" | "aarch64"))
-        };
+        let has_ids = m.packages.iter().any(|p| p.id.is_some());
         Ok(m.packages
             .into_iter()
             .filter(|p| {
+                if has_ids {
+                    p.id
+                        .as_deref()
+                        .map(|id| id.eq_ignore_ascii_case("apache") || id.eq_ignore_ascii_case("httpd"))
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .filter(|p| {
                 p.os
                     .as_deref()
-                    .map(|o| {
-                        o.eq_ignore_ascii_case(os)
-                            || (os == "macos" && o.eq_ignore_ascii_case("darwin"))
-                            || (os == "windows" && matches!(o.to_ascii_lowercase().as_str(), "win" | "windows"))
-                    })
+                    .map(|o| os_aliases(o, os))
                     .unwrap_or(true)
-                    && p.arch.as_deref().map(arch_ok).unwrap_or(true)
+                    && p.arch.as_deref().map(arch_aliases).unwrap_or(true)
             })
             .map(|p| PackageVersion {
                 channel: p.channel.unwrap_or_else(|| {
@@ -225,20 +236,21 @@ impl PackageProvider for ApacheProvider {
 
     async fn list_versions(&self, state: &AppState) -> Result<Vec<PackageVersion>> {
         if let Some(url) = Self::manifest_url(state) {
-            let listed = self.list_manifest(&url).await?;
-            if listed.is_empty() {
-                return Err(DevStackError::Message(format!(
-                    "Apache manifest at {url} returned no packages for this OS/arch"
-                )));
+            match self.list_manifest(&url).await {
+                Ok(listed) if !listed.is_empty() => return Ok(listed),
+                Ok(_) => {
+                    eprintln!("[apache] manifest {url} returned no packages for this OS/arch");
+                }
+                Err(e) => {
+                    eprintln!("[apache] manifest {url} unavailable ({e})");
+                }
             }
-            return Ok(listed);
         }
         match current_os() {
             "windows" => self.list_windows_lounge().await,
             "macos" | "linux" => Err(DevStackError::Message(
-                "Set DEVSTACK_APACHE_MANIFEST_URL (or apache_manifest_url) to a prebuilt \
-                 httpd manifest for macOS/Linux. Windows uses Apache Lounge VS17 builds \
-                 automatically — see docs/apache.md."
+                "No prebuilt Apache httpd packages for this OS/arch yet. \
+                 The packages-macos-v1 release (or DEVSTACK_APACHE_MANIFEST_URL) must provide download URLs."
                     .into(),
             )),
             other => Err(DevStackError::Message(format!(

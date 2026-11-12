@@ -1,10 +1,19 @@
 //! MariaDB — versions from downloads.mariadb.org REST API + full binary install.
+//!
+//! MariaDB.org no longer publishes macOS binaries. On macOS/Linux the baked
+//! `packages-macos-v1` manifest (CI-built relocatable MariaDB trees) is required
+//! for one-click install — we do **not** substitute MySQL Community into the
+//! MariaDB slot.
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
+use std::path::Path;
 
+use super::macos_defaults::{
+    arch_aliases, os_aliases, DEFAULT_COMBINED_MANIFEST_URL,
+};
 use super::{
     default_uninstall, now_iso, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
 };
@@ -14,6 +23,7 @@ use crate::downloads::{
     ProgressFn,
 };
 use crate::error::{DevStackError, Result};
+use crate::services::process::find_bin;
 
 const MAJOR_URL: &str = "https://downloads.mariadb.org/rest-api/mariadb/";
 
@@ -37,6 +47,96 @@ struct MajorRelease {
 impl MariaDbProvider {
     pub fn new(client: reqwest::Client) -> Self {
         Self { client }
+    }
+
+    fn manifest_url(_state: &AppState) -> Option<String> {
+        std::env::var("DEVSTACK_MARIADB_MANIFEST_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some(DEFAULT_COMBINED_MANIFEST_URL.to_string()))
+    }
+
+    async fn list_manifest(&self, url: &str) -> Result<Vec<PackageVersion>> {
+        #[derive(Deserialize)]
+        struct Manifest {
+            packages: Vec<ManPkg>,
+        }
+        #[derive(Deserialize)]
+        struct ManPkg {
+            #[serde(default)]
+            id: Option<String>,
+            version: String,
+            channel: Option<String>,
+            os: Option<String>,
+            arch: Option<String>,
+            url: String,
+            sha256: Option<String>,
+            notes: Option<String>,
+        }
+        let m: Manifest = self
+            .client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let os = current_os();
+        Ok(m.packages
+            .into_iter()
+            .filter(|p| {
+                p.id
+                    .as_deref()
+                    .map(|id| id.eq_ignore_ascii_case("mariadb"))
+                    .unwrap_or(false)
+                    && p.os
+                        .as_deref()
+                        .map(|o| os_aliases(o, os))
+                        .unwrap_or(true)
+                    && p.arch.as_deref().map(arch_aliases).unwrap_or(true)
+            })
+            .map(|p| PackageVersion {
+                channel: p.channel.unwrap_or_else(|| {
+                    p.version.split('.').take(2).collect::<Vec<_>>().join(".")
+                }),
+                label: p.version.clone(),
+                version: p.version,
+                lts: true,
+                download_url: Some(p.url),
+                sha256: p.sha256,
+                notes: p.notes,
+            })
+            .collect())
+    }
+
+    fn flatten_db_tree(dest: &Path) -> Result<()> {
+        if find_bin(dest, &["mariadbd", "mysqld", "mysqld.exe", "mariadbd.exe"]).is_some() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(dest)?.flatten() {
+            let p = entry.path();
+            if p.is_dir()
+                && find_bin(&p, &["mariadbd", "mysqld", "mysqld.exe", "mariadbd.exe"]).is_some()
+            {
+                for child in fs::read_dir(&p)?.flatten() {
+                    let from = child.path();
+                    let name = from.file_name().unwrap();
+                    let to = dest.join(name);
+                    if !to.exists() {
+                        let _ = fs::rename(&from, &to);
+                    }
+                }
+                let _ = fs::remove_dir_all(&p);
+                break;
+            }
+        }
+        if find_bin(dest, &["mariadbd", "mysqld", "mysqld.exe", "mariadbd.exe"]).is_none() {
+            return Err(DevStackError::Message(format!(
+                "mysqld/mariadbd not found after extract in {}",
+                dest.display()
+            )));
+        }
+        Ok(())
     }
 
     fn prefer_file(files: &[Value]) -> Option<(String, Option<String>, String)> {
@@ -125,7 +225,30 @@ impl PackageProvider for MariaDbProvider {
         }
     }
 
-    async fn list_versions(&self, _state: &AppState) -> Result<Vec<PackageVersion>> {
+    async fn list_versions(&self, state: &AppState) -> Result<Vec<PackageVersion>> {
+        if let Some(url) = Self::manifest_url(state) {
+            match self.list_manifest(&url).await {
+                Ok(listed) if !listed.is_empty() => return Ok(listed),
+                Ok(_) => {
+                    eprintln!("[mariadb] manifest {url} returned no packages for this OS/arch");
+                }
+                Err(e) => {
+                    eprintln!("[mariadb] manifest {url} unavailable ({e})");
+                }
+            }
+        }
+
+        // MariaDB.org dropped macOS artifacts — without packages-macos-v1 there
+        // is no legitimate one-click MariaDB for macOS (we refuse MySQL substitutes).
+        if current_os() == "macos" {
+            return Err(DevStackError::Message(
+                "No MariaDB macOS packages available. MariaDB.org no longer ships macOS \
+                 binaries — install via the DevStack packages-macos-v1 release (or set \
+                 DEVSTACK_MARIADB_MANIFEST_URL to a manifest that includes real mariadbd trees)."
+                    .into(),
+            ));
+        }
+
         let majors: MajorResponse = self
             .client
             .get(MAJOR_URL)
@@ -161,7 +284,10 @@ impl PackageProvider for MariaDbProvider {
             if let Some(pkg) = package_from_major_detail(&major, &detail, |files| {
                 Self::prefer_file(files)
             }) {
-                out.push(pkg);
+                // Skip rows with no URL — they render as "cannot be installed".
+                if pkg.download_url.is_some() {
+                    out.push(pkg);
+                }
             }
         }
         if out.is_empty() {
@@ -214,7 +340,14 @@ impl PackageProvider for MariaDbProvider {
         crate::config::remove_dir_if_exists(&dest)?;
         fs::create_dir_all(&dest)?;
         let kind = ArchiveKind::from_name(&file_name)?;
-        extract_archive(&archive, &dest, kind, 1)?;
+        // Official trees nest under one top folder; relocated packages may not.
+        extract_archive(&archive, &dest, kind, 0)?;
+        if find_bin(&dest, &["mariadbd", "mysqld", "mysqld.exe", "mariadbd.exe"]).is_none() {
+            // Retry mental model: strip 1 by flattening first child dir.
+            Self::flatten_db_tree(&dest)?;
+        } else {
+            let _ = Self::flatten_db_tree(&dest);
+        }
         let _ = fs::remove_file(&archive);
 
         let record = InstalledRecord {

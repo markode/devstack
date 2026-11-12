@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use super::macos_defaults::{arch_aliases, os_aliases, DEFAULT_COMBINED_MANIFEST_URL};
 use super::{
     default_uninstall, now_iso, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
 };
@@ -36,6 +37,10 @@ impl NginxProvider {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| state.nginx_manifest_url.clone())
+            .or_else(|| match current_os() {
+                "macos" | "linux" => Some(DEFAULT_COMBINED_MANIFEST_URL.to_string()),
+                _ => None,
+            })
     }
 
     fn windows_zip_url(version: &str) -> String {
@@ -155,7 +160,7 @@ impl NginxProvider {
             "macos" => (
                 Some(Self::source_tar_url(version)),
                 Some(
-                    "Official source tarball — DevStack compiles nginx on install (needs Xcode CLT)"
+                    "Fallback nginx.org source tarball (compile). Prefer packages-macos-v1 prebuilt via DEFAULT_COMBINED_MANIFEST_URL."
                         .into(),
                 ),
             ),
@@ -189,6 +194,8 @@ impl NginxProvider {
         }
         #[derive(Deserialize)]
         struct ManPkg {
+            #[serde(default)]
+            id: Option<String>,
             version: String,
             channel: Option<String>,
             os: Option<String>,
@@ -206,22 +213,23 @@ impl NginxProvider {
             .json()
             .await?;
         let os = current_os();
-        let arch = std::env::consts::ARCH;
-        let arch_aliases = |a: &str| {
-            a == arch
-                || (arch == "x86_64" && matches!(a, "x64" | "amd64" | "x86_64"))
-                || (arch == "aarch64" && matches!(a, "arm64" | "aarch64"))
-        };
+        let has_ids = m.packages.iter().any(|p| p.id.is_some());
         Ok(m.packages
             .into_iter()
             .filter(|p| {
+                if has_ids {
+                    p.id
+                        .as_deref()
+                        .map(|id| id.eq_ignore_ascii_case("nginx"))
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .filter(|p| {
                 p.os
                     .as_deref()
-                    .map(|o| {
-                        o.eq_ignore_ascii_case(os)
-                            || (os == "macos" && o.eq_ignore_ascii_case("darwin"))
-                            || (os == "windows" && o.eq_ignore_ascii_case("win"))
-                    })
+                    .map(|o| os_aliases(o, os))
                     .unwrap_or(true)
                     && p.arch.as_deref().map(arch_aliases).unwrap_or(true)
             })
@@ -394,13 +402,15 @@ impl PackageProvider for NginxProvider {
 
     async fn list_versions(&self, state: &AppState) -> Result<Vec<PackageVersion>> {
         if let Some(url) = Self::manifest_url(state) {
-            let listed = self.list_manifest(&url).await?;
-            if listed.is_empty() {
-                return Err(DevStackError::Message(format!(
-                    "Nginx manifest at {url} returned no packages for this OS/arch. Check os/arch filters or unset DEVSTACK_NGINX_MANIFEST_URL."
-                )));
+            match self.list_manifest(&url).await {
+                Ok(listed) if !listed.is_empty() => return Ok(listed),
+                Ok(_) => {
+                    eprintln!("[nginx] manifest {url} returned no packages for this OS/arch");
+                }
+                Err(e) => {
+                    eprintln!("[nginx] manifest {url} unavailable ({e})");
+                }
             }
-            return Ok(listed);
         }
         let listed = self.list_official().await?;
         if listed.is_empty() {
@@ -464,7 +474,63 @@ impl PackageProvider for NginxProvider {
         } else if os == "macos"
             && (file_name.ends_with(".tar.gz") || file_name.ends_with(".tgz"))
         {
-            Self::build_from_source(&archive, &dest, &meta.version, &progress)?;
+            // Prebuilt packages (from packages-macos-v1) extract to bin/nginx.
+            // Official nginx.org source tarballs contain `configure` — compile those.
+            let kind = ArchiveKind::from_name(&file_name)?;
+            let staging = dest.join(".extract-staging");
+            fs::create_dir_all(&staging)?;
+            extract_archive(&archive, &staging, kind, 0)?;
+            let looks_prebuilt = find_nginx_bin(&staging).is_some()
+                || staging.join("sbin/nginx").exists()
+                || staging.join("bin/nginx").exists()
+                || fs::read_dir(&staging)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|e| {
+                        let p = e.path();
+                        find_nginx_bin(&p).is_some()
+                            || p.join("sbin/nginx").exists()
+                            || p.join("bin/nginx").exists()
+                    });
+            let looks_source = staging.join("configure").exists()
+                || fs::read_dir(&staging)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|e| {
+                        let p = e.path();
+                        p.is_dir() && p.join("configure").exists()
+                    });
+            if looks_prebuilt && !looks_source {
+                // Move staging → dest
+                for entry in fs::read_dir(&staging)?.flatten() {
+                    let from = entry.path();
+                    let to = dest.join(entry.file_name());
+                    let _ = fs::rename(&from, &to);
+                }
+                // Flatten one top-level folder if needed
+                if find_nginx_bin(&dest).is_none() {
+                    for entry in fs::read_dir(&dest)?.flatten() {
+                        let p = entry.path();
+                        if p.is_dir() && find_nginx_bin(&p).is_some() {
+                            for child in fs::read_dir(&p)?.flatten() {
+                                let from = child.path();
+                                let to = dest.join(child.file_name());
+                                if !to.exists() {
+                                    let _ = fs::rename(&from, &to);
+                                }
+                            }
+                            let _ = fs::remove_dir_all(&p);
+                            break;
+                        }
+                    }
+                }
+                let _ = fs::remove_dir_all(&staging);
+            } else {
+                let _ = fs::remove_dir_all(&staging);
+                Self::build_from_source(&archive, &dest, &meta.version, &progress)?;
+            }
         } else {
             let kind = ArchiveKind::from_name(&file_name)?;
             let strip = 1;
