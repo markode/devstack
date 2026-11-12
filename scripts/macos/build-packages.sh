@@ -358,7 +358,9 @@ build_php() {
   local prefix
   prefix="$(brew --prefix "$formula")"
   # Prove the source formula has mysqli before we relocate.
-  if ! "$prefix/bin/php" -m 2>/dev/null | grep -qi mysqli; then
+  local brew_modules
+  brew_modules="$("$prefix/bin/php" -m 2>/dev/null || true)"
+  if ! grep -qi '^mysqli$' <<<"$brew_modules"; then
     echo "FAIL: brew $formula missing mysqli before relocate" >&2
     "$prefix/bin/php" -m >&2 || true
     return 1
@@ -381,13 +383,18 @@ build_php() {
   fi
   [[ -x "$stage/bin/php" ]] || { echo "php binary missing after brew relocate" >&2; return 1; }
   # Relocated binary must actually run and expose mysqli.
-  if ! "$stage/bin/php" -m 2>/dev/null | grep -qi mysqli; then
+  # Avoid `php -m | grep` under pipefail: php can exit non-zero on harmless
+  # ini notices while still printing a full module list (false FAIL).
+  local php_modules
+  php_modules="$("$stage/bin/php" -m 2>/dev/null || true)"
+  if ! grep -qi '^mysqli$' <<<"$php_modules"; then
     echo "FAIL: relocated PHP cannot load mysqli (dylib bundling incomplete?)" >&2
     otool -L "$stage/bin/php" | head -40 >&2 || true
     "$stage/bin/php" -m >&2 || true
     return 1
   fi
-  PHP_VERSION="$("$stage/bin/php" -r 'echo PHP_VERSION;')"
+  PHP_VERSION="$("$stage/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+  [[ -n "$PHP_VERSION" ]] || PHP_VERSION="$("$stage/bin/php" -r 'echo PHP_VERSION;')"
   assert_no_brew_deps "$stage/bin/php" || {
     echo "warning: php still has brew dylib refs after relocate" >&2
   }
