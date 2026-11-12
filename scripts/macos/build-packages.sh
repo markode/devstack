@@ -228,6 +228,64 @@ def rewrite_dep(path: Path, old: str, base: str):
         check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
+def ensure_named(base: str) -> bool:
+    """Make sure lib-bundled/<base> exists, searching brew if needed."""
+    dest = bundled / base
+    if dest.exists():
+        return True
+    found = find_named(base)
+    if found is None:
+        return False
+    prefer = found.parent / base
+    copy_into_bundled(prefer if prefer.exists() else found)
+    if not dest.exists():
+        subprocess.run(["cp", "-fL", str(found), str(dest)], check=False)
+        try:
+            dest.chmod(0o755)
+        except Exception:
+            pass
+        subprocess.run(
+            ["install_name_tool", "-id", f"@loader_path/{base}", str(dest)],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    return dest.exists()
+
+def bundle_and_rewrite(path: Path, lib: str) -> bool:
+    """Copy a non-system dep into lib-bundled and rewrite the load command."""
+    base = os.path.basename(lib)
+    if lib.startswith("/usr/lib/") or lib.startswith("/System/"):
+        return False
+    did = False
+    if brew_re.match(lib) and os.path.isfile(lib):
+        before = {p.name for p in bundled.iterdir()}
+        copy_into_bundled(lib)
+        if {p.name for p in bundled.iterdir()} != before:
+            did = True
+        rewrite_dep(path, lib, base)
+        return True
+    # @loader_path and @rpath: resolve by basename into lib-bundled.
+    if lib.startswith("@loader_path/") or lib.startswith("@rpath/"):
+        local = path.parent / base
+        # Sibling already present (common for binaries that keep libs beside them).
+        if local.exists() and path.parent.resolve() == bundled.resolve():
+            # Still rewrite @rpath -> @loader_path so dyld does not consult brew rpaths.
+            if lib.startswith("@rpath/"):
+                rewrite_dep(path, lib, base)
+                return True
+            return False
+        before = {p.name for p in bundled.iterdir()}
+        if not ensure_named(base):
+            return False
+        if {p.name for p in bundled.iterdir()} != before:
+            did = True
+        # Always rewrite @rpath; rewrite @loader_path when not already a sibling ref
+        # inside lib-bundled (or when pointing outside).
+        if lib.startswith("@rpath/") or path.parent.resolve() != bundled.resolve() or not local.exists():
+            rewrite_dep(path, lib, base)
+            did = True
+        return did
+    return False
+
 changed = True
 rounds = 0
 while changed and rounds < 24:
@@ -235,75 +293,27 @@ while changed and rounds < 24:
     rounds += 1
     for path in collect_machos():
         for lib in otool_libs(path):
-            if system_re.match(lib) or lib.startswith("@rpath/"):
-                # @rpath often still points into brew; handle absolute only below.
-                if not lib.startswith("@rpath/"):
-                    continue
-            if brew_re.match(lib):
-                if not os.path.isfile(lib):
-                    continue
-                base = os.path.basename(lib)
-                before = {p.name for p in bundled.iterdir()} if bundled.exists() else set()
-                copy_into_bundled(lib)
-                after = {p.name for p in bundled.iterdir()}
-                if after != before:
-                    changed = True
-                rewrite_dep(path, lib, base)
-                changed = True
+            if system_re.match(lib):
                 continue
-            # ICU and friends already use @loader_path for siblings in the cellar.
-            # After we copy one ICU dylib, those refs break unless siblings are bundled.
-            if lib.startswith("@loader_path/"):
-                base = os.path.basename(lib)
-                # Already satisfied next to this file?
-                local = (path.parent / base)
-                if local.exists():
-                    continue
-                dest = bundled / base
-                if not dest.exists():
-                    found = find_named(base)
-                    if found is None:
-                        continue
-                    before = {p.name for p in bundled.iterdir()}
-                    copy_into_bundled(found if found.name == base else found.parent / base if (found.parent / base).exists() else found)
-                    # Ensure referenced basename exists
-                    if not dest.exists() and found.is_file():
-                        subprocess.run(["cp", "-fL", str(found), str(dest)], check=False)
-                        subprocess.run(
-                            ["install_name_tool", "-id", f"@loader_path/{base}", str(dest)],
-                            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                    after = {p.name for p in bundled.iterdir()}
-                    if after != before:
-                        changed = True
-                # If this file lives outside lib-bundled, point at bundled copy.
-                if path.parent.resolve() != bundled.resolve() and dest.exists():
-                    rewrite_dep(path, lib, base)
-                    changed = True
+            if bundle_and_rewrite(path, lib):
+                changed = True
 
-# Final sweep: normalize bundled dylibs to sibling @loader_path and fill gaps.
+# Final sweep over lib-bundled: kill leftover brew abs paths and @rpath.
 for path in list(bundled.iterdir()):
     if not path.is_file() or not is_macho(path):
         continue
     for lib in otool_libs(path):
-        if brew_re.match(lib) and os.path.isfile(lib):
+        if system_re.match(lib):
+            continue
+        bundle_and_rewrite(path, lib)
+
+# One more pass on all machos for any remaining @rpath (brotli etc.).
+for path in collect_machos():
+    for lib in otool_libs(path):
+        if lib.startswith("@rpath/"):
             base = os.path.basename(lib)
-            copy_into_bundled(lib)
+            ensure_named(base)
             rewrite_dep(path, lib, base)
-        elif lib.startswith("@loader_path/"):
-            base = os.path.basename(lib)
-            if not (bundled / base).exists():
-                found = find_named(base)
-                if found is not None:
-                    copy_into_bundled(found.parent / base if (found.parent / base).exists() else found)
-                    if not (bundled / base).exists():
-                        subprocess.run(["cp", "-fL", str(found), str(bundled / base)], check=False)
-                        subprocess.run(
-                            ["install_name_tool", "-id", f"@loader_path/{base}", str(bundled / base)],
-                            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-            if lib.startswith("@loader_path/../lib-bundled/"):
-                rewrite_dep(path, lib, base)
 
 print(f"relocate done after {rounds} rounds; bundled={len(list(bundled.iterdir()))}")
 PY
