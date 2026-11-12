@@ -25,13 +25,10 @@ jobs:
       matrix:
         include:
           # This org does not support macos-14; macos-latest is arm64 and works.
+          # Intel (macos-13) stays queued indefinitely here — ship arm64 first.
           - os: macos-latest
             arch: aarch64
-          # Intel runners are optional — skip if the label is unavailable.
-          - os: macos-13
-            arch: x86_64
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.arch == 'x86_64' }}
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4

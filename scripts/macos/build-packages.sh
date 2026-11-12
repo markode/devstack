@@ -42,7 +42,8 @@ pack_dir() {
 }
 
 # Copy a Homebrew cellar/prefix into $stage and rewrite non-system dylibs to
-# @loader_path/../lib-bundled so the tree runs without Homebrew installed.
+# @loader_path so the tree runs without Homebrew installed. Iterates until no
+# brew absolute deps remain (covers transitive ICU etc.).
 relocate_prefix() {
   local src="$1" stage="$2"
   rm -rf "$stage"
@@ -54,64 +55,113 @@ relocate_prefix() {
     return 1
   fi
 
-  local machos=()
-  while IFS= read -r -d '' f; do
-    machos+=("$f")
-  done < <(find "$stage" -type f \( -perm -111 -o -name '*.dylib' -o -name '*.so' \) -print0 2>/dev/null)
+  python3 - "$stage" <<'PY'
+import os, re, subprocess, sys
+from pathlib import Path
 
-  local f lib base
-  for f in "${machos[@]}"; do
-    file "$f" 2>/dev/null | grep -q 'Mach-O' || continue
-    while read -r lib; do
-      case "$lib" in
-        /opt/homebrew/*|/usr/local/Cellar/*|/usr/local/opt/*) ;;
-        *) continue ;;
-      esac
-      [[ -f "$lib" ]] || continue
-      base="$(basename "$lib")"
-      if [[ ! -f "$stage/lib-bundled/$base" ]]; then
-        cp -f "$lib" "$stage/lib-bundled/$base" 2>/dev/null || true
-        chmod u+w "$stage/lib-bundled/$base" 2>/dev/null || true
-        install_name_tool -id "@loader_path/../lib-bundled/$base" "$stage/lib-bundled/$base" 2>/dev/null || true
-      fi
-      # Depth from file → stage root for relative @loader_path
-      local rel
-      rel="$(python3 - "$f" "$stage" <<'PY'
-import os, sys
-f, stage = sys.argv[1:3]
-rel = os.path.relpath(os.path.join(stage, "lib-bundled"), os.path.dirname(f))
-print(rel.replace(os.sep, "/"))
+stage = Path(sys.argv[1])
+bundled = stage / "lib-bundled"
+bundled.mkdir(exist_ok=True)
+brew_re = re.compile(r"^(/opt/homebrew/|/usr/local/(Cellar|opt)/)")
+
+def is_macho(path: Path) -> bool:
+    try:
+        out = subprocess.check_output(["file", str(path)], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return False
+    return "Mach-O" in out
+
+def otool_libs(path: Path):
+    try:
+        out = subprocess.check_output(["otool", "-L", str(path)], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return []
+    libs = []
+    for line in out.splitlines()[1:]:
+        lib = line.strip().split()[0]
+        libs.append(lib)
+    return libs
+
+def collect_machos():
+    out = []
+    for root, dirs, files in os.walk(stage):
+        # skip huge doc trees
+        dirs[:] = [d for d in dirs if d not in {".git", "share", "include", "man"}]
+        for name in files:
+            p = Path(root) / name
+            if p.is_symlink():
+                continue
+            if os.access(p, os.X_OK) or p.suffix in {".dylib", ".so"}:
+                if is_macho(p):
+                    out.append(p)
+    return out
+
+changed = True
+rounds = 0
+while changed and rounds < 12:
+    changed = False
+    rounds += 1
+    for path in collect_machos():
+        for lib in otool_libs(path):
+            if not brew_re.match(lib):
+                continue
+            if not os.path.isfile(lib):
+                # resolve /opt/homebrew/opt/NAME/lib/foo.dylib
+                continue
+            base = os.path.basename(lib)
+            dest = bundled / base
+            if not dest.exists():
+                subprocess.run(["cp", "-f", lib, str(dest)], check=False)
+                try:
+                    dest.chmod(0o755)
+                except Exception:
+                    pass
+                subprocess.run(
+                    ["install_name_tool", "-id", f"@loader_path/{base}", str(dest)],
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                changed = True
+            # relative path from this binary to lib-bundled
+            rel = os.path.relpath(bundled, path.parent).replace(os.sep, "/")
+            new = f"@loader_path/{rel}/{base}" if path.parent != bundled else f"@loader_path/{base}"
+            # For files already inside lib-bundled, always use @loader_path/base
+            if path.parent.resolve() == bundled.resolve():
+                new = f"@loader_path/{base}"
+            subprocess.run(
+                ["install_name_tool", "-change", lib, new, str(path)],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            changed = True
+
+# Final sweep: ensure every bundled dylib uses @loader_path for siblings.
+for path in bundled.iterdir():
+    if not path.is_file() or not is_macho(path):
+        continue
+    for lib in otool_libs(path):
+        if brew_re.match(lib) and os.path.isfile(lib):
+            base = os.path.basename(lib)
+            dest = bundled / base
+            if not dest.exists():
+                subprocess.run(["cp", "-f", lib, str(dest)], check=False)
+            subprocess.run(
+                ["install_name_tool", "-change", lib, f"@loader_path/{base}", str(path)],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        elif lib.startswith("@loader_path/../lib-bundled/"):
+            base = os.path.basename(lib)
+            subprocess.run(
+                ["install_name_tool", "-change", lib, f"@loader_path/{base}", str(path)],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+print(f"relocate done after {rounds} rounds; bundled={len(list(bundled.iterdir()))}")
 PY
-)"
-      install_name_tool -change "$lib" "@loader_path/${rel}/${base}" "$f" 2>/dev/null || true
-    done < <(otool -L "$f" 2>/dev/null | awk 'NR>1 {print $1}')
-  done
 
-  # Second pass: rewrite deps of bundled dylibs themselves.
-  for f in "$stage"/lib-bundled/*; do
-    [[ -f "$f" ]] || continue
-    file "$f" 2>/dev/null | grep -q 'Mach-O' || continue
-    while read -r lib; do
-      case "$lib" in
-        /opt/homebrew/*|/usr/local/Cellar/*|/usr/local/opt/*) ;;
-        *) continue ;;
-      esac
-      [[ -f "$lib" ]] || continue
-      base="$(basename "$lib")"
-      if [[ ! -f "$stage/lib-bundled/$base" ]]; then
-        cp -f "$lib" "$stage/lib-bundled/$base" 2>/dev/null || true
-        chmod u+w "$stage/lib-bundled/$base" 2>/dev/null || true
-        install_name_tool -id "@loader_path/$base" "$stage/lib-bundled/$base" 2>/dev/null || true
-      fi
-      install_name_tool -change "$lib" "@loader_path/$base" "$f" 2>/dev/null || true
-    done < <(otool -L "$f" 2>/dev/null | awk 'NR>1 {print $1}')
-  done
-
-  # Ad-hoc sign touched binaries (Gatekeeper-friendly for local CI).
   if command -v codesign >/dev/null 2>&1; then
     find "$stage" -type f \( -name 'mariadbd' -o -name 'httpd' -o -name 'nginx' \
       -o -name 'memcached' -o -name 'redis-server' -o -name 'php' -o -name 'php-fpm' \) \
-      -exec codesign -s - --force {} \; 2>/dev/null || true
+      -exec codesign -s - --force --deep {} \; 2>/dev/null || true
+    find "$stage/lib-bundled" -type f -exec codesign -s - --force {} \; 2>/dev/null || true
   fi
 }
 
@@ -134,70 +184,26 @@ assert_no_brew_deps() {
   esac
 }
 
-# ---------- PHP: prefer static-php-cli; fallback to relocated brew php@8.4 ----------
-build_php_spc() {
-  # spc needs pkg-config on PATH (Homebrew pkgconf).
-  if command -v brew >/dev/null 2>&1; then
-    brew install pkgconf || true
-    export PATH="$(brew --prefix pkgconf 2>/dev/null)/bin:$(brew --prefix)/bin:$PATH"
-  fi
-  command -v pkg-config >/dev/null 2>&1 || command -v pkgconf >/dev/null 2>&1 || {
-    echo "pkg-config/pkgconf missing" >&2
-    return 1
-  }
-
-  local spc_tgz="https://github.com/crazywhalecc/static-php-cli/releases/latest/download/spc-macos-${SPC_ARCH}.tar.gz"
-  echo "Downloading spc from $spc_tgz"
-  curl -fsSL -o spc.tar.gz "$spc_tgz"
-  rm -rf spc-bin && mkdir spc-bin
-  tar -xzf spc.tar.gz -C spc-bin
-  local spc
-  spc="$(find spc-bin -type f -name 'spc' | head -1)"
-  [[ -n "$spc" ]] || { echo "spc binary missing from archive" >&2; return 1; }
-  chmod +x "$spc"
-
-  if ! "$spc" download --with-php="${PHP_VERSION}" --for-extensions="${SPC_EXTS}"; then
-    local channel
-    channel="$(echo "$PHP_VERSION" | cut -d. -f1-2)"
-    "$spc" download --with-php="${channel}" --for-extensions="${SPC_EXTS}"
-  fi
-  "$spc" build --build-cli --build-fpm "${SPC_EXTS}"
-
-  local prefix="$OUT/staging/php-prefix"
-  rm -rf "$prefix"
-  mkdir -p "$prefix/bin" "$prefix/sbin"
-  local php_bin fpm_bin
-  php_bin="$(find . -type f -name php ! -path './spc-bin/*' ! -path './php-prefix/*' | head -1 || true)"
-  fpm_bin="$(find . -type f -name php-fpm ! -path './php-prefix/*' | head -1 || true)"
-  if [[ -z "$php_bin" || -z "$fpm_bin" ]]; then
-    echo "spc did not emit php/php-fpm" >&2
-    return 1
-  fi
-  cp "$php_bin" "$prefix/bin/php"
-  cp "$fpm_bin" "$prefix/sbin/php-fpm"
-  chmod 755 "$prefix/bin/php" "$prefix/sbin/php-fpm"
-  PHP_VERSION="$("$prefix/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || echo "$PHP_VERSION")"
-  if ! "$prefix/bin/php" -m 2>/dev/null | grep -qi mysqli; then
-    echo "FAIL: spc PHP missing mysqli" >&2
-    return 1
-  fi
-  pack_dir "php-${PHP_VERSION}" "$prefix"
-}
-
-build_php_brew() {
+# ---------- PHP via relocated Homebrew php@8.4 (includes mysqli + php-fpm) ----------
+# static-php-cli is flaky on GHA (403 mirrors / pkg-config). Brew cellar + recursive
+# dylib bundling is the reliable path for one-click installs without Homebrew on the user Mac.
+build_php() {
   if ! command -v brew >/dev/null 2>&1; then
-    echo "brew required for PHP fallback" >&2
+    echo "brew required to build PHP package" >&2
     return 1
   fi
-  # Prefer php@8.4 for smoke; fall back to latest php formula.
   local formula="php@8.4"
-  brew install "$formula" || formula="php"
-  brew install "$formula" || true
+  brew install "$formula" || { formula="php"; brew install "$formula"; }
   local prefix
   prefix="$(brew --prefix "$formula")"
+  # Prove the source formula has mysqli before we relocate.
+  if ! "$prefix/bin/php" -m 2>/dev/null | grep -qi mysqli; then
+    echo "FAIL: brew $formula missing mysqli before relocate" >&2
+    "$prefix/bin/php" -m >&2 || true
+    return 1
+  fi
   local stage="$OUT/staging/php-brew-prefix"
   relocate_prefix "$prefix" "$stage"
-  # Ensure bin/php and sbin/php-fpm (or bin/php-fpm) exist.
   mkdir -p "$stage/bin" "$stage/sbin"
   if [[ ! -x "$stage/bin/php" ]]; then
     local found
@@ -213,25 +219,18 @@ build_php_brew() {
     fi
   fi
   [[ -x "$stage/bin/php" ]] || { echo "php binary missing after brew relocate" >&2; return 1; }
-  PHP_VERSION="$("$stage/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || echo "8.4.0")"
+  # Relocated binary must actually run and expose mysqli.
   if ! "$stage/bin/php" -m 2>/dev/null | grep -qi mysqli; then
-    echo "FAIL: brew PHP missing mysqli" >&2
+    echo "FAIL: relocated PHP cannot load mysqli (dylib bundling incomplete?)" >&2
+    otool -L "$stage/bin/php" | head -40 >&2 || true
     "$stage/bin/php" -m >&2 || true
     return 1
   fi
-  # Soft-check brew deps — relocate may leave some; assert_no_brew_deps is ideal.
+  PHP_VERSION="$("$stage/bin/php" -r 'echo PHP_VERSION;')"
   assert_no_brew_deps "$stage/bin/php" || {
-    echo "warning: php still has brew dylib refs after relocate; continuing" >&2
+    echo "warning: php still has brew dylib refs after relocate" >&2
   }
   pack_dir "php-${PHP_VERSION}" "$stage"
-}
-
-build_php() {
-  if build_php_spc; then
-    return 0
-  fi
-  echo "spc PHP build failed — falling back to relocated Homebrew php@8.4 (real mysqli)" >&2
-  build_php_brew
 }
 
 # ---------- Real MariaDB (brew formula relocated — not MySQL) ----------
