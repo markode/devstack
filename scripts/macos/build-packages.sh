@@ -318,6 +318,33 @@ for path in collect_machos():
 print(f"relocate done after {rounds} rounds; bundled={len(list(bundled.iterdir()))}")
 PY
 
+  # Drop absolute / dangling symlinks left by the Homebrew cellar (e.g. pecl →
+  # /opt/homebrew/lib/php/pecl). Those break install on machines without brew.
+  python3 - "$stage" <<'PY'
+import os, sys
+from pathlib import Path
+stage = Path(sys.argv[1])
+removed = 0
+for root, dirs, files in os.walk(stage, followlinks=False):
+    for name in files + dirs:
+        p = Path(root) / name
+        if not p.is_symlink():
+            continue
+        try:
+            target = os.readlink(p)
+        except OSError:
+            continue
+        abs_target = target.startswith("/")
+        dangling = not p.exists()
+        if abs_target or dangling:
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+print(f"stripped {removed} absolute/dangling symlinks from {stage}")
+PY
+
   if command -v codesign >/dev/null 2>&1; then
     find "$stage" -type f \( -name 'mariadbd' -o -name 'httpd' -o -name 'nginx' \
       -o -name 'memcached' -o -name 'redis-server' -o -name 'php' -o -name 'php-fpm' \) \
