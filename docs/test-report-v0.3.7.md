@@ -7,9 +7,11 @@ stop the macOS CI smoke from masking that gap with `brew install`.
 
 ## Changes
 
-- **PHP (macOS/Linux):** baked `packages-macos-v1` manifest + static-php.dev
-  cli+fpm auto-discovery; install merges both binaries; no more null-URL stubs.
-  Windows NTS zip extract path restored (regression fix).
+- **PHP (macOS/Linux):** baked `packages-macos-v1` manifest; relocatable Homebrew
+  `php@8.4` cellar packaging with recursive dylib bundling (`@loader_path` and
+  `@rpath`, including ICU/brotli). Manifest builds are authoritative over
+  static-php.dev so listed installs include `php-fpm`. Windows NTS zip extract
+  path restored (regression fix).
 - **MariaDB (macOS):** **real MariaDB** (`mariadbd`) from CI-built relocatable
   packages (`packages-macos-v1` / smoke local build). MariaDB.org no longer ships
   macOS binaries. **MySQL Community is not used as a MariaDB substitute.**
@@ -21,9 +23,10 @@ stop the macOS CI smoke from masking that gap with `brew install`.
 - **Hosts + CA:** first Start uses one elevated `hosts-and-trust-ca` helper
   prompt on macOS/Linux.
 - **CI:** `packages-macos.yml` builds/publishes relocatable tarballs on
-  `macos-latest`; `macos-smoke.yml` downloads or builds packages, hides Homebrew
-  from PATH, installs PHP/MariaDB/Nginx/Apache through the app (`--macos-managed`),
-  fails if any of those packages lacks a download URL.
+  `macos-latest`; `macos-smoke.yml` builds or downloads packages, builds the
+  smoke binary, hides Homebrew from PATH, installs PHP/MariaDB/Nginx/Apache
+  through the app (`--macos-managed`), fails if any of those packages lacks a
+  download URL.
 
 ## MariaDB on macOS (explicit)
 
@@ -37,20 +40,20 @@ The package tree is produced by installing the Homebrew `mariadb` formula on the
 *builder*, copying the cellar, and rewriting Mach-O deps to `@loader_path` so
 end users do not need Homebrew. The installed binary is still MariaDB Server.
 
-## Verification
+## Verification (PR #32 / `cursor/macos-packages-0-3-7-b7b6`)
 
-| Check | Result |
-| --- | --- |
-| `cargo test --lib` | pass (local agent) |
-| Windows HTTPS smoke | see CI |
-| macOS smoke (managed, brew hidden, real MariaDB) | see CI |
-| Windows ×2 + macOS ×2 release assets | published with `v0.3.7` |
+| Check | Result | Run |
+| --- | --- | --- |
+| packages-macos `build (macos-latest, aarch64)` | **pass** | [43220557285](https://github.com/markode/devstack/actions/runs/43220557285) |
+| macOS smoke (managed, brew hidden, real MariaDB, `.test:8080`) | **pass** | [43220557289](https://github.com/markode/devstack/actions/runs/43220557289) |
+| Windows HTTPS smoke | **pass** | [43220557283](https://github.com/markode/devstack/actions/runs/43220557283) |
+| Windows ×2 + macOS ×2 release assets | published with `v0.3.7` after tag | — |
 
 ## Notes
 
-- PHP 7.4 appears only when an artifact exists (static-php.dev currently starts
-  at 8.0; packages workflow can add older channels later).
+- PHP 7.4 appears only when an artifact exists (packages workflow can add older
+  channels later; current default package is Homebrew `php@8.4`).
 - `packages-macos-v1` must be published (workflow on `main`) before a clean Mac
   can install without the smoke local HTTP server.
-- Intel (`macos-13`) package builds are best-effort (`continue-on-error`); arm64
-  (`macos-latest`) is required.
+- Intel (`macos-13`) package builds were dropped from the required matrix (runner
+  queue hang); arm64 (`macos-latest`) is required and ships first.
