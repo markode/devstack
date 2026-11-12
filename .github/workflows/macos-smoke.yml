@@ -105,12 +105,15 @@ jobs:
             esac
             if [[ -z "$NEW_PATH" ]]; then NEW_PATH="$p"; else NEW_PATH="$NEW_PATH:$p"; fi
           done
-          # Keep a clean PATH that still has /usr/bin for basics.
-          echo "PATH=/usr/bin:/bin:/usr/sbin:/sbin:${NEW_PATH}" >> "$GITHUB_ENV"
+          # Apply in this step AND for subsequent steps. GITHUB_ENV alone only
+          # affects later steps, so a command -v brew check would still see brew.
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${NEW_PATH}"
+          echo "PATH=$PATH" >> "$GITHUB_ENV"
           echo "HOMEBREW_HIDDEN=1" >> "$GITHUB_ENV"
           hash -r || true
           if command -v brew >/dev/null 2>&1; then
-            echo "FAIL: brew still on PATH after hide" >&2
+            echo "FAIL: brew still on PATH after hide (at $(command -v brew))" >&2
+            echo "PATH=$PATH" >&2
             exit 1
           fi
           if command -v php >/dev/null 2>&1; then
