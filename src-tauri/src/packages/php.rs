@@ -413,14 +413,24 @@ impl PackageProvider for PhpProvider {
                         }
                     }
                 }
-                let fallback = match self.list_static_php().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("[php] static-php discovery failed: {e}");
-                        Vec::new()
-                    }
+                // packages-macos-v1 (or DEVSTACK_PHP_MANIFEST_URL) is authoritative
+                // when it lists builds. Merging static-php.dev on top lets a newer
+                // cli-only channel (e.g. 8.5) win over our relocatable brew tree
+                // that ships php-fpm — which breaks macOS managed smoke/E2E.
+                let merged = if !primary.is_empty() {
+                    let mut v = primary;
+                    v.sort_by(|a, b| cmp_ver(&b.version, &a.version));
+                    v
+                } else {
+                    let fallback = match self.list_static_php().await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("[php] static-php discovery failed: {e}");
+                            Vec::new()
+                        }
+                    };
+                    Self::merge_prefer_urls(Vec::new(), fallback)
                 };
-                let merged = Self::merge_prefer_urls(primary, fallback);
                 if merged.is_empty() {
                     return Err(DevStackError::Message(
                         "No PHP downloads available for this platform (packages manifest and static-php.dev both empty)."

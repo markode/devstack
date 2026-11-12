@@ -231,13 +231,18 @@ async fn ensure_stack(ctx: &DevStackCtx, skip_mariadb: bool) -> Result<(), Box<d
         let state = ctx.state.lock().await;
         !state.installed.contains_key("php")
     } {
-        let ver = match pick_version(ctx, "php", |v| {
-            v.starts_with("8.3") || v.starts_with("8.4") || v.starts_with("8.")
-        })
-        .await
-        {
+        // Prefer 8.4 (packages-macos brew tree) then 8.3; avoid bare "8." which
+        // can pick a static-php 8.5 cli build that has no php-fpm beside it.
+        let ver = match pick_version(ctx, "php", |v| v.starts_with("8.4")).await {
             Ok(v) => Ok(v),
-            Err(_) => pick_version(ctx, "php", |_| true).await,
+            Err(_) => match pick_version(ctx, "php", |v| {
+                v.starts_with("8.3") || v.starts_with("8.2") || v.starts_with("8.")
+            })
+            .await
+            {
+                Ok(v) => Ok(v),
+                Err(_) => pick_version(ctx, "php", |_| true).await,
+            },
         };
         match ver {
             Ok(v) => {
