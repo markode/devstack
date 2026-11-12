@@ -1,0 +1,134 @@
+# Build and publish relocatable macOS package tarballs (PHP/MariaDB/Nginx/Apache/…).
+# Tag packages-macos-v1 is updated in place so the app's baked DEFAULT_COMBINED_MANIFEST_URL
+# keeps working without a code bump.
+name: packages-macos
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/macos/**"
+      - ".github/workflows/packages-macos.yml"
+  pull_request:
+    paths:
+      - "scripts/macos/**"
+      - ".github/workflows/packages-macos.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: aarch64
+          - os: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          set -euo pipefail
+          brew update
+          brew install openssl@3 pcre2 wget curl || true
+
+      - name: Build packages
+        env:
+          OUT: ${{ runner.temp }}/macos-packages
+        run: |
+          set -euo pipefail
+          chmod +x scripts/macos/build-packages.sh
+          # PHP build via spc can be heavy; allow fallback inside the script.
+          TARGETS=php,mariadb,nginx,httpd,memcached,redis \
+            ./scripts/macos/build-packages.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-packages-${{ matrix.arch }}
+          path: ${{ runner.temp }}/macos-packages/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download arm64 + x64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/packages
+          pattern: macos-packages-*
+          merge-multiple: true
+
+      - name: Merge manifests and publish packages-macos-v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, json, os
+          pkgs = []
+          for path in glob.glob("dist/packages/**/manifest.json", recursive=True) + glob.glob("dist/packages/manifest.json"):
+              data = json.load(open(path))
+              pkgs.extend(data.get("packages") or [])
+          # Also invent entries from bare tarballs if manifests were overwritten
+          base = "https://github.com/markode/devstack/releases/download/packages-macos-v1"
+          seen = {(p.get("url"), p.get("arch")) for p in pkgs}
+          for tar in glob.glob("dist/packages/*.tar.gz"):
+              name = os.path.basename(tar)
+              # php-8.4.23-macos-aarch64.tar.gz
+              if "-macos-" not in name:
+                  continue
+              stem, _, arch_part = name.rpartition("-macos-")
+              arch = arch_part.replace(".tar.gz", "")
+              kind, ver = stem.split("-", 1)
+              id_map = {"httpd": "apache", "php": "php", "nginx": "nginx",
+                        "mariadb": "mariadb", "memcached": "memcached", "redis": "redis"}
+              url = f"{base}/{name}"
+              if (url, arch) in seen:
+                  continue
+              import hashlib
+              sha = hashlib.sha256(open(tar, "rb").read()).hexdigest()
+              pkgs.append({
+                  "id": id_map.get(kind, kind),
+                  "version": ver,
+                  "channel": ".".join(ver.split(".")[:2]),
+                  "os": "macos",
+                  "arch": arch,
+                  "url": url,
+                  "sha256": sha,
+                  "notes": "DevStack packages-macos-v1 prebuilt",
+              })
+              seen.add((url, arch))
+          # De-dupe by id/version/arch
+          uniq = {}
+          for p in pkgs:
+              key = (p["id"], p["version"], p["arch"])
+              uniq[key] = p
+          pkgs = list(uniq.values())
+          os.makedirs("dist/packages", exist_ok=True)
+          open("dist/packages/manifest.json", "w").write(json.dumps({"schema_version": 1, "packages": pkgs}, indent=2) + "\n")
+          print(f"merged {len(pkgs)} package rows")
+          PY
+          # Ensure release tag exists, then upload/clobber assets.
+          if ! gh release view packages-macos-v1 >/dev/null 2>&1; then
+            gh release create packages-macos-v1 \
+              --title "macOS packages v1" \
+              --notes "Prebuilt DevStack packages for macOS (arm64 + x86_64). Consumed by DEFAULT_COMBINED_MANIFEST_URL." \
+              --target "$GITHUB_SHA"
+          fi
+          # Upload every tarball + manifest
+          shopt -s nullglob
+          assets=(dist/packages/*.tar.gz dist/packages/manifest.json)
+          gh release upload packages-macos-v1 "${assets[@]}" --clobber

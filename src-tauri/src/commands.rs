@@ -92,7 +92,10 @@ pub async fn get_app_info(ctx: State<'_, Arc<AppCtx>>) -> Result<AppInfo> {
         php_manifest_url: state
             .php_manifest_url
             .clone()
-            .or_else(|| std::env::var("DEVSTACK_PHP_MANIFEST_URL").ok()),
+            .or_else(|| std::env::var("DEVSTACK_PHP_MANIFEST_URL").ok())
+            .or_else(|| {
+                Some(crate::packages::DEFAULT_COMBINED_MANIFEST_URL.to_string())
+            }),
         stack: stack_status(&state),
         developer: state.developer.clone(),
     })

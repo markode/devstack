@@ -1,10 +1,19 @@
 //! MariaDB — versions from downloads.mariadb.org REST API + full binary install.
+//!
+//! MariaDB.org no longer publishes macOS binaries. On macOS we prefer the baked
+//! `packages-macos-v1` manifest, then fall back to official MySQL Community
+//! Server tarballs from cdn.mysql.com (mysqld is accepted by DevStack's DB
+//! layer via `server_bin`).
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
+use std::path::Path;
 
+use super::macos_defaults::{
+    arch_aliases, os_aliases, DEFAULT_COMBINED_MANIFEST_URL,
+};
 use super::{
     default_uninstall, now_iso, InstalledPackage, PackageInfo, PackageProvider, PackageVersion,
 };
@@ -14,8 +23,19 @@ use crate::downloads::{
     ProgressFn,
 };
 use crate::error::{DevStackError, Result};
+use crate::services::process::find_bin;
 
 const MAJOR_URL: &str = "https://downloads.mariadb.org/rest-api/mariadb/";
+
+/// Curated MySQL Community builds used as the macOS MariaDB-slot fallback.
+const MACOS_MYSQL_FALLBACK: &[(&str, &str, &str)] = &[
+    // version, major channel folder, macos label
+    ("9.5.0", "9.5", "macos15"),
+    ("9.4.0", "9.4", "macos15"),
+    ("8.4.13", "8.4", "macos15"),
+    ("8.4.11", "8.4", "macos15"),
+    ("8.0.45", "8.0", "macos15"),
+];
 
 #[derive(Clone)]
 pub struct MariaDbProvider {
@@ -37,6 +57,123 @@ struct MajorRelease {
 impl MariaDbProvider {
     pub fn new(client: reqwest::Client) -> Self {
         Self { client }
+    }
+
+    fn manifest_url(_state: &AppState) -> Option<String> {
+        std::env::var("DEVSTACK_MARIADB_MANIFEST_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some(DEFAULT_COMBINED_MANIFEST_URL.to_string()))
+    }
+
+    async fn list_manifest(&self, url: &str) -> Result<Vec<PackageVersion>> {
+        #[derive(Deserialize)]
+        struct Manifest {
+            packages: Vec<ManPkg>,
+        }
+        #[derive(Deserialize)]
+        struct ManPkg {
+            #[serde(default)]
+            id: Option<String>,
+            version: String,
+            channel: Option<String>,
+            os: Option<String>,
+            arch: Option<String>,
+            url: String,
+            sha256: Option<String>,
+            notes: Option<String>,
+        }
+        let m: Manifest = self
+            .client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let os = current_os();
+        Ok(m.packages
+            .into_iter()
+            .filter(|p| {
+                p.id
+                    .as_deref()
+                    .map(|id| id.eq_ignore_ascii_case("mariadb"))
+                    .unwrap_or(false)
+                    && p.os
+                        .as_deref()
+                        .map(|o| os_aliases(o, os))
+                        .unwrap_or(true)
+                    && p.arch.as_deref().map(arch_aliases).unwrap_or(true)
+            })
+            .map(|p| PackageVersion {
+                channel: p.channel.unwrap_or_else(|| {
+                    p.version.split('.').take(2).collect::<Vec<_>>().join(".")
+                }),
+                label: p.version.clone(),
+                version: p.version,
+                lts: true,
+                download_url: Some(p.url),
+                sha256: p.sha256,
+                notes: p.notes,
+            })
+            .collect())
+    }
+
+    fn macos_mysql_fallback() -> Vec<PackageVersion> {
+        let arch = match current_arch() {
+            "arm64" => "arm64",
+            _ => "x86_64",
+        };
+        MACOS_MYSQL_FALLBACK
+            .iter()
+            .map(|(version, major, label)| {
+                let url = format!(
+                    "https://cdn.mysql.com/Downloads/MySQL-{major}/mysql-{version}-{label}-{arch}.tar.gz"
+                );
+                PackageVersion {
+                    label: format!("{version} (MySQL Community · macOS)"),
+                    version: (*version).to_string(),
+                    channel: (*major).to_string(),
+                    lts: major == &"8.4" || major == &"8.0",
+                    download_url: Some(url),
+                    sha256: None,
+                    notes: Some(
+                        "MariaDB.org no longer ships macOS binaries — installing MySQL Community Server (mysqld) into the MariaDB slot"
+                            .into(),
+                    ),
+                }
+            })
+            .collect()
+    }
+
+    fn flatten_db_tree(dest: &Path) -> Result<()> {
+        if find_bin(dest, &["mariadbd", "mysqld", "mysqld.exe", "mariadbd.exe"]).is_some() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(dest)?.flatten() {
+            let p = entry.path();
+            if p.is_dir()
+                && find_bin(&p, &["mariadbd", "mysqld", "mysqld.exe", "mariadbd.exe"]).is_some()
+            {
+                for child in fs::read_dir(&p)?.flatten() {
+                    let from = child.path();
+                    let name = from.file_name().unwrap();
+                    let to = dest.join(name);
+                    if !to.exists() {
+                        let _ = fs::rename(&from, &to);
+                    }
+                }
+                let _ = fs::remove_dir_all(&p);
+                break;
+            }
+        }
+        if find_bin(dest, &["mariadbd", "mysqld", "mysqld.exe", "mariadbd.exe"]).is_none() {
+            return Err(DevStackError::Message(format!(
+                "mysqld/mariadbd not found after extract in {}",
+                dest.display()
+            )));
+        }
+        Ok(())
     }
 
     fn prefer_file(files: &[Value]) -> Option<(String, Option<String>, String)> {
@@ -125,7 +262,23 @@ impl PackageProvider for MariaDbProvider {
         }
     }
 
-    async fn list_versions(&self, _state: &AppState) -> Result<Vec<PackageVersion>> {
+    async fn list_versions(&self, state: &AppState) -> Result<Vec<PackageVersion>> {
+        if let Some(url) = Self::manifest_url(state) {
+            if let Ok(listed) = self.list_manifest(&url).await {
+                if !listed.is_empty() {
+                    return Ok(listed);
+                }
+            }
+        }
+
+        if current_os() == "macos" {
+            // MariaDB.org dropped macOS artifacts — use MySQL Community CDN.
+            let fb = Self::macos_mysql_fallback();
+            if fb.iter().all(|v| v.download_url.is_some()) {
+                return Ok(fb);
+            }
+        }
+
         let majors: MajorResponse = self
             .client
             .get(MAJOR_URL)
@@ -161,10 +314,16 @@ impl PackageProvider for MariaDbProvider {
             if let Some(pkg) = package_from_major_detail(&major, &detail, |files| {
                 Self::prefer_file(files)
             }) {
-                out.push(pkg);
+                // Skip rows with no URL — they render as "cannot be installed".
+                if pkg.download_url.is_some() {
+                    out.push(pkg);
+                }
             }
         }
         if out.is_empty() {
+            if current_os() == "macos" {
+                return Ok(Self::macos_mysql_fallback());
+            }
             return Err(DevStackError::Message(
                 "No MariaDB versions available (downloads.mariadb.org returned no usable releases)"
                     .into(),
@@ -214,7 +373,14 @@ impl PackageProvider for MariaDbProvider {
         crate::config::remove_dir_if_exists(&dest)?;
         fs::create_dir_all(&dest)?;
         let kind = ArchiveKind::from_name(&file_name)?;
-        extract_archive(&archive, &dest, kind, 1)?;
+        // Official trees nest under one top folder; relocated packages may not.
+        extract_archive(&archive, &dest, kind, 0)?;
+        if find_bin(&dest, &["mariadbd", "mysqld", "mysqld.exe", "mariadbd.exe"]).is_none() {
+            // Retry mental model: strip 1 by flattening first child dir.
+            Self::flatten_db_tree(&dest)?;
+        } else {
+            let _ = Self::flatten_db_tree(&dest);
+        }
         let _ = fs::remove_file(&archive);
 
         let record = InstalledRecord {

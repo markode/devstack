@@ -1,6 +1,7 @@
 //! Generic package providers (PHP, Node, databases, phpMyAdmin, …).
 
 mod apache;
+mod macos_defaults;
 mod mailpit;
 mod mariadb;
 mod mongodb;
@@ -13,6 +14,8 @@ mod postgresql;
 mod redis;
 pub mod service_bins;
 pub mod version_cache;
+
+pub use macos_defaults::{DEFAULT_COMBINED_MANIFEST_URL, PACKAGES_RELEASE_TAG};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
