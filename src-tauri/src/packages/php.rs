@@ -332,11 +332,14 @@ fn place_binaries_from_extract(staging: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest.join("bin"))?;
     fs::create_dir_all(dest.join("sbin"))?;
 
-    // Already a proper tree?
-    if dest.join("bin/php").exists() || staging.join("bin/php").exists() {
-        if staging.join("bin").exists() {
-            copy_tree(staging, dest)?;
+    // Already a proper tree (packages-macos brew prefix)? Prefer rename/move so we
+    // never fs::copy through dangling absolute Homebrew symlinks (e.g. pecl →
+    // /opt/homebrew/lib/php/pecl) which fail with os error 2 on clean Macs.
+    if staging.join("bin/php").exists() {
+        if staging == dest {
+            return Ok(());
         }
+        move_tree(staging, dest)?;
         return Ok(());
     }
 
@@ -369,12 +372,78 @@ fn place_binaries_from_extract(staging: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Move a directory tree without following symlinks (preserves link targets).
+fn move_tree(from: &Path, to: &Path) -> Result<()> {
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        let meta = fs::symlink_metadata(&src)?;
+        if meta.file_type().is_symlink() {
+            // Drop absolute Homebrew leftovers; relative package links are kept.
+            #[cfg(unix)]
+            {
+                let target = fs::read_link(&src)?;
+                if target.is_absolute() {
+                    let _ = fs::remove_file(&src);
+                    continue;
+                }
+                if dst.exists() {
+                    let _ = fs::remove_file(&dst);
+                }
+                std::os::unix::fs::symlink(&target, &dst)?;
+                let _ = fs::remove_file(&src);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = fs::remove_file(&src);
+            }
+        } else if meta.is_dir() {
+            fs::create_dir_all(&dst)?;
+            move_tree(&src, &dst)?;
+            let _ = fs::remove_dir_all(&src);
+        } else {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            // rename across same filesystem; fall back to copy+delete.
+            if fs::rename(&src, &dst).is_err() {
+                fs::copy(&src, &dst)?;
+                let _ = fs::remove_file(&src);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         let src = entry.path();
         let dst = to.join(entry.file_name());
-        if src.is_dir() {
+        let meta = match fs::symlink_metadata(&src) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            #[cfg(unix)]
+            {
+                let target = match fs::read_link(&src) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                // Never materialize absolute brew paths into the install tree.
+                if target.is_absolute() {
+                    continue;
+                }
+                if dst.exists() {
+                    let _ = fs::remove_file(&dst);
+                }
+                let _ = std::os::unix::fs::symlink(&target, &dst);
+            }
+            continue;
+        }
+        if meta.is_dir() {
             fs::create_dir_all(&dst)?;
             copy_tree(&src, &dst)?;
         } else {
@@ -508,7 +577,13 @@ impl PackageProvider for PhpProvider {
             extract_archive(&archive_path, &dest, kind, 0)?;
             let _ = fs::remove_file(&archive_path);
         } else {
-            let staging = dest.join(".extract-cli");
+            // Extract to a sibling staging dir (not under dest) so move_tree can
+            // populate dest without copying through dangling Homebrew symlinks.
+            let staging = dest
+                .parent()
+                .map(|p| p.join(format!(".php-extract-{}", meta.version)))
+                .unwrap_or_else(|| dest.join(".extract-cli"));
+            let _ = fs::remove_dir_all(&staging);
             fs::create_dir_all(&staging)?;
             extract_archive(&archive_path, &staging, kind, 0)?;
             place_binaries_from_extract(&staging, &dest)?;
@@ -662,5 +737,29 @@ mod tests {
         let u = companion_fpm_url(&meta).unwrap();
         assert!(u.contains("-fpm-"));
         assert!(u.contains("8.4.23"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_tree_drops_absolute_brew_symlinks() {
+        let tmp = std::env::temp_dir().join(format!(
+            "devstack-php-move-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let staging = tmp.join("staging");
+        let dest = tmp.join("dest");
+        fs::create_dir_all(staging.join("bin")).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(staging.join("bin/php"), b"#!/bin/sh\n").unwrap();
+        std::os::unix::fs::symlink("/opt/homebrew/lib/php/pecl", staging.join("pecl")).unwrap();
+        std::os::unix::fs::symlink("bin/php", staging.join("php-link")).unwrap();
+
+        move_tree(&staging, &dest).unwrap();
+
+        assert!(dest.join("bin/php").is_file());
+        assert!(!dest.join("pecl").exists());
+        assert!(dest.join("php-link").symlink_metadata().unwrap().file_type().is_symlink());
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
