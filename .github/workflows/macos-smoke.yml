@@ -92,6 +92,20 @@ jobs:
           chmod +x scripts/macos/ensure-packages-for-smoke.sh scripts/macos/build-packages.sh
           ./scripts/macos/ensure-packages-for-smoke.sh
 
+      # Build the smoke binary while cargo/brew toolchains are still on PATH.
+      # Homebrew is hidden only for the E2E *run* so installs cannot use brew php.
+      - name: Build devstack_smoke (before hiding Homebrew)
+        working-directory: src-tauri
+        timeout-minutes: 20
+        env:
+          LZMA_API_STATIC: "1"
+          LIBZ_SYS_STATIC: "1"
+          OPENSSL_STATIC: "1"
+        run: |
+          set -euo pipefail
+          cargo build --bin devstack_smoke --release
+          test -x ./target/release/devstack_smoke
+
       - name: Hide Homebrew binaries from PATH
         run: |
           set -euo pipefail
@@ -136,5 +150,5 @@ jobs:
           # Manifest URLs were exported by ensure-packages-for-smoke.sh
           test -n "${DEVSTACK_PHP_MANIFEST_URL:-}"
           test -n "${DEVSTACK_APACHE_MANIFEST_URL:-}"
-          cargo build --bin devstack_smoke --release
+          test -x ./target/release/devstack_smoke
           ./target/release/devstack_smoke --e2e --macos-managed
