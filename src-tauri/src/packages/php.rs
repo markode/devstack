@@ -493,23 +493,19 @@ impl PackageProvider for PhpProvider {
         fs::create_dir_all(&dest)?;
 
         let kind = ArchiveKind::from_name(&file_name)?;
-        let staging = dest.join(".extract-cli");
-        fs::create_dir_all(&staging)?;
-        // Windows ZIP at root (strip 0); multi-file trees strip 1; single-file strip 0.
-        let strip = match kind {
-            ArchiveKind::Zip => 0,
-            _ => {
-                // Peek: if archive has a single top-level file, strip 0.
-                0
-            }
-        };
-        extract_archive(&archive_path, &staging, kind, strip)?;
-        place_binaries_from_extract(&staging, &dest)?;
-        let _ = fs::remove_dir_all(&staging);
-        let _ = fs::remove_file(&archive_path);
+        if current_os() == "windows" || matches!(kind, ArchiveKind::Zip) {
+            // Windows NTS zip has php.exe at archive root — extract straight into dest.
+            extract_archive(&archive_path, &dest, kind, 0)?;
+            let _ = fs::remove_file(&archive_path);
+        } else {
+            let staging = dest.join(".extract-cli");
+            fs::create_dir_all(&staging)?;
+            extract_archive(&archive_path, &staging, kind, 0)?;
+            place_binaries_from_extract(&staging, &dest)?;
+            let _ = fs::remove_dir_all(&staging);
+            let _ = fs::remove_file(&archive_path);
 
-        // Companion FPM archive (static-php splits cli/fpm).
-        if current_os() != "windows" {
+            // Companion FPM archive (static-php splits cli/fpm).
             if let Some(fpm) = fpm_url {
                 if fpm != url {
                     let fpm_name = fpm.rsplit('/').next().unwrap_or("php-fpm.tgz").to_string();
@@ -536,37 +532,37 @@ impl PackageProvider for PhpProvider {
                             let _ = fs::remove_file(&fpm_path);
                         }
                         Err(e) => {
-                            eprintln!("[php] companion fpm download failed ({e}); continuing with cli only");
+                            eprintln!(
+                                "[php] companion fpm download failed ({e}); continuing with cli only"
+                            );
                         }
                     }
                 }
             }
-        }
 
-        // Flatten common `php-<ver>/` prefix trees into dest.
-        if !dest.join("bin/php").exists() && !dest.join("php").exists() {
-            if let Ok(entries) = fs::read_dir(&dest) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_dir() && (p.join("bin/php").exists() || p.join("php").exists()) {
-                        place_binaries_from_extract(&p, &dest)?;
-                        // Move remaining tree up
-                        copy_tree(&p, &dest)?;
-                        let _ = fs::remove_dir_all(&p);
-                        break;
+            // Flatten common `php-<ver>/` prefix trees into dest.
+            if !dest.join("bin/php").exists() && !dest.join("php").exists() {
+                if let Ok(entries) = fs::read_dir(&dest) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_dir() && (p.join("bin/php").exists() || p.join("php").exists()) {
+                            place_binaries_from_extract(&p, &dest)?;
+                            copy_tree(&p, &dest)?;
+                            let _ = fs::remove_dir_all(&p);
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        // Ensure bin/php exists (some trees put php at root).
-        if !dest.join("bin/php").exists() && dest.join("php").is_file() {
-            fs::create_dir_all(dest.join("bin"))?;
-            fs::rename(dest.join("php"), dest.join("bin/php"))?;
-        }
-        if !dest.join("sbin/php-fpm").exists() && dest.join("php-fpm").is_file() {
-            fs::create_dir_all(dest.join("sbin"))?;
-            fs::rename(dest.join("php-fpm"), dest.join("sbin/php-fpm"))?;
+            if !dest.join("bin/php").exists() && dest.join("php").is_file() {
+                fs::create_dir_all(dest.join("bin"))?;
+                fs::rename(dest.join("php"), dest.join("bin/php"))?;
+            }
+            if !dest.join("sbin/php-fpm").exists() && dest.join("php-fpm").is_file() {
+                fs::create_dir_all(dest.join("sbin"))?;
+                fs::rename(dest.join("php-fpm"), dest.join("sbin/php-fpm"))?;
+            }
         }
 
         if crate::services::process::find_bin(&dest, &["php", "php.exe"]).is_none() {

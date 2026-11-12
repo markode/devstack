@@ -1,9 +1,9 @@
 //! MariaDB — versions from downloads.mariadb.org REST API + full binary install.
 //!
-//! MariaDB.org no longer publishes macOS binaries. On macOS we prefer the baked
-//! `packages-macos-v1` manifest, then fall back to official MySQL Community
-//! Server tarballs from cdn.mysql.com (mysqld is accepted by DevStack's DB
-//! layer via `server_bin`).
+//! MariaDB.org no longer publishes macOS binaries. On macOS/Linux the baked
+//! `packages-macos-v1` manifest (CI-built relocatable MariaDB trees) is required
+//! for one-click install — we do **not** substitute MySQL Community into the
+//! MariaDB slot.
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -26,16 +26,6 @@ use crate::error::{DevStackError, Result};
 use crate::services::process::find_bin;
 
 const MAJOR_URL: &str = "https://downloads.mariadb.org/rest-api/mariadb/";
-
-/// Curated MySQL Community builds used as the macOS MariaDB-slot fallback.
-const MACOS_MYSQL_FALLBACK: &[(&str, &str, &str)] = &[
-    // version, major channel folder, macos label
-    ("9.5.0", "9.5", "macos15"),
-    ("9.4.0", "9.4", "macos15"),
-    ("8.4.13", "8.4", "macos15"),
-    ("8.4.11", "8.4", "macos15"),
-    ("8.0.45", "8.0", "macos15"),
-];
 
 #[derive(Clone)]
 pub struct MariaDbProvider {
@@ -117,33 +107,6 @@ impl MariaDbProvider {
                 notes: p.notes,
             })
             .collect())
-    }
-
-    fn macos_mysql_fallback() -> Vec<PackageVersion> {
-        let arch = match current_arch() {
-            "arm64" => "arm64",
-            _ => "x86_64",
-        };
-        MACOS_MYSQL_FALLBACK
-            .iter()
-            .map(|(version, major, label)| {
-                let url = format!(
-                    "https://cdn.mysql.com/Downloads/MySQL-{major}/mysql-{version}-{label}-{arch}.tar.gz"
-                );
-                PackageVersion {
-                    label: format!("{version} (MySQL Community · macOS)"),
-                    version: (*version).to_string(),
-                    channel: (*major).to_string(),
-                    lts: major == &"8.4" || major == &"8.0",
-                    download_url: Some(url),
-                    sha256: None,
-                    notes: Some(
-                        "MariaDB.org no longer ships macOS binaries — installing MySQL Community Server (mysqld) into the MariaDB slot"
-                            .into(),
-                    ),
-                }
-            })
-            .collect()
     }
 
     fn flatten_db_tree(dest: &Path) -> Result<()> {
@@ -264,19 +227,26 @@ impl PackageProvider for MariaDbProvider {
 
     async fn list_versions(&self, state: &AppState) -> Result<Vec<PackageVersion>> {
         if let Some(url) = Self::manifest_url(state) {
-            if let Ok(listed) = self.list_manifest(&url).await {
-                if !listed.is_empty() {
-                    return Ok(listed);
+            match self.list_manifest(&url).await {
+                Ok(listed) if !listed.is_empty() => return Ok(listed),
+                Ok(_) => {
+                    eprintln!("[mariadb] manifest {url} returned no packages for this OS/arch");
+                }
+                Err(e) => {
+                    eprintln!("[mariadb] manifest {url} unavailable ({e})");
                 }
             }
         }
 
+        // MariaDB.org dropped macOS artifacts — without packages-macos-v1 there
+        // is no legitimate one-click MariaDB for macOS (we refuse MySQL substitutes).
         if current_os() == "macos" {
-            // MariaDB.org dropped macOS artifacts — use MySQL Community CDN.
-            let fb = Self::macos_mysql_fallback();
-            if fb.iter().all(|v| v.download_url.is_some()) {
-                return Ok(fb);
-            }
+            return Err(DevStackError::Message(
+                "No MariaDB macOS packages available. MariaDB.org no longer ships macOS \
+                 binaries — install via the DevStack packages-macos-v1 release (or set \
+                 DEVSTACK_MARIADB_MANIFEST_URL to a manifest that includes real mariadbd trees)."
+                    .into(),
+            ));
         }
 
         let majors: MajorResponse = self
@@ -321,9 +291,6 @@ impl PackageProvider for MariaDbProvider {
             }
         }
         if out.is_empty() {
-            if current_os() == "macos" {
-                return Ok(Self::macos_mysql_fallback());
-            }
             return Err(DevStackError::Message(
                 "No MariaDB versions available (downloads.mariadb.org returned no usable releases)"
                     .into(),

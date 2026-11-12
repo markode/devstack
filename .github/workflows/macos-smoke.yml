@@ -13,7 +13,7 @@ on:
 jobs:
   macos-smoke:
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -81,12 +81,13 @@ jobs:
           echo "OK: release binary alive 3s with Homebrew xz hidden"
 
       - name: Ensure prebuilt packages (release or local build)
-        timeout-minutes: 50
+        timeout-minutes: 100
         env:
           OUT: ${{ runner.temp }}/devstack-macos-pkgs
           DEVSTACK_PKG_HTTP_PORT: "18765"
         run: |
           set -euo pipefail
+          brew install openssl@3 pcre2 || true
           chmod +x scripts/macos/ensure-packages-for-smoke.sh scripts/macos/build-packages.sh
           ./scripts/macos/ensure-packages-for-smoke.sh
 

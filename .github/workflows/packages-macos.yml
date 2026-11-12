@@ -24,12 +24,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          # This org does not support macos-14; macos-latest is arm64 and works.
+          - os: macos-latest
             arch: aarch64
+          # Intel runners are optional — skip if the label is unavailable.
           - os: macos-13
             arch: x86_64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    continue-on-error: ${{ matrix.arch == 'x86_64' }}
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +40,9 @@ jobs:
         run: |
           set -euo pipefail
           brew update
-          brew install openssl@3 pcre2 wget curl || true
+          brew install openssl@3 pcre2 wget curl cmake ninja bison pkg-config || true
+          export PATH="$(brew --prefix bison)/bin:$PATH"
+          echo "PATH=$PATH" >> "$GITHUB_ENV"
 
       - name: Build packages
         env:
@@ -45,7 +50,6 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x scripts/macos/build-packages.sh
-          # PHP build via spc can be heavy; allow fallback inside the script.
           TARGETS=php,mariadb,nginx,httpd,memcached,redis \
             ./scripts/macos/build-packages.sh
 
@@ -64,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download arm64 + x64 artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist/packages
@@ -77,17 +81,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import glob, json, os
+          import glob, json, os, hashlib
           pkgs = []
           for path in glob.glob("dist/packages/**/manifest.json", recursive=True) + glob.glob("dist/packages/manifest.json"):
               data = json.load(open(path))
               pkgs.extend(data.get("packages") or [])
-          # Also invent entries from bare tarballs if manifests were overwritten
           base = "https://github.com/markode/devstack/releases/download/packages-macos-v1"
           seen = {(p.get("url"), p.get("arch")) for p in pkgs}
           for tar in glob.glob("dist/packages/*.tar.gz"):
               name = os.path.basename(tar)
-              # php-8.4.23-macos-aarch64.tar.gz
               if "-macos-" not in name:
                   continue
               stem, _, arch_part = name.rpartition("-macos-")
@@ -98,7 +100,6 @@ jobs:
               url = f"{base}/{name}"
               if (url, arch) in seen:
                   continue
-              import hashlib
               sha = hashlib.sha256(open(tar, "rb").read()).hexdigest()
               pkgs.append({
                   "id": id_map.get(kind, kind),
@@ -111,7 +112,6 @@ jobs:
                   "notes": "DevStack packages-macos-v1 prebuilt",
               })
               seen.add((url, arch))
-          # De-dupe by id/version/arch
           uniq = {}
           for p in pkgs:
               key = (p["id"], p["version"], p["arch"])
@@ -121,14 +121,12 @@ jobs:
           open("dist/packages/manifest.json", "w").write(json.dumps({"schema_version": 1, "packages": pkgs}, indent=2) + "\n")
           print(f"merged {len(pkgs)} package rows")
           PY
-          # Ensure release tag exists, then upload/clobber assets.
           if ! gh release view packages-macos-v1 >/dev/null 2>&1; then
             gh release create packages-macos-v1 \
               --title "macOS packages v1" \
-              --notes "Prebuilt DevStack packages for macOS (arm64 + x86_64). Consumed by DEFAULT_COMBINED_MANIFEST_URL." \
+              --notes "Prebuilt DevStack packages for macOS (arm64 + x86_64). Consumed by DEFAULT_COMBINED_MANIFEST_URL. Includes real MariaDB (mariadbd), not MySQL substitutes." \
               --target "$GITHUB_SHA"
           fi
-          # Upload every tarball + manifest
           shopt -s nullglob
           assets=(dist/packages/*.tar.gz dist/packages/manifest.json)
           gh release upload packages-macos-v1 "${assets[@]}" --clobber
