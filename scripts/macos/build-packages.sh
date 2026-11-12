@@ -318,7 +318,7 @@ for path in collect_machos():
 print(f"relocate done after {rounds} rounds; bundled={len(list(bundled.iterdir()))}")
 PY
 
-  # Drop absolute / dangling symlinks left by the Homebrew cellar (e.g. pecl →
+  # Drop absolute / dangling symlinks left by the Homebrew cellar (example: pecl →
   # /opt/homebrew/lib/php/pecl). Those break install on machines without brew.
   python3 - "$stage" <<'PY'
 import os, sys
